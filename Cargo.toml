@@ -1,0 +1,34 @@
+[package]
+name = "iroh-endpoint-tracker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Addr → EndpointId directory: join Mainline get_peers contacts to iroh identities"
+license = "MIT OR Apache-2.0"
+authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
+keywords = ["iroh", "p2p", "dht", "mainline", "discovery"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive", "env"] }
+iroh = "1.1"
+postcard = { version = "1", features = ["alloc", "use-std"] }
+serde = { version = "1", features = ["derive"] }
+sha1_smol = "1"
+smallvec = { version = "1", features = ["serde"] }
+tokio = { version = "1", features = ["sync", "macros", "rt", "rt-multi-thread", "signal", "time", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+iroh-blobs = "0.103"
+n0-future = "0.3"
+n0-mainline = { path = "../n0-mainline" }
+tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "iroh-endpoint-tracker"
+path = "src/bin/iroh-endpoint-tracker.rs"
