@@ -1,21 +1,17 @@
 //! Discover a real iroh-blobs provider through Mainline and the endpoint
-//! tracker, then download its blob.
-
-mod publisher;
-mod resolver;
+//! address index, then download its blob.
 
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use iroh::{endpoint::presets, protocol::Router};
+use iroh_addr_index::{Limits, Server};
 use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
-use iroh_endpoint_tracker::{Directory, Limits, Server, infohash_from_blake3};
+use iroh_mainline_endpoint_discovery::{Directory, Publisher, Resolver, infohash_from_blake3};
 use n0_mainline::{Dht, Id};
-use publisher::Publisher;
-use resolver::Resolver;
 use tokio::io::AsyncReadExt;
 
-const DATA: &[u8] = b"hello from iroh-endpoint-tracker\n";
+const DATA: &[u8] = b"hello from iroh-mainline-endpoint-discovery\n";
 const RESOLVE_BUDGET: Duration = Duration::from_secs(60);
 
 #[tokio::main]
@@ -23,7 +19,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,iroh_endpoint_tracker=trace")
+                tracing_subscriber::EnvFilter::new("info,iroh_addr_index=trace")
             }),
         )
         .init();
@@ -51,16 +47,10 @@ async fn main() -> Result<()> {
     if !dht.bootstrapped().await? {
         bail!("DHT bootstrap failed");
     }
-    let tracker = Directory::udp(directory_udp.local_addr()).await?;
-    let publisher = Publisher::bind(
-        provider_ep.clone(),
-        dht.clone(),
-        tracker.clone(),
-        [iroh_blobs::ALPN],
-    )
-    .await?;
-    publisher.add_infohash(infohash);
-    let resolver = Resolver::bind(dht, tracker).await?;
+    let index = Directory::udp(directory_udp.local_addr()).await?;
+    let publisher = Publisher::bind(provider_ep.clone(), dht.clone(), index.clone()).await?;
+    publisher.add_infohash(infohash, iroh_blobs::ALPN)?;
+    let resolver = Resolver::bind(dht, index).await?;
 
     println!("blob {blob_hash}");
     println!("provider {}", provider_ep.id());

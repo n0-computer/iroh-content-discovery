@@ -3,7 +3,7 @@
 use std::{
     net::{IpAddr, SocketAddrV4},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use iroh::{
@@ -11,13 +11,11 @@ use iroh::{
     endpoint::{ConnectOptions, Connection},
     protocol::{AcceptError, ProtocolHandler},
 };
+use iroh_addr_index_proto::{Alpn, SignedRecord};
 use tokio::task::JoinSet;
 use tracing::{debug, trace};
 
-use crate::{
-    record::{Alpn, SignedRecord, unix_secs},
-    store::{Limits, PublishError, RateLimiters, Store},
-};
+use crate::store::{Limits, PublishError, RateLimiters, Store};
 
 /// Dedicated mapping-probe ALPN. Handshake success is enough; no payload.
 pub const PROBE_ALPN: &[u8] = b"/iroh-addr-index/probe/0";
@@ -270,4 +268,11 @@ impl Default for Server {
     fn default() -> Self {
         Self::new(Limits::default())
     }
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }

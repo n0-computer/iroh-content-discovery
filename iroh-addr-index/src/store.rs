@@ -8,9 +8,8 @@ use std::{
 };
 
 use iroh::EndpointId;
+use iroh_addr_index_proto::{Index, RecordLimits, SignedRecord, VerifyError};
 use serde::{Deserialize, Serialize};
-
-use crate::record::{Index, SignedRecord, VerifyError};
 
 const MAX_RATE_LIMIT_BUCKETS: usize = 65_536;
 
@@ -283,7 +282,14 @@ impl Store {
         now: u64,
         limits: &Limits,
     ) -> Result<(), PublishError> {
-        record.verify_at(now, limits)?;
+        record.verify_at(
+            now,
+            RecordLimits {
+                max_addrs: limits.max_addrs,
+                max_alpns: limits.max_alpns,
+                clock_skew_secs: limits.clock_skew_secs,
+            },
+        )?;
         if !record.index.contains(&Index::Reverse) {
             return Err(PublishError::IndexNotAllowed);
         }

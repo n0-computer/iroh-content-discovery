@@ -10,20 +10,16 @@
 //! cargo run --example spoof -- <blake3-hex|infohash-hex>…
 //! ```
 
-mod publisher;
-mod resolver;
-
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use iroh::{SecretKey, endpoint::presets, protocol::Router};
-use iroh_endpoint_tracker::{
-    DEFAULT_PROBE_TIMEOUT, Directory, Limits, PROBE_ALPN, ProbeAccept, Server, SignedRecord,
-    infohash_from_blake3, parse_infohash,
+use iroh_addr_index::{DEFAULT_PROBE_TIMEOUT, Limits, PROBE_ALPN, ProbeAccept, Server};
+use iroh_addr_index_proto::SignedRecord;
+use iroh_mainline_endpoint_discovery::{
+    Directory, Publisher, Resolver, infohash_from_blake3, parse_infohash,
 };
 use n0_mainline::{Dht, Id};
-use publisher::Publisher;
-use resolver::Resolver;
 
 /// Pause after the publisher is live before the resolver looks the hash up.
 const RESOLVE_DELAY: Duration = Duration::from_secs(5);
@@ -35,7 +31,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,iroh_endpoint_tracker=trace")
+                tracing_subscriber::EnvFilter::new("info,iroh_addr_index=trace")
             }),
         )
         .init();
@@ -61,7 +57,7 @@ async fn main() -> Result<()> {
     let publisher_router = Router::builder(publisher_ep.clone())
         .accept(PROBE_ALPN, ProbeAccept)
         .spawn();
-    let blob_hash = blake3::hash(b"iroh-endpoint-tracker demo blob\n");
+    let blob_hash = blake3::hash(b"iroh-mainline-endpoint-discovery demo blob\n");
     let blob_infohash = Id::from(infohash_from_blake3(&blob_hash));
     infohashes.push(blob_infohash);
     println!("blob {blob_hash} infohash {blob_infohash}");
@@ -74,18 +70,13 @@ async fn main() -> Result<()> {
     if !dht.bootstrapped().await? {
         bail!("DHT bootstrap failed");
     }
-    let tracker = Directory::udp(directory_udp.local_addr()).await?;
+    let index = Directory::udp(directory_udp.local_addr()).await?;
     let (publisher, resolver) = tokio::try_join!(
-        Publisher::bind(
-            publisher_ep.clone(),
-            dht.clone(),
-            tracker.clone(),
-            [PROBE_ALPN]
-        ),
-        Resolver::bind(dht, tracker),
+        Publisher::bind(publisher_ep.clone(), dht.clone(), index.clone()),
+        Resolver::bind(dht, index),
     )?;
     for infohash in infohashes {
-        publisher.add_infohash(infohash);
+        publisher.add_infohash(infohash, PROBE_ALPN)?;
     }
     println!("publisher {}", publisher.id());
 

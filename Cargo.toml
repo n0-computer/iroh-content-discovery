@@ -1,20 +1,27 @@
-[package]
-name = "iroh-endpoint-tracker"
+[workspace]
+members = [
+    "iroh-addr-index-proto",
+    "iroh-addr-index",
+    "iroh-mainline-endpoint-discovery",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "Addr → EndpointId directory: join Mainline get_peers contacts to iroh identities"
 license = "MIT OR Apache-2.0"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
-keywords = ["iroh", "p2p", "dht", "mainline", "discovery"]
-categories = ["network-programming"]
-readme = "README.md"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 iroh = "1.1"
+iroh-base = { version = "1.1", features = ["key"] }
+iroh-blobs = "0.103"
+n0-future = "0.3"
+n0-mainline = { version = "0.6", path = "../n0-mainline" }
 postcard = { version = "1", features = ["alloc", "use-std"] }
 serde = { version = "1", features = ["derive"] }
 sha1_smol = "1"
@@ -23,12 +30,8 @@ tokio = { version = "1", features = ["sync", "macros", "rt", "rt-multi-thread", 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[dev-dependencies]
-iroh-blobs = "0.103"
-n0-future = "0.3"
-n0-mainline = { path = "../n0-mainline" }
-tokio = { version = "1", features = ["full"] }
+[workspace.lints.rust]
+missing_docs = "deny"
 
-[[bin]]
-name = "iroh-endpoint-tracker"
-path = "src/bin/iroh-endpoint-tracker.rs"
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"

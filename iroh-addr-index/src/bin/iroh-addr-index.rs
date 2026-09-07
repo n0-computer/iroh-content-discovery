@@ -3,22 +3,23 @@
 use std::{
     net::{SocketAddr, SocketAddrV4},
     path::PathBuf,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use iroh::{SecretKey, endpoint::presets};
-use iroh_endpoint_tracker::{
-    Directory, Limits, MAX_ALPN_LEN, Server, SignedRecord, UdpClient, infohash_hex, parse_infohash,
+use iroh_addr_index::{Limits, Server};
+use iroh_addr_index_proto::{
+    MAX_ALPN_LEN, MAX_DGRAM, Request, RequestV1, Response, ResponseV1, SignedRecord,
 };
-use tokio::signal;
+use tokio::{net::UdpSocket, signal};
 use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "iroh-endpoint-tracker",
-    about = "Addr → EndpointId directory: join Mainline get_peers contacts to iroh identities"
+    name = "iroh-addr-index",
+    about = "Verified SocketAddrV4 → iroh EndpointId index"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -171,8 +172,7 @@ async fn publish(args: PublishArgs) -> Result<()> {
     let infohash = parse_infohash(&args.hash)?;
     let alpns = publish_alpns(&args.alpns)?;
     let rec = SignedRecord::sign(&secret, vec![args.dht_addr], alpns);
-    let dir = Directory::udp(args.udp).await?;
-    dir.publish(rec.clone()).await?;
+    udp_publish(args.udp, &rec).await?;
     println!("published eid {}", rec.eid);
     println!("addrs: {:?}", rec.addrs);
     println!(
@@ -191,14 +191,10 @@ async fn publish(args: PublishArgs) -> Result<()> {
 }
 
 async fn lookup(args: LookupArgs) -> Result<()> {
-    let res = UdpClient::bind()
-        .await?
-        .resolve_from(args.udp, args.addr)
-        .await?;
-    if res.truncated {
+    let (hits, truncated) = udp_resolve(args.udp, args.addr).await?;
+    if truncated {
         eprintln!("warning: UDP resolve truncated to one MTU");
     }
-    let hits = res.records;
     if hits.is_empty() {
         bail!("no live eids for {}", args.addr);
     }
@@ -207,14 +203,13 @@ async fn lookup(args: LookupArgs) -> Result<()> {
 }
 
 async fn find(args: FindArgs) -> Result<()> {
-    let client = UdpClient::bind().await?;
     let mut hits = Vec::new();
     for peer in args.peers {
-        let res = client.resolve_from(args.udp, peer).await?;
-        if res.truncated {
+        let (records, truncated) = udp_resolve(args.udp, peer).await?;
+        if truncated {
             eprintln!("warning: UDP resolve truncated for {peer}");
         }
-        hits.extend(res.records);
+        hits.extend(records);
     }
     if hits.is_empty() {
         bail!("no directory hits");
@@ -223,7 +218,7 @@ async fn find(args: FindArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_hits(hits: &[iroh_endpoint_tracker::SignedRecord]) {
+fn print_hits(hits: &[SignedRecord]) {
     for h in hits {
         println!("{}  ts={}  index={:?}", h.eid, h.ts, h.index);
         println!("  addrs: {:?}", h.addrs);
@@ -236,4 +231,79 @@ fn print_hits(hits: &[iroh_endpoint_tracker::SignedRecord]) {
         );
         println!("  (probe a BLAKE3 chunk before caching hash → eid)");
     }
+}
+
+async fn udp_publish(replica: SocketAddr, record: &SignedRecord) -> Result<()> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let request = Request::V1(RequestV1::Publish(record.clone()));
+    let mut buf = [0; MAX_DGRAM];
+    let bytes = postcard::to_slice(&request, &mut buf)?;
+    socket.send_to(bytes, replica).await?;
+    Ok(())
+}
+
+async fn udp_resolve(replica: SocketAddr, addr: SocketAddrV4) -> Result<(Vec<SignedRecord>, bool)> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let request = Request::V1(RequestV1::Resolve(addr));
+    let mut buf = [0; MAX_DGRAM];
+    let bytes = postcard::to_slice(&request, &mut buf)?;
+    socket.send_to(bytes, replica).await?;
+
+    let mut buf = [0; MAX_DGRAM];
+    let (n, from) = tokio::time::timeout(Duration::from_millis(500), socket.recv_from(&mut buf))
+        .await
+        .map_err(|_| anyhow::anyhow!("UDP lookup timed out"))??;
+    if from != replica {
+        bail!("UDP reply came from unexpected replica {from}");
+    }
+    let Response::V1(ResponseV1::Resolve {
+        addr: echoed,
+        hosts,
+        truncated,
+    }) = postcard::from_bytes(&buf[..n])?;
+    if echoed != addr {
+        bail!("UDP reply was for unexpected address {echoed}");
+    }
+    let hosts = hosts
+        .into_iter()
+        .filter(|record| record.verify_sig().is_ok() && record.covers_addr(addr))
+        .collect();
+    Ok((hosts, truncated))
+}
+
+fn parse_infohash(value: &str) -> Result<[u8; 20]> {
+    let value = value.trim();
+    let bytes = match value.len() {
+        40 => decode_hex::<20>(value)?,
+        64 => {
+            let hash = decode_hex::<32>(value)?;
+            sha1_smol::Sha1::from(hash.as_slice()).digest().bytes()
+        }
+        _ => bail!("expected 40-char infohash hex or 64-char BLAKE3 hex"),
+    };
+    Ok(bytes)
+}
+
+fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
+    if value.len() != N * 2 {
+        bail!("invalid hash length");
+    }
+    let mut out = [0; N];
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        out[index] = (from_hex(pair[0])? << 4) | from_hex(pair[1])?;
+    }
+    Ok(out)
+}
+
+fn from_hex(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => bail!("invalid hexadecimal hash"),
+    }
+}
+
+fn infohash_hex(id: &[u8; 20]) -> String {
+    id.iter().map(|byte| format!("{byte:02x}")).collect()
 }

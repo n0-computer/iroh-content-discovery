@@ -3,10 +3,9 @@
 use std::time::Duration;
 
 use iroh::{SecretKey, endpoint::presets, protocol::Router};
-use iroh_endpoint_tracker::{
-    Limits, PROBE_ALPN, ProbeAccept, Server, SignedRecord, UdpClient, confirm_records,
-    confirm_socket,
-};
+use iroh_addr_index::{Limits, PROBE_ALPN, ProbeAccept, Server, confirm_records, confirm_socket};
+use iroh_addr_index_proto::SignedRecord;
+use iroh_mainline_endpoint_discovery::UdpClient;
 
 const PING_ALPN: &[u8] = b"iroh/ping/0";
 
@@ -91,7 +90,7 @@ async fn concurrent_udp_resolves_for_same_addr_both_complete() {
         .await
         .unwrap();
     let client = UdpClient::bind().await.unwrap();
-    client.add_tracker(udp.local_addr()).await.unwrap();
+    client.add_replica(udp.local_addr()).await.unwrap();
 
     let mapping = "127.0.0.1:6881".parse().unwrap();
     let rec = SignedRecord::sign(&SecretKey::generate(), vec![mapping], [b"test/0"]);

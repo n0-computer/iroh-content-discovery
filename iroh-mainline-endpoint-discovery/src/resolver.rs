@@ -8,10 +8,11 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use iroh::EndpointId;
-use iroh_endpoint_tracker::Directory;
 use n0_future::StreamExt;
 use n0_mainline::{Dht, Id};
 use tokio::task::JoinSet;
+
+use crate::Directory;
 
 /// Looks up who announced a Mainline infohash.
 pub struct Resolver {
@@ -20,7 +21,7 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    /// Use the supplied shared Mainline node and tracker directory.
+    /// Use the supplied shared Mainline node and address-index directory.
     pub async fn bind(dht: Dht, dir: Directory) -> Result<Self> {
         Ok(Self { dht, dir })
     }

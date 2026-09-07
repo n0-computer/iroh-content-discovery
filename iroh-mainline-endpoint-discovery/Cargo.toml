@@ -1,0 +1,33 @@
+[package]
+name = "iroh-mainline-endpoint-discovery"
+description = "Publish and discover iroh endpoints through Mainline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["iroh", "p2p", "dht", "mainline", "discovery"]
+categories = ["network-programming"]
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+iroh.workspace = true
+iroh-addr-index-proto = { version = "0.1.0", path = "../iroh-addr-index-proto" }
+n0-future.workspace = true
+n0-mainline.workspace = true
+postcard.workspace = true
+serde.workspace = true
+sha1_smol.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+iroh-addr-index = { version = "0.1.0", path = "../iroh-addr-index" }
+iroh-blobs.workspace = true
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

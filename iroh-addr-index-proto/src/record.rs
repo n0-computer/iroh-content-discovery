@@ -6,11 +6,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use iroh::{EndpointAddr, EndpointId, SecretKey, Signature};
+use iroh_base::{EndpointAddr, EndpointId, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-
-use crate::store::Limits;
 
 /// TLS ALPN protocol names are 1..=255 octets.
 pub const MAX_ALPN_LEN: usize = 255;
@@ -117,6 +115,27 @@ pub enum VerifyError {
     NotYetValid,
 }
 
+/// Replica policy applied in addition to signature and field validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordLimits {
+    /// Maximum addresses in one record.
+    pub max_addrs: usize,
+    /// Maximum ALPNs in one record.
+    pub max_alpns: usize,
+    /// How far a record timestamp may be in the future.
+    pub clock_skew_secs: u64,
+}
+
+impl Default for RecordLimits {
+    fn default() -> Self {
+        Self {
+            max_addrs: 16,
+            max_alpns: 8,
+            clock_skew_secs: 60,
+        }
+    }
+}
+
 impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -203,7 +222,7 @@ impl SignedRecord {
     }
 
     /// [`Self::verify_sig`] plus timestamp and replica-cap checks.
-    pub fn verify_at(&self, now: u64, limits: &Limits) -> Result<(), VerifyError> {
+    pub fn verify_at(&self, now: u64, limits: RecordLimits) -> Result<(), VerifyError> {
         self.verify_sig()?;
         if self.addrs.len() > limits.max_addrs {
             return Err(VerifyError::TooManyAddrs);
@@ -222,7 +241,7 @@ impl SignedRecord {
         self.addrs.contains(&addr)
     }
 
-    /// Addressing info a finder can pass to [`iroh::Endpoint::connect`].
+    /// Addressing info a finder can pass to `iroh::Endpoint::connect`.
     pub fn endpoint_addr(&self) -> EndpointAddr {
         let mut addr = EndpointAddr::new(self.eid);
         for sa in &self.addrs {
@@ -282,6 +301,7 @@ fn payload_bytes(payload: &RecordPayload) -> Vec<u8> {
     postcard::to_stdvec(payload).expect("publish payload")
 }
 
+/// Current Unix timestamp in seconds, saturating to zero before the epoch.
 pub(crate) fn unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -305,7 +325,7 @@ mod tests {
         let addr: SocketAddrV4 = "1.2.3.4:6881".parse().unwrap();
         let rec = sign(&sk, addr);
         rec.verify_sig().unwrap();
-        rec.verify_at(rec.ts, &Limits::default()).unwrap();
+        rec.verify_at(rec.ts, RecordLimits::default()).unwrap();
         assert!(rec.covers_addr(addr));
         assert_eq!(rec.eid, sk.public());
         assert_eq!(rec.alpns[0].as_slice(), TEST_ALPN);
@@ -394,12 +414,14 @@ mod tests {
             alpns,
         );
         rec.verify_sig().unwrap();
-        let limits = Limits {
-            max_alpns: 2,
-            ..Limits::for_tests()
-        };
         assert_eq!(
-            rec.verify_at(rec.ts, &limits),
+            rec.verify_at(
+                rec.ts,
+                RecordLimits {
+                    max_alpns: 2,
+                    ..RecordLimits::default()
+                }
+            ),
             Err(VerifyError::TooManyAlpns)
         );
     }

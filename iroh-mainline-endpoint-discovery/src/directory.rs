@@ -2,7 +2,9 @@
 
 use std::net::{SocketAddr, SocketAddrV4};
 
-use crate::{SignedRecord, UdpClient, UdpError};
+use iroh_addr_index_proto::SignedRecord;
+
+use crate::{UdpClient, UdpError};
 
 /// UDP client for one or more directory replicas.
 #[derive(Debug, Clone)]
@@ -10,9 +12,9 @@ pub struct Directory(UdpClient);
 
 impl Directory {
     /// Bind an ephemeral UDP socket and add one replica.
-    pub async fn udp(tracker: SocketAddr) -> Result<Self, UdpError> {
+    pub async fn udp(replica: SocketAddr) -> Result<Self, UdpError> {
         let client = UdpClient::bind().await?;
-        client.add_tracker(tracker).await?;
+        client.add_replica(replica).await?;
         Ok(Self(client))
     }
 
