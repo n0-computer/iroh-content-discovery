@@ -1,18 +1,16 @@
 [package]
 name = "iroh-addr-index-proto"
-description = "Wire protocol and signed records for the iroh address index"
+description = "Wire protocol for an opaque UDP address index"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-readme = "../README.md"
+readme = "README.md"
 
 [dependencies]
-iroh-base.workspace = true
 postcard.workspace = true
 serde.workspace = true
-smallvec.workspace = true
 
 [lints]
 workspace = true

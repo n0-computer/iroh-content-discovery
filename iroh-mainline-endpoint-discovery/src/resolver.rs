@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use iroh::EndpointId;
+use iroh_base::EndpointId;
 use n0_future::StreamExt;
 use n0_mainline::{Dht, Id};
 use tokio::task::JoinSet;
@@ -29,7 +29,8 @@ impl Resolver {
     /// `get_peers` for `infohash`, then directory-resolve each compact peer.
     ///
     /// Unique eids, sorted. Empty if the DHT has no peers or none of them are
-    /// in the directory. Does not probe sockets.
+    /// in the directory. Returned endpoint IDs are dialed through normal iroh
+    /// discovery, not through the DHT address.
     pub async fn resolve(&self, infohash: Id) -> Result<Vec<EndpointId>> {
         let mut stream = self.dht.get_peers(infohash).await.context("get_peers")?;
         let mut peers = HashSet::new();

@@ -1,232 +1,195 @@
-//! End-to-end: UDP and mapping probes.
+//! End-to-end tests for the opaque UDP protocol.
 
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
-use iroh::{SecretKey, endpoint::presets, protocol::Router};
-use iroh_addr_index::{Limits, PROBE_ALPN, ProbeAccept, Server, confirm_records, confirm_socket};
-use iroh_addr_index_proto::SignedRecord;
-use iroh_mainline_endpoint_discovery::UdpClient;
-
-const PING_ALPN: &[u8] = b"iroh/ping/0";
-
-async fn listening() -> (Router, iroh::Endpoint, std::net::SocketAddrV4) {
-    let ep = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
-    let router = Router::builder(ep.clone())
-        .accept(PROBE_ALPN, ProbeAccept)
-        .spawn();
-    let addr = router
-        .endpoint()
-        .addr()
-        .ip_addrs()
-        .find_map(|a| match a {
-            std::net::SocketAddr::V4(addr) => Some(*addr),
-            _ => None,
-        })
-        .expect("bound ipv4");
-    (router, ep, addr)
-}
+use iroh_addr_index::{Limits, Server};
+use iroh_addr_index_proto::{MAX_DGRAM, Request, RequestV1, Response, ResponseV1};
+use iroh_base::SecretKey;
+use iroh_mainline_endpoint_discovery::{Directory, SignedRecord, UdpClient};
+use n0_mainline::Dht;
+use tokio::net::UdpSocket;
 
 #[tokio::test]
-async fn udp_publish_resolve() {
+async fn publish_and_resolve_opaque_bytes() {
     let server = Server::new(Limits::for_tests());
-    let udp = server
+    let handle = server
         .bind_udp("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    let dir = udp.local_addr();
-    let client = UdpClient::bind().await.unwrap();
+    let dht = test_dht();
+    let client = UdpClient::attach(dht.clone()).await.unwrap();
+    client.add_replica(v4(handle.local_addr())).await.unwrap();
 
-    let sk = SecretKey::generate();
-    let mapping: std::net::SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
-    let rec = SignedRecord::sign(&sk, vec![mapping], [b"test/0"]);
-    client.publish_to(dir, rec).await.unwrap();
-
-    let res = client.resolve_from(dir, mapping).await.unwrap();
-    assert!(!res.truncated);
-    assert_eq!(res.records.len(), 1);
-    assert_eq!(res.records[0].eid, sk.public());
+    let value = b"not a signed record".to_vec();
+    let addrs = client.publish(value.clone()).await.unwrap();
+    assert_eq!(addrs.len(), 1);
+    assert!(addrs[0].ip().is_loopback());
+    assert_eq!(
+        addrs[0].port(),
+        dht.info().await.unwrap().local_addr().port()
+    );
+    assert_eq!(client.resolve(addrs[0]).await.unwrap().values, [value]);
 }
 
 #[tokio::test]
-async fn udp_source_verification_is_configurable() {
-    let mapping = "203.0.113.9:6881".parse().unwrap();
-    let record = SignedRecord::sign(&SecretKey::generate(), vec![mapping], [b"test/0"]);
+async fn put_token_is_bound_to_exact_udp_socket_but_get_is_public() {
+    let server = Server::new(Limits::for_tests());
+    let handle = server
+        .bind_udp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let owner = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let attacker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-    let checked = Server::new(Limits {
-        verify_udp_source_ip: true,
-        ..Limits::for_tests()
+    let prepare = Request::V1(RequestV1::Prepare {
+        tx: 1,
+        padding: [0; 24],
     });
-    let checked_udp = checked
-        .bind_udp("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let client = UdpClient::bind().await.unwrap();
-    client
-        .publish_to(checked_udp.local_addr(), record.clone())
-        .await
-        .unwrap();
-    assert!(client.resolve(mapping).await.unwrap().records.is_empty());
+    send(&owner, handle.local_addr(), &prepare).await;
+    let Response::V1(ResponseV1::Prepared { addr, token, .. }) = recv(&owner).await else {
+        panic!("unexpected prepare response")
+    };
 
-    let unchecked = Server::new(Limits {
-        verify_udp_source_ip: false,
-        ..Limits::for_tests()
+    let stolen = Request::V1(RequestV1::Put {
+        tx: 2,
+        token,
+        value: b"stolen".to_vec(),
     });
-    let unchecked_udp = unchecked
-        .bind_udp("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    client
-        .publish_to(unchecked_udp.local_addr(), record)
-        .await
-        .unwrap();
-    assert_eq!(client.resolve(mapping).await.unwrap().records.len(), 1);
-}
-
-#[tokio::test]
-async fn concurrent_udp_resolves_for_same_addr_both_complete() {
-    let server = Server::new(Limits::for_tests());
-    let udp = server
-        .bind_udp("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let client = UdpClient::bind().await.unwrap();
-    client.add_replica(udp.local_addr()).await.unwrap();
-
-    let mapping = "127.0.0.1:6881".parse().unwrap();
-    let rec = SignedRecord::sign(&SecretKey::generate(), vec![mapping], [b"test/0"]);
-    client.publish(rec).await.unwrap();
-
-    let (a, b) = tokio::join!(client.resolve(mapping), client.resolve(mapping));
-    assert_eq!(a.unwrap().records.len(), 1);
-    assert_eq!(b.unwrap().records.len(), 1);
-}
-
-#[tokio::test]
-async fn invalid_contended_publish_does_not_evict() {
-    let server = Server::new(Limits::for_tests());
-    let probe = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
-    server.set_probe(probe);
-
-    let mapping = "203.0.113.9:6881".parse().unwrap();
-    let original = SignedRecord::sign(&SecretKey::generate(), vec![mapping], [b"test/0"]);
-    server.publish_local(original.clone()).unwrap();
-
-    let mut invalid = SignedRecord::sign(&SecretKey::generate(), vec![mapping], [b"test/0"]);
-    invalid.payload.v1_mut().alpns[0] = b"tampered/0".as_slice().into();
-    assert!(server.publish_confirmed_local(invalid).await.is_err());
-
-    let rows = server.lookup_local(mapping);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].eid, original.eid);
-}
-
-#[tokio::test]
-async fn udp_rejects_bad_sig() {
-    let server = Server::new(Limits::for_tests());
-    let udp = server
-        .bind_udp("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let client = UdpClient::bind().await.unwrap();
-    let mut rec = SignedRecord::sign(
-        &SecretKey::generate(),
-        vec!["127.0.0.1:1".parse().unwrap()],
-        [b"test/0"],
-    );
-    rec.payload.v1_mut().addrs[0] = "127.0.0.1:2".parse().unwrap();
-    client.publish_to(udp.local_addr(), rec).await.unwrap();
-    let res = client
-        .resolve_from(udp.local_addr(), "127.0.0.1:2".parse().unwrap())
-        .await
-        .unwrap();
-    assert!(res.records.is_empty());
-}
-
-#[tokio::test]
-async fn probe_accepts_real_host() {
-    let (router, ep, addr) = listening().await;
-    let probe = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+    send(&attacker, handle.local_addr(), &stolen).await;
     assert!(
-        confirm_socket(&probe, ep.id(), addr, [PROBE_ALPN], Duration::from_secs(3)).await,
-        "owner of {addr} should complete probe"
+        tokio::time::timeout(Duration::from_millis(50), recv(&attacker))
+            .await
+            .is_err(),
+        "invalid put must not be acknowledged"
     );
-    router.shutdown().await.unwrap();
+    assert!(server.get_local(addr).is_none());
+
+    let valid = Request::V1(RequestV1::Put {
+        tx: 4,
+        token,
+        value: b"owned".to_vec(),
+    });
+    send(&owner, handle.local_addr(), &valid).await;
+    let Response::V1(ResponseV1::Stored { addr: stored, .. }) = recv(&owner).await else {
+        panic!("unexpected put response")
+    };
+    assert_eq!(stored, addr);
+    assert_eq!(server.get_local(addr).unwrap(), b"owned");
+
+    let public_get = Request::V1(RequestV1::Get { tx: 5, addr });
+    send(&attacker, handle.local_addr(), &public_get).await;
+    let Response::V1(ResponseV1::Value {
+        addr: returned,
+        value,
+        ..
+    }) = recv(&attacker).await
+    else {
+        panic!("unexpected get response")
+    };
+    assert_eq!(returned, addr);
+    assert_eq!(value.unwrap(), b"owned");
 }
 
 #[tokio::test]
-async fn probe_rejects_foreign_eid_on_known_socket() {
-    let (router_a, ep_a, addr_a) = listening().await;
-    let (router_b, ep_b, _) = listening().await;
-    let probe = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
-
+async fn get_requires_full_sized_datagram() {
+    let server = Server::new(Limits::for_tests());
+    let handle = server
+        .bind_udp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let reader = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = "203.0.113.1:1234".parse().unwrap();
+    let value = vec![42; iroh_addr_index_proto::MAX_VALUE_LEN];
+    server.put_local(addr, value.clone()).unwrap();
+    let request = Request::V1(RequestV1::Get { tx: 7, addr });
+    let mut buf = [0; MAX_DGRAM];
+    let bytes = request.encode(&mut buf).unwrap();
+    reader
+        .send_to(&bytes[..MAX_DGRAM - 1], handle.local_addr())
+        .await
+        .unwrap();
     assert!(
-        !confirm_socket(
-            &probe,
-            ep_b.id(),
-            addr_a,
-            [PROBE_ALPN],
-            Duration::from_secs(2)
-        )
-        .await,
-        "eid B must not confirm on A's socket {addr_a}"
+        tokio::time::timeout(Duration::from_millis(50), recv(&reader))
+            .await
+            .is_err()
     );
-
-    let rec_a = SignedRecord::sign(ep_a.secret_key(), vec![addr_a], [PROBE_ALPN]);
-    let rec_b = SignedRecord::sign(ep_b.secret_key(), vec![addr_a], [PROBE_ALPN]);
-    rec_b.verify_sig().unwrap();
-
-    let kept = confirm_records(
-        &probe,
-        addr_a,
-        vec![rec_a.clone(), rec_b],
-        Duration::from_secs(3),
-    )
-    .await;
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].eid, rec_a.eid);
-
-    router_a.shutdown().await.unwrap();
-    router_b.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn probe_uses_announced_alpns_not_guesses() {
-    let ep = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
-    let router = Router::builder(ep.clone())
-        .accept(PING_ALPN, ProbeAccept)
-        .spawn();
-    let addr = router
-        .endpoint()
-        .addr()
-        .ip_addrs()
-        .find_map(|a| match a {
-            std::net::SocketAddr::V4(addr) => Some(*addr),
-            _ => None,
+    let mut oversized = bytes.to_vec();
+    oversized.push(0);
+    reader
+        .send_to(&oversized, handle.local_addr())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), recv(&reader))
+            .await
+            .is_err()
+    );
+    send(&reader, handle.local_addr(), &request).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), recv(&reader))
+            .await
+            .unwrap(),
+        Response::V1(ResponseV1::Value {
+            tx: 7,
+            addr,
+            value: Some(value)
         })
-        .expect("bound ipv4");
-    let probe = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
-
-    let rec_wrong = SignedRecord::sign(ep.secret_key(), vec![addr], [PROBE_ALPN]);
-    let rec_right = SignedRecord::sign(ep.secret_key(), vec![addr], [PING_ALPN]);
-
-    assert!(
-        !confirm_socket(&probe, ep.id(), addr, [PROBE_ALPN], Duration::from_secs(2)).await,
-        "must not guess ping/blobs when the announcement lists a different ALPN"
     );
-    assert!(
-        confirm_socket(&probe, ep.id(), addr, [PING_ALPN], Duration::from_secs(3)).await,
-        "peer that only speaks ping should confirm when ping is offered"
-    );
+}
 
-    let kept = confirm_records(
-        &probe,
-        addr,
-        vec![rec_wrong, rec_right.clone()],
-        Duration::from_secs(3),
-    )
-    .await;
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].alpns, rec_right.alpns);
+#[tokio::test]
+async fn concurrent_reads_are_demultiplexed_by_transaction() {
+    let server = Server::new(Limits::for_tests());
+    let handle = server
+        .bind_udp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let client = UdpClient::attach(test_dht()).await.unwrap();
+    client.add_replica(v4(handle.local_addr())).await.unwrap();
+    let addr = client.publish(b"value".to_vec()).await.unwrap()[0];
 
-    router.shutdown().await.unwrap();
+    let (left, right) = tokio::join!(client.resolve(addr), client.resolve(addr));
+    assert_eq!(left.unwrap().values, [b"value".to_vec()]);
+    assert_eq!(right.unwrap().values, [b"value".to_vec()]);
+}
+
+#[tokio::test]
+async fn discovery_directory_validates_opaque_record() {
+    let server = Server::new(Limits::for_tests());
+    let handle = server
+        .bind_udp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let directory = Directory::udp(test_dht(), v4(handle.local_addr()))
+        .await
+        .unwrap();
+    let record = SignedRecord::sign(&SecretKey::generate());
+    let addr = directory.publish(&record).await.unwrap()[0];
+    assert_eq!(directory.lookup(addr).await.unwrap(), [record]);
+
+    server.put_local(addr, b"invalid".to_vec()).unwrap();
+    assert!(directory.lookup(addr).await.unwrap().is_empty());
+}
+
+async fn send(socket: &UdpSocket, destination: std::net::SocketAddr, message: &Request) {
+    let mut buf = [0; MAX_DGRAM];
+    let bytes = message.encode(&mut buf).unwrap();
+    socket.send_to(bytes, destination).await.unwrap();
+}
+
+async fn recv(socket: &UdpSocket) -> Response {
+    let mut buf = [0; MAX_DGRAM];
+    let (len, _) = socket.recv_from(&mut buf).await.unwrap();
+    Response::decode(&buf[..len]).unwrap()
+}
+
+fn test_dht() -> Dht {
+    Dht::builder().no_bootstrap().port(0).build().unwrap()
+}
+
+fn v4(addr: SocketAddr) -> std::net::SocketAddrV4 {
+    match addr {
+        SocketAddr::V4(addr) => addr,
+        SocketAddr::V6(_) => panic!("test server must use IPv4"),
+    }
 }

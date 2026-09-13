@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use iroh::{endpoint::presets, protocol::Router};
-use iroh_addr_index::{Limits, Server};
 use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
 use iroh_mainline_endpoint_discovery::{Directory, Publisher, Resolver, infohash_from_blake3};
 use n0_mainline::{Dht, Id};
@@ -24,11 +23,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let directory = Server::new(Limits {
-        verify_udp_source_ip: false,
-        ..Limits::default()
-    });
-    let directory_udp = directory.bind_udp("127.0.0.1:0".parse()?).await?;
+    let replica = std::env::var("IROH_ADDR_INDEX")
+        .context("set IROH_ADDR_INDEX to a public address-index UDP socket")?
+        .parse()
+        .context("invalid IROH_ADDR_INDEX socket")?;
 
     let provider_store = MemStore::new();
     let tag = provider_store.blobs().add_bytes(DATA.to_vec()).await?;
@@ -47,9 +45,9 @@ async fn main() -> Result<()> {
     if !dht.bootstrapped().await? {
         bail!("DHT bootstrap failed");
     }
-    let index = Directory::udp(directory_udp.local_addr()).await?;
-    let publisher = Publisher::bind(provider_ep.clone(), dht.clone(), index.clone()).await?;
-    publisher.add_infohash(infohash, iroh_blobs::ALPN)?;
+    let index = Directory::udp(dht.clone(), replica).await?;
+    let publisher = Publisher::new(provider_ep.secret_key().clone(), dht.clone(), index.clone());
+    publisher.add_infohash(infohash);
     let resolver = Resolver::bind(dht, index).await?;
 
     println!("blob {blob_hash}");

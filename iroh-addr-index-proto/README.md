@@ -1,0 +1,35 @@
+# iroh-addr-index-proto
+
+Wire types and encoding for a small UDP address index: `SocketAddrV4 → opaque
+bytes`. No iroh dependency; the application decides what the bytes mean.
+
+## Protocol
+
+Every packet starts with the eight bytes `\0addridx`, followed by a postcard
+encoded `Request::V1` or `Response::V1`. The leading zero keeps it distinct from
+Mainline KRPC traffic, so both can share a UDP socket. Packets fit in 1200 bytes;
+values can be up to 1024 bytes. Every request carries a client-chosen `u64` `tx`,
+which the reply echoes so concurrent requests can be matched up.
+
+To write, do a quick handshake:
+
+1. Send `Prepare { tx, padding }`, with 24 padding bytes. The replica replies
+   with `Prepared { tx, addr, token }`: your public IPv4 socket as it sees it,
+   plus a short-lived 16-byte token. The padding keeps this reply no larger
+   than the request.
+2. Send `Put { tx, token, value }` from that same socket. The replica checks the
+   token, stores the bytes under your observed source address, and replies with
+   `Stored { tx, addr }`. You don't choose the key: the packet's source does.
+
+To read, just send `Get { tx, addr }`. No token or prepare step needed. The reply
+is `Value { tx, addr, value }`, with `Some(bytes)` for a live entry or `None` for
+a miss. Reads are public.
+
+`Get` packets are padded with trailing zeros after the postcard payload to
+exactly 1200 bytes. The replica drops shorter requests, so a spoofed request
+can't trigger a larger reply. Receivers ignore the padding bytes.
+
+Tokens prove you can receive packets at the source IP and port; they don't
+identify you or validate your data. The replica treats values as opaque bytes
+and controls their expiry. Unknown protocol versions and invalid requests are
+silently dropped, so callers need to handle timeouts.

@@ -23,9 +23,9 @@ iroh-blobs = "0.103"
 n0-future = "0.3"
 n0-mainline = { version = "0.6", path = "../n0-mainline" }
 postcard = { version = "1", features = ["alloc", "use-std"] }
+rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 sha1_smol = "1"
-smallvec = { version = "1", features = ["serde"] }
 tokio = { version = "1", features = ["sync", "macros", "rt", "rt-multi-thread", "signal", "time", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

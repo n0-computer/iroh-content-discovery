@@ -1668,13 +1668,14 @@ name = "iroh-addr-index"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "clap",
- "iroh",
  "iroh-addr-index-proto",
+ "iroh-base",
  "iroh-mainline-endpoint-discovery",
+ "n0-mainline",
  "postcard",
- "serde",
- "sha1_smol",
+ "rand",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1684,10 +1685,8 @@ dependencies = [
 name = "iroh-addr-index-proto"
 version = "0.1.0"
 dependencies = [
- "iroh-base",
  "postcard",
  "serde",
- "smallvec",
 ]
 
 [[package]]
@@ -1794,8 +1793,8 @@ dependencies = [
  "anyhow",
  "blake3",
  "iroh",
- "iroh-addr-index",
  "iroh-addr-index-proto",
+ "iroh-base",
  "iroh-blobs",
  "n0-future",
  "n0-mainline",

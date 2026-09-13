@@ -9,12 +9,14 @@
 
 mod directory;
 mod publisher;
+mod record;
 mod resolver;
 mod udp;
 
 pub use blake3::Hash;
 pub use directory::{Directory, DirectoryError};
 pub use publisher::{ANNOUNCE_SPACING, Publisher, REFRESH};
+pub use record::{RecordPayload, RecordPayloadV1, SignedRecord};
 pub use resolver::Resolver;
 pub use udp::{DEFAULT_TIMEOUT, ResolveResult, UdpClient, UdpError};
 
