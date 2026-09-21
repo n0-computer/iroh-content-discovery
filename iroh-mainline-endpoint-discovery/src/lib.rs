@@ -10,14 +10,18 @@
 mod directory;
 mod publisher;
 mod record;
+mod republisher;
 mod resolver;
+mod tracker_list;
 mod udp;
 
 pub use blake3::Hash;
-pub use directory::{Directory, DirectoryError};
+pub use directory::{Directory, DirectoryError, DiscoveryConfig};
 pub use publisher::{ANNOUNCE_SPACING, Publisher, REFRESH};
 pub use record::{RecordPayload, RecordPayloadV1, SignedRecord};
+pub use republisher::republish_tracker_list;
 pub use resolver::Resolver;
+pub use tracker_list::{TRACKER_LIST_SALT, TrackerList};
 pub use udp::{DEFAULT_TIMEOUT, ResolveResult, UdpClient, UdpError};
 
 /// Mainline infohash for a BLAKE3 hash: `SHA-1(blake3)`.

@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 /// `b'd'`.
 pub const MAGIC: &[u8; 8] = b"\0addridx";
 
+/// Replica rendezvous infohash: SHA-1 of `iroh-addr-index replicas v1`.
+/// Replicas announce their implied source port; clients discover them with get_peers.
+pub const RENDEZVOUS_INFOHASH: [u8; 20] = [
+    184, 108, 61, 145, 14, 26, 103, 236, 155, 168, 166, 154, 149, 189, 127, 139, 8, 190, 146, 59,
+];
+
 /// Maximum UDP payload, chosen to avoid IP fragmentation.
 pub const MAX_DGRAM: usize = 1200;
 

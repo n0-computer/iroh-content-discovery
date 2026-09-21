@@ -26,8 +26,9 @@ async fn main() -> Result<()> {
         .init();
 
     let replica = std::env::var("IROH_ADDR_INDEX")
-        .context("set IROH_ADDR_INDEX to a public address-index UDP socket")?
-        .parse()
+        .ok()
+        .map(|value| value.parse())
+        .transpose()
         .context("invalid IROH_ADDR_INDEX socket")?;
     let mut infohashes = parse_infohashes(std::env::args().skip(1))?;
 
@@ -45,7 +46,10 @@ async fn main() -> Result<()> {
     if !dht.bootstrapped().await? {
         bail!("DHT bootstrap failed");
     }
-    let index = Directory::udp(dht.clone(), replica).await?;
+    let index = match replica {
+        Some(replica) => Directory::udp(dht.clone(), replica).await?,
+        None => Directory::discover(dht.clone()).await?,
+    };
     let publisher = Publisher::new(secret, dht.clone(), index.clone());
     let resolver = Resolver::bind(dht, index).await?;
     for infohash in infohashes {
@@ -61,7 +65,10 @@ async fn main() -> Result<()> {
         println!("published {mapping}");
 
         let attacker_dht = Dht::client().context("attacker DHT socket")?;
-        let attacker = Directory::udp(attacker_dht, replica).await?;
+        let attacker = match replica {
+            Some(replica) => Directory::udp(attacker_dht, replica).await?,
+            None => Directory::discover(attacker_dht).await?,
+        };
         let spoof = SignedRecord::sign(&SecretKey::generate());
         let attacker_addrs = attacker.publish(&spoof).await?;
         println!("attacker could only publish at {attacker_addrs:?}");

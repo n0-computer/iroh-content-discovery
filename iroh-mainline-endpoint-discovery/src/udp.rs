@@ -11,7 +11,7 @@ use iroh_addr_index_proto::{
 };
 use n0_mainline::{ActorShutdown, DatagramHookGuard, Dht};
 use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
-use tracing::{debug, trace};
+use tracing::debug;
 
 /// Default timeout for an address-index operation.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -60,6 +60,7 @@ impl From<ActorShutdown> for UdpError {
 
 enum ActorMsg {
     AddReplica(SocketAddrV4),
+    ReplaceReplicas(HashSet<SocketAddrV4>),
     RemoveReplica(SocketAddrV4),
     Publish(
         Vec<u8>,
@@ -106,6 +107,16 @@ impl UdpClient {
     pub async fn add_replica(&self, replica: SocketAddrV4) -> Result<(), UdpError> {
         self.tx
             .send(ActorMsg::AddReplica(replica))
+            .await
+            .map_err(|_| UdpError::Closed)
+    }
+
+    pub(crate) async fn replace_replicas(
+        &self,
+        replicas: HashSet<SocketAddrV4>,
+    ) -> Result<(), UdpError> {
+        self.tx
+            .send(ActorMsg::ReplaceReplicas(replicas))
             .await
             .map_err(|_| UdpError::Closed)
     }
@@ -244,6 +255,9 @@ impl Actor {
 
     async fn handle_message(&mut self, message: ActorMsg, buf: &mut [u8; MAX_DGRAM]) {
         match message {
+            ActorMsg::ReplaceReplicas(replicas) => {
+                self.replicas = replicas;
+            }
             ActorMsg::AddReplica(addr) => {
                 self.replicas.insert(addr);
             }
@@ -316,10 +330,6 @@ impl Actor {
     }
 
     async fn handle_packet(&mut self, data: &[u8], from: SocketAddrV4, buf: &mut [u8; MAX_DGRAM]) {
-        if !self.replicas.contains(&from) {
-            trace!(%from, "reply from unknown replica");
-            return;
-        }
         let Some(Response::V1(response)) = Response::decode(data) else {
             return;
         };
@@ -346,7 +356,9 @@ impl Actor {
                 let Some(pending) = self.publishes.get_mut(&tx) else {
                     return;
                 };
-                pending.awaiting.remove(&from);
+                if !pending.awaiting.remove(&from) {
+                    return;
+                }
                 pending.stored.insert(addr);
                 if pending.awaiting.is_empty() {
                     self.finish_publish(tx);

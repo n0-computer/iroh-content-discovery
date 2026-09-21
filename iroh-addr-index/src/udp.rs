@@ -1,78 +1,151 @@
-//! UDP transport for an address-index replica.
-
-use std::{io, net::SocketAddr};
-
-use iroh_addr_index_proto::{MAX_DGRAM, Request, RequestV1, Response, ResponseV1};
-use tokio::{net::UdpSocket, task::JoinHandle};
-use tracing::{debug, trace};
+//! Address-index service sharing a Mainline node's UDP socket.
 
 use crate::{Server, unix_secs};
+use anyhow::{Context, Result, bail};
+use iroh_addr_index_proto::{
+    MAGIC, MAX_DGRAM, RENDEZVOUS_INFOHASH, Request, RequestV1, Response, ResponseV1,
+};
+use n0_mainline::{ActorShutdown, Dht, Id};
+use std::{
+    net::{SocketAddr, SocketAddrV4},
+    time::Duration,
+};
+use tokio::{
+    sync::{mpsc, mpsc::error::TrySendError},
+    task::JoinHandle,
+};
+use tracing::{debug, trace};
 
-/// Running UDP listener. Dropping the handle aborts its receive loop.
+/// Running address-index service. Drop to detach from the shared DHT socket.
 #[derive(Debug)]
 pub struct UdpHandle {
     local_addr: SocketAddr,
-    task: JoinHandle<()>,
+    task: JoinHandle<Result<(), ActorShutdown>>,
+    announcement: Option<JoinHandle<()>>,
 }
 
 impl UdpHandle {
-    /// Bound address, including the assigned port when binding port zero.
+    /// Local DHT socket address (the bind IP may be unspecified).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
-    /// Abort the receive loop.
+    /// Stop serving and renewing replica announcements.
     pub fn abort(&self) {
         self.task.abort();
+        if let Some(announcement) = &self.announcement {
+            announcement.abort();
+        }
+    }
+
+    /// Wait for either owned task to stop, reporting an unexpected exit.
+    pub async fn terminated(&mut self) -> Result<()> {
+        tokio::select! {
+            result = &mut self.task => {
+                result.context("address-index service task failed")?
+                    .context("address-index transport stopped")?;
+                bail!("address-index service task stopped unexpectedly")
+            }
+            result = async {
+                match &mut self.announcement {
+                    Some(announcement) => announcement.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                result.context("replica announcement task failed")?;
+                bail!("replica announcement task stopped unexpectedly")
+            }
+        }
     }
 }
 
 impl Drop for UdpHandle {
     fn drop(&mut self) {
-        self.task.abort();
+        self.abort();
     }
 }
 
 impl Server {
-    /// Bind a UDP socket and serve until the returned handle is dropped.
-    pub async fn bind_udp(&self, bind: SocketAddr) -> io::Result<UdpHandle> {
-        let socket = UdpSocket::bind(bind).await?;
-        let local_addr = socket.local_addr()?;
-        let server = self.clone();
-        let task = tokio::spawn(async move { server.udp_loop(socket).await });
-        Ok(UdpHandle { local_addr, task })
+    /// Serve on an existing Mainline socket and announce as a replica.
+    ///
+    /// Announcements use the observed source port and are renewed every ten
+    /// minutes. Failed announcements retry after thirty seconds. Dropping the
+    /// handle stops serving and renewal; existing DHT announcements expire naturally.
+    pub async fn attach(&self, dht: Dht) -> Result<UdpHandle, ActorShutdown> {
+        self.attach_with_rendezvous(dht, Some(RENDEZVOUS_INFOHASH))
+            .await
     }
 
-    async fn udp_loop(&self, socket: UdpSocket) {
-        // Keep one extra byte so oversized datagrams cannot look valid after truncation.
-        let mut buf = [0; MAX_DGRAM + 1];
-        loop {
-            let (n, from) = match socket.recv_from(&mut buf).await {
-                Ok(packet) => packet,
-                Err(err) => {
-                    debug!(%err, "UDP receive");
-                    continue;
+    /// Serve and optionally announce under an application-configured rendezvous hash.
+    ///
+    /// `None` serves index requests without publishing a Mainline announcement.
+    pub async fn attach_with_rendezvous(
+        &self,
+        dht: Dht,
+        rendezvous_hash: Option<[u8; 20]>,
+    ) -> Result<UdpHandle, ActorShutdown> {
+        let local_addr = dht.info().await?.local_addr().into();
+        let (tx, mut rx) = mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(256);
+        let hook = dht
+            .add_datagram_hook(move |bytes, from| {
+                if !bytes.starts_with(MAGIC) {
+                    return false;
                 }
-            };
-            if let Err(err) = self.handle_packet(&buf[..n], &socket, from).await {
-                debug!(%from, %err, "UDP packet");
+                if bytes.len() > MAX_DGRAM {
+                    return true;
+                }
+                match tx.try_send((bytes.into(), from)) {
+                    Ok(()) | Err(TrySendError::Full(_)) => true,
+                    Err(TrySendError::Closed(_)) => false,
+                }
+            })
+            .await?;
+        let server = self.clone();
+        let transport = dht.clone();
+        let task = tokio::spawn(async move {
+            let _hook = hook;
+            while let Some((bytes, from)) = rx.recv().await {
+                server.handle_packet(&bytes, &transport, from).await?;
             }
-        }
+            Ok(())
+        });
+        let announcement = rendezvous_hash.map(|rendezvous_hash| {
+            tokio::spawn(async move {
+                loop {
+                    let result = async {
+                        let hash = Id::from(rendezvous_hash);
+                        dht.get_closest_nodes(hash).await?;
+                        dht.announce_peer(hash, None).await
+                    }
+                    .await;
+                    let delay = match result {
+                        Ok(_) => Duration::from_secs(600),
+                        Err(err) => {
+                            debug!(%err, "replica announcement failed");
+                            Duration::from_secs(30)
+                        }
+                    };
+                    tokio::time::sleep(delay).await;
+                }
+            })
+        });
+        Ok(UdpHandle {
+            local_addr,
+            task,
+            announcement,
+        })
     }
 
     async fn handle_packet(
         &self,
         data: &[u8],
-        socket: &UdpSocket,
-        from: SocketAddr,
-    ) -> io::Result<()> {
+        dht: &Dht,
+        from: SocketAddrV4,
+    ) -> Result<(), ActorShutdown> {
         trace!(%from, bytes = data.len(), "UDP packet");
         if data.is_empty() || data.len() > MAX_DGRAM {
             return Ok(());
         }
-        let SocketAddr::V4(from) = from else {
-            return Ok(());
-        };
         let Some(Request::V1(request)) = Request::decode(data) else {
             return Ok(());
         };
@@ -114,7 +187,7 @@ impl Server {
         if let Some(response) = response {
             let mut out = [0; MAX_DGRAM];
             let bytes = response.encode(&mut out).expect("bounded response");
-            socket.send_to(bytes, from).await?;
+            dht.send_datagram(bytes, from).await?;
         }
         Ok(())
     }

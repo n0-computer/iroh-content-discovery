@@ -1,0 +1,9 @@
+:root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+body { width: 280px; margin: 20px; }
+h1 { font-size: 21px; margin: 0 0 8px; }
+p { line-height: 1.5; }
+label { display: block; margin-top: 14px; }
+input[type="number"] { box-sizing: border-box; width: 100%; padding: 8px; margin-top: 6px; }
+.toggle { display: flex; align-items: center; gap: 8px; }
+button { width: 100%; margin-top: 18px; padding: 9px; cursor: pointer; }
+#status { min-height: 21px; margin-bottom: 0; }

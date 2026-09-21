@@ -33,3 +33,11 @@ Tokens prove you can receive packets at the source IP and port; they don't
 identify you or validate your data. The replica treats values as opaque bytes
 and controls their expiry. Unknown protocol versions and invalid requests are
 silently dropped, so callers need to handle timeouts.
+
+## Replica discovery
+
+Replicas announce on Mainline under `b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b`
+(SHA-1 of `iroh-addr-index replicas v1`), using their implied source port.
+Clients call `get_peers` on that hash to find candidate replicas. Mainline and
+index traffic share the same UDP socket, so the announced port serves both.
+An announcement is just a candidate, not a guarantee of availability or trust.

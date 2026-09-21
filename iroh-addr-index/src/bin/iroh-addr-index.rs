@@ -1,6 +1,7 @@
 //! Address-index replica command line interface.
 
-use std::{net::SocketAddr, time::Instant};
+use n0_mainline::Dht;
+use std::time::Instant;
 
 use anyhow::Result;
 use clap::Parser;
@@ -14,9 +15,9 @@ use tracing::info;
     about = "Opaque return-routability-gated UDP address index"
 )]
 struct Cli {
-    /// Serve on this UDP address.
-    #[arg(long, default_value = "0.0.0.0:11223")]
-    udp_bind: SocketAddr,
+    /// Shared Mainline and address-index UDP port (binds all IPv4 interfaces).
+    #[arg(long, default_value_t = 11223)]
+    udp_port: u16,
     /// Maximum opaque value length.
     #[arg(long, default_value_t = iroh_addr_index_proto::MAX_VALUE_LEN)]
     max_value_len: usize,
@@ -29,6 +30,9 @@ struct Cli {
     /// Length of one token validity bucket, in seconds.
     #[arg(long, default_value_t = 30)]
     token_bucket_secs: u64,
+    /// Mainline rendezvous infohash (40 hex digits); omit to serve without announcing.
+    #[arg(long, value_parser = parse_infohash)]
+    rendezvous_hash: Option<[u8; 20]>,
 }
 
 #[tokio::main]
@@ -47,10 +51,41 @@ async fn main() -> Result<()> {
         token_bucket_secs: cli.token_bucket_secs,
         ..Limits::default()
     });
-    let udp = server.bind_udp(cli.udp_bind).await?;
+    let dht = Dht::builder().server_mode().port(cli.udp_port).build()?;
+    let mut udp = server
+        .attach_with_rendezvous(dht, cli.rendezvous_hash)
+        .await?;
     println!("udp: {}", udp.local_addr());
     let start = Instant::now();
-    signal::ctrl_c().await?;
+    tokio::select! {
+        result = shutdown_signal() => result?,
+        result = udp.terminated() => result?,
+    }
     info!(elapsed = ?start.elapsed(), "shutting down");
     Ok(())
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = signal::ctrl_c() => result?,
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    signal::ctrl_c().await?;
+    Ok(())
+}
+
+fn parse_infohash(value: &str) -> std::result::Result<[u8; 20], String> {
+    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("expected 40 hexadecimal digits".to_owned());
+    }
+    let mut bytes = [0; 20];
+    for (out, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        *out = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+    }
+    Ok(bytes)
 }

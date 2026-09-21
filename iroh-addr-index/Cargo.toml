@@ -15,6 +15,7 @@ anyhow.workspace = true
 blake3.workspace = true
 clap.workspace = true
 iroh-addr-index-proto = { version = "0.1.0  ", path = "../iroh-addr-index-proto" }
+n0-mainline.workspace = true
 postcard.workspace = true
 rand.workspace = true
 tokio.workspace = true
@@ -24,7 +25,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 iroh-base.workspace = true
 iroh-mainline-endpoint-discovery = { version = "0.1.0", path = "../iroh-mainline-endpoint-discovery" }
-n0-mainline.workspace = true
+n0-future.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [[bin]]
