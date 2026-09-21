@@ -2,9 +2,6 @@
 
 use crate::{Server, unix_secs};
 use anyhow::{Context, Result, bail};
-use iroh_addr_index_proto::{
-    MAGIC, MAX_DGRAM, RENDEZVOUS_INFOHASH, Request, RequestV1, Response, ResponseV1,
-};
 use n0_mainline::{ActorShutdown, Dht, Id};
 use std::{
     net::{SocketAddr, SocketAddrV4},
@@ -15,6 +12,9 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::{debug, trace};
+use udp_address_records_proto::{
+    MAGIC, MAX_DGRAM, RENDEZVOUS_INFOHASH, Request, RequestV1, Response, ResponseV1,
+};
 
 /// Running address-index service. Drop to detach from the shared DHT socket.
 #[derive(Debug)]
@@ -86,6 +86,7 @@ impl Server {
     ) -> Result<UdpHandle, ActorShutdown> {
         let local_addr = dht.info().await?.local_addr().into();
         let (tx, mut rx) = mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(256);
+        let metrics = self.metrics();
         let hook = dht
             .add_datagram_hook(move |bytes, from| {
                 if !bytes.starts_with(MAGIC) {
@@ -95,7 +96,11 @@ impl Server {
                     return true;
                 }
                 match tx.try_send((bytes.into(), from)) {
-                    Ok(()) | Err(TrySendError::Full(_)) => true,
+                    Ok(()) => true,
+                    Err(TrySendError::Full(_)) => {
+                        metrics.queue_drops.inc();
+                        true
+                    }
                     Err(TrySendError::Closed(_)) => false,
                 }
             })
@@ -153,8 +158,10 @@ impl Server {
         let response = match request {
             RequestV1::Prepare { tx, padding: _ } => {
                 if !self.allow_request((*from.ip()).into()) {
+                    self.metrics().rate_limited.inc();
                     return Ok(());
                 }
+                self.metrics().prepares.inc();
                 Some(Response::V1(ResponseV1::Prepared {
                     tx,
                     addr: from,
@@ -162,26 +169,34 @@ impl Server {
                 }))
             }
             RequestV1::Put { tx, token, value } => {
-                if !self.verify_token(from, &token, now) || !self.allow_request((*from.ip()).into())
-                {
+                if !self.verify_token(from, &token, now) {
+                    self.metrics().invalid_tokens.inc();
                     trace!(%from, "invalid put token");
                     return Ok(());
                 }
+                if !self.allow_request((*from.ip()).into()) {
+                    self.metrics().rate_limited.inc();
+                    return Ok(());
+                }
                 if let Err(err) = self.put_local(from, value) {
+                    self.metrics().rejected_puts.inc();
                     debug!(%from, %err, "put rejected");
                     return Ok(());
                 }
+                self.metrics().puts.inc();
                 Some(Response::V1(ResponseV1::Stored { tx, addr: from }))
             }
             RequestV1::Get { tx, addr } => {
                 if !self.allow_request((*from.ip()).into()) {
+                    self.metrics().rate_limited.inc();
                     return Ok(());
                 }
-                Some(Response::V1(ResponseV1::Value {
-                    tx,
-                    addr,
-                    value: self.get_local(addr),
-                }))
+                self.metrics().gets.inc();
+                let value = self.get_local(addr);
+                if value.is_some() {
+                    self.metrics().get_hits.inc();
+                }
+                Some(Response::V1(ResponseV1::Value { tx, addr, value }))
             }
         };
         if let Some(response) = response {

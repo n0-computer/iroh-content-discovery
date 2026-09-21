@@ -66,7 +66,8 @@ impl Store {
         limits: &Limits,
     ) -> Result<(), PutError> {
         self.gc(now);
-        if value.len() > limits.max_value_len || value.len() > iroh_addr_index_proto::MAX_VALUE_LEN
+        if value.len() > limits.max_value_len
+            || value.len() > udp_address_records_proto::MAX_VALUE_LEN
         {
             return Err(PutError::TooLarge);
         }

@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "iroh-addr-index-proto",
-    "iroh-addr-index",
+    "udp-address-records-proto",
+    "udp-address-records",
     "iroh-mainline-endpoint-discovery",
     "iroh-local-gateway",
 ]

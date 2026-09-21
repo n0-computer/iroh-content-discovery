@@ -1,4 +1,4 @@
-# iroh-addr-index-proto
+# udp-address-records-proto
 
 Wire types and encoding for a small UDP address index: `SocketAddrV4 → opaque
 bytes`. No iroh dependency; the application decides what the bytes mean.

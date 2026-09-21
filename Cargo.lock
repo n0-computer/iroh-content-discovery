@@ -1738,33 +1738,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iroh-addr-index"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "clap",
- "iroh-addr-index-proto",
- "iroh-base",
- "iroh-mainline-endpoint-discovery",
- "n0-future",
- "n0-mainline",
- "postcard",
- "rand",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "iroh-addr-index-proto"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
-]
-
-[[package]]
 name = "iroh-base"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1873,8 +1846,6 @@ dependencies = [
  "bytes",
  "clap",
  "iroh",
- "iroh-addr-index",
- "iroh-addr-index-proto",
  "iroh-blobs",
  "iroh-mainline-endpoint-discovery",
  "lru",
@@ -1888,6 +1859,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "udp-address-records",
+ "udp-address-records-proto",
  "z32",
 ]
 
@@ -1900,7 +1873,6 @@ dependencies = [
  "blake3",
  "clap",
  "iroh",
- "iroh-addr-index-proto",
  "iroh-base",
  "iroh-blobs",
  "n0-future",
@@ -1911,6 +1883,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "udp-address-records-proto",
  "zeroize",
 ]
 
@@ -1920,12 +1893,20 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "291065721ad7c477b972e581bbc528df031dc8eb5e39fe1ff3300ae5dfb157ef"
 dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "iroh-metrics-derive",
  "itoa",
  "n0-error",
  "portable-atomic",
+ "reqwest 0.13.4",
+ "rustls",
+ "rustls-platform-verifier",
  "ryu",
  "serde",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3312,6 +3293,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4277,6 +4260,34 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "udp-address-records"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "clap",
+ "iroh-base",
+ "iroh-mainline-endpoint-discovery",
+ "iroh-metrics",
+ "n0-future",
+ "n0-mainline",
+ "postcard",
+ "rand",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "udp-address-records-proto",
+]
+
+[[package]]
+name = "udp-address-records-proto"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+]
 
 [[package]]
 name = "unicode-ident"

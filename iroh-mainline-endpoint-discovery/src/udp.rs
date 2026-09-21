@@ -6,12 +6,12 @@ use std::{
     time::Duration,
 };
 
-use iroh_addr_index_proto::{
-    MAGIC, MAX_DGRAM, MAX_VALUE_LEN, Request, RequestV1, Response, ResponseV1, TransactionId,
-};
 use n0_mainline::{ActorShutdown, DatagramHookGuard, Dht};
 use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 use tracing::debug;
+use udp_address_records_proto::{
+    MAGIC, MAX_DGRAM, MAX_VALUE_LEN, Request, RequestV1, Response, ResponseV1, TransactionId,
+};
 
 /// Default timeout for an address-index operation.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);

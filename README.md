@@ -49,9 +49,9 @@ that constraint.
 
 The repository contains four Rust workspace crates and a browser extension:
 
-- `iroh-addr-index-proto`: versioned token, put, and get UDP messages; no iroh
+- `udp-address-records-proto`: versioned token, put, and get UDP messages; no iroh
   dependency
-- `iroh-addr-index`: embeddable replica server and the `iroh-addr-index` binary
+- `udp-address-records`: embeddable replica server and the `udp-address-records` binary
 - `iroh-mainline-endpoint-discovery`: reusable `Directory`, `Publisher`, and
   `Resolver` APIs; the publisher takes an endpoint secret key and an externally
   managed Mainline DHT node
@@ -59,11 +59,16 @@ The repository contains four Rust workspace crates and a browser extension:
 - `blake3-link-extension`: Chrome/Brave redirects from hash subdomains to the gateway
 
 ```sh
-cargo run -p iroh-addr-index -- --udp-port 11223 \
+cargo run -p udp-address-records -- --udp-port 11223 \
   --rendezvous-hash b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b
 cargo run -p iroh-mainline-endpoint-discovery --example blobs
 cargo run -p iroh-mainline-endpoint-discovery --example spoof
 ```
+
+To expose index metrics for Prometheus, pass `--metrics-listen 127.0.0.1:9090`
+to the `udp-address-records` command and scrape `http://127.0.0.1:9090/metrics`.
+The listener is disabled unless requested. Bind it to a trusted interface;
+the endpoint has no authentication.
 
 MIT or Apache-2.0, at your option.
 
@@ -94,7 +99,7 @@ Signed endpoint records are still validated by the discovery layer.
 The examples discover replicas by default. Set `IROH_ADDR_INDEX=ip:port` to use
 an explicit replica instead, or use `Directory::udp(dht, replica)` in code.
 Mainline bootstrap nodes are still needed; tracker addresses are not hardcoded.
-The `iroh-addr-index` binary exits if its service or announcement task stops,
+The `udp-address-records` binary exits if its service or announcement task stops,
 and shuts down on Ctrl-C or SIGTERM.
 
 ### Signed bootstrap list (BEP44)
@@ -135,7 +140,8 @@ dht.put_mutable(item, None).await?;
 Keep the signing key with the list operator; clients need only its public key.
 Increase the nonnegative sequence number whenever the list changes and
 periodically republish the signed item to keep it available in the DHT.
-The fixed salt is `iroh-addr-index replicas v1`. The value is version byte `1`
+The fixed legacy salt is `iroh-addr-index replicas v1` (preserved across the
+crate rename for compatibility). The value is version byte `1`
 followed by up to two compact IPv4 sockets (four IP bytes, two big-endian port
 bytes). An empty list withdraws all signed candidates and permits fallback.
 

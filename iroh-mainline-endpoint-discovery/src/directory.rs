@@ -1,9 +1,9 @@
 //! Convenience wrapper around the UDP directory client.
 
-use iroh_addr_index_proto::RENDEZVOUS_INFOHASH;
 use n0_future::StreamExt;
 use std::{collections::HashSet, net::SocketAddrV4, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+use udp_address_records_proto::RENDEZVOUS_INFOHASH;
 
 use n0_mainline::Dht;
 

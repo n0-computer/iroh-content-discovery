@@ -8,11 +8,11 @@ use std::{
 use anyhow::Result;
 use clap::Parser;
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
-use iroh_addr_index::{Limits, Server};
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_local_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{Directory, Publisher, Resolver, infohash_from_blake3};
 use n0_mainline::{Dht, Testnet};
+use udp_address_records::{Limits, Server};
 
 #[derive(Parser)]
 #[command(about = "Serve a file through a local tracker, peer, and HTTP gateway")]

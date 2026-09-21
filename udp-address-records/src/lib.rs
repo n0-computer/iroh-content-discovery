@@ -6,6 +6,7 @@
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+mod metrics;
 mod store;
 
 pub mod udp;
@@ -20,6 +21,7 @@ use std::{
 
 use rand::Rng;
 
+pub use metrics::Metrics;
 pub use store::{PutError, Store};
 pub use udp::UdpHandle;
 
@@ -48,7 +50,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_value_len: iroh_addr_index_proto::MAX_VALUE_LEN,
+            max_value_len: udp_address_records_proto::MAX_VALUE_LEN,
             max_entries: 2_000_000,
             value_ttl_secs: 60 * 60,
             token_bucket_secs: 30,
@@ -82,6 +84,7 @@ struct Inner {
     limits: Limits,
     rate: Mutex<RateLimiters>,
     token_key: [u8; 32],
+    metrics: Arc<Metrics>,
 }
 
 impl Server {
@@ -95,6 +98,7 @@ impl Server {
                 limits,
                 rate: Mutex::new(RateLimiters::default()),
                 token_key,
+                metrics: Arc::new(Metrics::default()),
             }),
         }
     }
@@ -104,22 +108,25 @@ impl Server {
         &self.inner.limits
     }
 
+    /// Metrics shared by all clones of this replica.
+    pub fn metrics(&self) -> Arc<Metrics> {
+        self.inner.metrics.clone()
+    }
+
     /// Store bytes directly, bypassing UDP token validation.
     pub fn put_local(&self, addr: SocketAddrV4, value: Vec<u8>) -> Result<(), PutError> {
-        self.inner
-            .store
-            .lock()
-            .expect("poisoned")
-            .put(addr, value, unix_secs(), &self.inner.limits)
+        let mut store = self.inner.store.lock().expect("poisoned");
+        let result = store.put(addr, value, unix_secs(), &self.inner.limits);
+        self.inner.metrics.entries.set(store.len() as i64);
+        result
     }
 
     /// Read a live value directly.
     pub fn get_local(&self, addr: SocketAddrV4) -> Option<Vec<u8>> {
-        self.inner
-            .store
-            .lock()
-            .expect("poisoned")
-            .get(addr, unix_secs())
+        let mut store = self.inner.store.lock().expect("poisoned");
+        let result = store.get(addr, unix_secs());
+        self.inner.metrics.entries.set(store.len() as i64);
+        result
     }
 
     pub(crate) fn issue_token(&self, addr: SocketAddrV4, now: u64) -> [u8; 16] {
@@ -257,5 +264,19 @@ mod tests {
         assert!(server.verify_token(addr, &token, 20));
         assert!(!server.verify_token(addr, &token, 30));
         assert!(!server.verify_token("203.0.113.9:6882".parse().unwrap(), &token, 20));
+    }
+
+    #[test]
+    fn metrics_report_storage_state() {
+        use iroh_metrics::{MetricsSource, Registry};
+
+        let server = Server::new(Limits::for_tests());
+        let addr = "203.0.113.9:6881".parse().unwrap();
+        server.put_local(addr, b"value".to_vec()).unwrap();
+        assert_eq!(server.get_local(addr), Some(b"value".to_vec()));
+        let mut registry = Registry::default();
+        registry.register(server.metrics());
+        let output = registry.encode_openmetrics_to_string().unwrap();
+        assert!(output.contains("addr_index_entries 1"), "{output}");
     }
 }

@@ -1,6 +1,6 @@
 [package]
-name = "iroh-addr-index-proto"
-description = "Wire protocol for an opaque UDP address index"
+name = "udp-address-records-proto"
+description = "Wire protocol for opaque UDP address records"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

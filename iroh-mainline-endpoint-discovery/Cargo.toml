@@ -16,7 +16,7 @@ async-stream = "0.3"
 blake3.workspace = true
 clap.workspace = true
 iroh-base.workspace = true
-iroh-addr-index-proto = { version = "0.1.0", path = "../iroh-addr-index-proto" }
+udp-address-records-proto = { version = "0.1.0", path = "../udp-address-records-proto" }
 n0-future.workspace = true
 n0-mainline.workspace = true
 postcard.workspace = true

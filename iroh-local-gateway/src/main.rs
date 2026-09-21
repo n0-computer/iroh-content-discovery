@@ -5,10 +5,10 @@ use std::net::{SocketAddr, SocketAddrV4};
 use anyhow::Result;
 use clap::Parser;
 use iroh::endpoint::presets;
-use iroh_addr_index_proto::RENDEZVOUS_INFOHASH;
 use iroh_local_gateway::{Gateway, validate_listen_addr};
 use iroh_mainline_endpoint_discovery::{Directory, DiscoveryConfig, Resolver};
 use n0_mainline::Dht;
+use udp_address_records_proto::RENDEZVOUS_INFOHASH;
 
 #[derive(Parser)]
 #[command(about = "Stream discovered blobs over localhost HTTP at /blake3/<z32>")]

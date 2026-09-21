@@ -6,12 +6,12 @@ use std::{
 };
 
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
-use iroh_addr_index::{Limits, Server};
 use iroh_blobs::{BlobsProtocol, Hash, store::mem::MemStore};
 use iroh_local_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{Directory, Resolver, SignedRecord, infohash_from_blake3};
 use n0_mainline::Dht;
 use reqwest::{Client, StatusCode};
+use udp_address_records::{Limits, Server};
 
 #[tokio::test]
 async fn streams_video_and_ranges_through_discovery() {

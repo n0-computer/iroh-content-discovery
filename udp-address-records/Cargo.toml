@@ -1,20 +1,21 @@
 [package]
-name = "iroh-addr-index"
-description = "Opaque UDP address index with stateless return-routability tokens"
+name = "udp-address-records"
+description = "Small opaque records for verified UDP addresses"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 readme = "../README.md"
-keywords = ["iroh", "p2p", "directory"]
+keywords = ["udp", "p2p", "directory"]
 categories = ["network-programming"]
 
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
 clap.workspace = true
-iroh-addr-index-proto = { version = "0.1.0  ", path = "../iroh-addr-index-proto" }
+iroh-metrics = { version = "1.0.1", features = ["service"] }
+udp-address-records-proto = { version = "0.1.0", path = "../udp-address-records-proto" }
 n0-mainline.workspace = true
 postcard.workspace = true
 rand.workspace = true
@@ -29,8 +30,8 @@ n0-future.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [[bin]]
-name = "iroh-addr-index"
-path = "src/bin/iroh-addr-index.rs"
+name = "udp-address-records"
+path = "src/bin/udp-address-records.rs"
 
 [lints]
 workspace = true

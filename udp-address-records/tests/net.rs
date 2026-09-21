@@ -2,13 +2,13 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use iroh_addr_index::{Limits, Server};
-use iroh_addr_index_proto::{MAX_DGRAM, Request, RequestV1, Response, ResponseV1};
 use iroh_base::SecretKey;
 use iroh_mainline_endpoint_discovery::{Directory, Resolver, SignedRecord, UdpClient};
 use n0_future::StreamExt;
 use n0_mainline::Dht;
 use tokio::net::UdpSocket;
+use udp_address_records::{Limits, Server};
+use udp_address_records_proto::{MAX_DGRAM, Request, RequestV1, Response, ResponseV1};
 
 #[tokio::test]
 async fn unannounced_replica_publishes_and_resolves_opaque_bytes() {
@@ -97,7 +97,7 @@ async fn get_requires_full_sized_datagram() {
     let handle = server.attach(test_dht()).await.unwrap();
     let reader = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = "203.0.113.1:1234".parse().unwrap();
-    let value = vec![42; iroh_addr_index_proto::MAX_VALUE_LEN];
+    let value = vec![42; udp_address_records_proto::MAX_VALUE_LEN];
     server.put_local(addr, value.clone()).unwrap();
     let request = Request::V1(RequestV1::Get { tx: 7, addr });
     let mut buf = [0; MAX_DGRAM];
