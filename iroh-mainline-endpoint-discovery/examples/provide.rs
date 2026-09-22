@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     }
     let collection = z32::encode(collection_hash.as_bytes());
     println!("{collection}  (collection)");
-    println!("http://127.0.0.1:8080/tree/{collection}");
+    println!("http://127.0.0.1:8080/blake3/{collection}");
 
     let announced = async {
         publisher.wait_published().await;

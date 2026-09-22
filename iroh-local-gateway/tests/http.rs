@@ -126,9 +126,17 @@ async fn run() {
     let res = client.get(&collection_url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let index = res.text().await.unwrap();
+    assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/site/\"")));
+    assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/media/\"")));
+    let res = client
+        .get(format!("{collection_url}/site/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let index = res.text().await.unwrap();
     assert!(index.contains(&format!("/blake3/{collection_hash}/site/index.html")));
-    assert!(index.contains("media/video.mp4"));
-    assert!(index.contains("site/&lt;unsafe&gt;.txt"));
+    assert!(index.contains("&lt;unsafe&gt;.txt"));
     assert!(index.contains("site/%3Cunsafe%3E.txt"));
     let res = client.head(&collection_url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -342,7 +350,7 @@ async fn run() {
     assert!(res.status().is_success());
     assert_eq!(res.headers()["access-control-allow-origin"], "*");
 
-    let tree = format!("/tree/{}", z32::encode(collection_tag.hash().as_bytes()));
+    let tree = format!("/blake3/{collection_hash}");
     let collection_url = format!("{base}{tree}");
     for top in [collection_url.clone(), format!("{collection_url}/")] {
         let res = client.get(&top).send().await.unwrap();
@@ -354,7 +362,7 @@ async fn run() {
         assert!(!html.contains("hello"));
         assert!(html.contains("iroh-content-discovery\">iroh content discovery</a>"));
         assert!(html.contains("<a href=\"?sizes\">Fetch sizes</a>"));
-        assert!(html.contains(&format!("<h1>{}{SEP}</h1>", &tree[6..])));
+        assert!(html.contains(&format!("<h1>{}{SEP}</h1>", collection_hash)));
     }
     let res = client
         .get(format!("{collection_url}?sizes"))
@@ -378,7 +386,7 @@ async fn run() {
     assert!(html.contains(&format!("href=\"{tree}/?sizes\">../")));
     assert!(html.contains(&format!(
         "<h1><a href=\"{tree}/?sizes\">{}</a>{SEP}notes{SEP}</h1>",
-        &tree[6..]
+        collection_hash
     )));
     assert!(html.contains(&format!("<td class=\"size\">{} B</td>", text.len())));
     let res = client
@@ -389,7 +397,7 @@ async fn run() {
     let html = res.text().await.unwrap();
     assert!(html.contains(&format!(
         "<h1><a href=\"{tree}/\">{}</a>{SEP}<a href=\"{tree}/notes/\">notes</a>{SEP}deep{SEP}</h1>",
-        &tree[6..]
+        collection_hash
     )));
     assert!(html.contains("more.txt"));
     let res = client
@@ -426,7 +434,7 @@ async fn run() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let res = client
         .get(format!(
-            "{base}/tree/{}",
+            "{base}/blake3/{}/",
             z32::encode(text_tag.hash.as_bytes())
         ))
         .send()

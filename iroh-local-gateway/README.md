@@ -36,10 +36,7 @@ http://127.0.0.1:8080/blake3/<z32>
 ```
 
 For a sendme/swarmie collection root, `/blake3/<z32>` automatically shows a
-directory index. Fetch a named file at `/blake3/<z32>/path/to/file`.
-The gateway discovers the provider using the **root hash**, reads the
-collection, and streams the selected child from that same provider. Child
-hashes do not need separate Mainline announcements. Raw blobs continue to
+directory listing; see [Collections](#collections). Raw blobs continue to
 stream directly from the same bare URL. Automatic collection detection is
 limited to roots of at most 8 MiB; larger roots are served as raw blobs.
 
@@ -102,24 +99,26 @@ dropping the HTTP body drops the upstream request.
 
 ## Collections
 
-Blobs are served under `/blake3/<z32>`. iroh-blobs collections can be browsed
-under `/tree/<z32>`:
+iroh-blobs collections are browsed under the root hash:
 
 ```text
-http://127.0.0.1:8080/tree/<z32>
-http://127.0.0.1:8080/tree/<z32>/<dir>/
-http://127.0.0.1:8080/tree/<z32>/<dir>/<name>
+http://127.0.0.1:8080/blake3/<z32>
+http://127.0.0.1:8080/blake3/<z32>/<dir>/
+http://127.0.0.1:8080/blake3/<z32>/<dir>/<name>
 ```
 
 Collection names are treated as `/`-separated paths. A path that matches a
-file name serves the file like `/blake3/`, with ranges and MIME detection. Any
-other path is listed as a directory: an HTML page with its subdirectories,
-its files, and a link to the parent. Add `?sizes` to also show file
+file name serves the file like a blob, with ranges, and a MIME type from the
+file extension where known. Any other path is listed as a directory: an HTML
+page with its subdirectories, its files, and a link to the parent. The bare
+`/blake3/<z32>` shows the top level if the blob is detected as a collection;
+`/blake3/<z32>/` always treats it as one. Add `?sizes` to also show file
 sizes; the gateway then fetches the last chunk of each listed file, which
-verifies its size, up to 16 at a time. Files are fetched from the peer that
-provided the collection, so only the collection hash needs to be announced.
-`/tree/` on a blob that is not a collection returns `422`, and a path that is
-neither a file nor a directory returns `404`.
+verifies its size, up to 16 at a time. The gateway discovers the provider
+using the **root hash** and fetches files from that same provider, so child
+hashes do not need separate Mainline announcements. `/blake3/<z32>/` on a blob
+that is not a collection returns `422`, and a path that is neither a file nor
+a directory returns `404`.
 
 Malformed hashes return `400`; no discovered provider returns `404`; failed
 upstream operations return `502`; setup timeouts return `504`. Once HTTP headers

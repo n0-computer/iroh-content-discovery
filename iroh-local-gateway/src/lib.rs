@@ -106,14 +106,15 @@ impl Gateway {
 
     /// HTTP routes for blobs and paths inside collections, plus CORS preflight.
     ///
-    /// `/tree/{hash}` also browses collection directories, with optional `?sizes`.
+    /// `/blake3/{hash}` serves a blob, or lists the top level of a detected
+    /// collection. `/blake3/{hash}/{path}` serves a file of a collection or
+    /// lists a directory, where directories are the `/`-separated prefixes of
+    /// names. Listings show file sizes with `?sizes`.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/blake3/{hash}", get(blob))
+            .route("/blake3/{hash}/", get(collection_root))
             .route("/blake3/{hash}/{*path}", get(collection_path))
-            .route("/tree/{hash}", get(tree_root))
-            .route("/tree/{hash}/", get(tree_root))
-            .route("/tree/{hash}/{*path}", get(tree))
             .layer(
                 CorsLayer::new()
                     .allow_origin(Any)
@@ -326,6 +327,7 @@ impl IntoResponse for HttpError {
 async fn blob(
     State(gateway): State<Gateway>,
     Path(encoded): Path<String>,
+    RawQuery(query): RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -343,86 +345,28 @@ async fn blob(
         )
         .await
     {
-        return Ok(collection_index(&encoded, &collection.collection, method));
+        return collection_entry(
+            &gateway,
+            &encoded,
+            collection,
+            String::new(),
+            query,
+            method,
+            headers,
+        )
+        .await;
     }
     serve_blob(source, hash, &encoded, method, headers).await
 }
 
-async fn collection_path(
-    State(gateway): State<Gateway>,
-    Path((encoded, path)): Path<(String, String)>,
-    method: Method,
-    headers: HeaderMap,
-) -> Result<Response, HttpError> {
-    let root = parse_hash(&encoded)
-        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
-    let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
-        .await
-        .map_err(HttpError::timeout)??;
-    let path = path.strip_prefix('/').unwrap_or(&path);
-    let hash = collection
-        .collection
-        .iter()
-        .find(|(name, _)| name == path)
-        .map(|(_, hash)| *hash)
-        .ok_or(HttpError(
-            StatusCode::NOT_FOUND,
-            "path not found in collection",
-        ))?;
-    let source = tokio::time::timeout(
-        LOOKUP_TIMEOUT,
-        gateway.source_on_connection(collection.connection, hash, Some(path)),
-    )
-    .await
-    .map_err(HttpError::timeout)??;
-    serve_blob(source, hash, &z32::encode(hash.as_bytes()), method, headers).await
-}
-
-fn collection_index(encoded: &str, collection: &Collection, method: Method) -> Response {
-    let mut html = String::from("<!doctype html><meta charset=\"utf-8\"><ul>");
-    for (name, _) in collection.iter() {
-        let path = name
-            .split('/')
-            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
-            .collect::<Vec<_>>()
-            .join("/");
-        html.push_str("<li><a href=\"/blake3/");
-        html.push_str(&encoded);
-        html.push('/');
-        html.push_str(&path);
-        html.push_str("\">");
-        html.push_str(&escape_html(name));
-        html.push_str("</a></li>");
-    }
-    html.push_str("</ul>");
-    let response = Response::builder()
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .header(header::CONTENT_LENGTH, html.len());
-    if method == Method::HEAD {
-        response.body(Body::empty()).unwrap()
-    } else {
-        response.body(Body::from(html)).unwrap()
-    }
-}
-
-fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-async fn tree_root(
+async fn collection_root(
     state: State<Gateway>,
     Path(encoded): Path<String>,
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    tree(
+    collection_path(
         state,
         Path((encoded, String::new())),
         query,
@@ -432,7 +376,7 @@ async fn tree_root(
     .await
 }
 
-async fn tree(
+async fn collection_path(
     State(gateway): State<Gateway>,
     Path((encoded, path)): Path<(String, String)>,
     RawQuery(query): RawQuery,
@@ -441,12 +385,27 @@ async fn tree(
 ) -> Result<Response, HttpError> {
     let root = parse_hash(&encoded)
         .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
+        .await
+        .map_err(HttpError::timeout)??;
+    let path = path.strip_prefix('/').map(str::to_owned).unwrap_or(path);
+    collection_entry(&gateway, &encoded, collection, path, query, method, headers).await
+}
+
+/// Serves the file at `path` in a collection, or lists it as a directory.
+async fn collection_entry(
+    gateway: &Gateway,
+    encoded: &str,
+    source: CollectionSource,
+    path: String,
+    query: Option<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
     let CollectionSource {
         collection,
         connection,
-    } = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
-        .await
-        .map_err(HttpError::timeout)??;
+    } = source;
     let file = collection
         .iter()
         .find(|(name, _)| *name == path)
@@ -467,7 +426,7 @@ async fn tree(
     };
     let entries = Entries::new(&dir, &collection).ok_or(HttpError(
         StatusCode::NOT_FOUND,
-        "no such file or directory in collection",
+        "path not found in collection",
     ))?;
     let with_sizes = query.is_some_and(|query| {
         query
@@ -488,12 +447,7 @@ async fn tree(
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .body(Body::from(listing(
-            &encoded,
-            &dir,
-            &entries,
-            sizes.as_ref(),
-        )))
+        .body(Body::from(listing(encoded, &dir, &entries, sizes.as_ref())))
         .unwrap())
 }
 
@@ -539,7 +493,14 @@ fn listing(
 ) -> String {
     let title = html_escape(&format!("{root}/{dir}"));
     let query = if sizes.is_some() { "?sizes" } else { "" };
-    let link = |path: &str| html_escape(&percent_encode_path(&format!("/tree/{root}/{path}")));
+    let link = |path: &str| {
+        let path = path
+            .split('/')
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        html_escape(&format!("/blake3/{root}/{path}"))
+    };
     // Breadcrumbs: every ancestor links to its listing, the current directory
     // is plain text.
     let segments: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
@@ -638,19 +599,6 @@ fn html_escape(value: &str) -> String {
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
             c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Percent-encodes everything except unreserved characters and `/`.
-fn percent_encode_path(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
         }
     }
     out
