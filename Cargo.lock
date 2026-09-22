@@ -1884,6 +1884,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "udp-address-records-proto",
+ "z32",
  "zeroize",
 ]
 
