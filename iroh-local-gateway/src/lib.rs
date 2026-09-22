@@ -215,7 +215,7 @@ impl Gateway {
         let source = Source {
             connection,
             size,
-            mime,
+            mime: with_charset(mime, &prefix),
         };
         Ok(source)
     }
@@ -370,6 +370,23 @@ async fn rewrite_subdomain(mut request: Request) -> Request {
         request.extensions_mut().insert(Subdomain);
     }
     request
+}
+
+/// Adds a charset to textual content types that carry none.
+///
+/// Without it browsers decode text with a locale-dependent fallback, which
+/// renders UTF-8 wrongly. UTF-8 is assumed unless a byte order mark says the
+/// content is UTF-16.
+fn with_charset(mime: String, prefix: &[u8]) -> String {
+    if !mime.starts_with("text/") || mime.contains("charset=") {
+        return mime;
+    }
+    let charset = match prefix {
+        [0xff, 0xfe, ..] => "utf-16le",
+        [0xfe, 0xff, ..] => "utf-16be",
+        _ => "utf-8",
+    };
+    format!("{mime}; charset={charset}")
 }
 
 /// The collection a listing belongs to, and the path its links start with.

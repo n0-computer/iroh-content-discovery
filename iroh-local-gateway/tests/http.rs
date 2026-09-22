@@ -51,7 +51,12 @@ async fn run() {
         .add_bytes(b"only in collection".to_vec())
         .await
         .unwrap();
+    let markdown = "# Uebersicht\n\nnaive cafe, gru\u{00df}e, \u{2713}\n"
+        .as_bytes()
+        .to_vec();
+    let markdown_tag = store.blobs().add_bytes(markdown.clone()).await.unwrap();
     let collection = Collection::from_iter([
+        ("notes/readme.md", markdown_tag.hash),
         ("notes/hello world.txt", text_tag.hash),
         ("notes/deep/more.txt", text_tag.hash),
         ("video.mp4", video_tag.hash),
@@ -153,11 +158,21 @@ async fn run() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.bytes().await.unwrap().as_ref(), text);
     let res = client
+        .get(format!("{collection_url}/notes/readme.md"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.headers()["content-type"],
+        "text/markdown; charset=utf-8"
+    );
+    assert_eq!(res.bytes().await.unwrap().as_ref(), markdown);
+    let res = client
         .get(format!("{collection_url}/site/style.css"))
         .send()
         .await
         .unwrap();
-    assert_eq!(res.headers()["content-type"], "text/css");
+    assert_eq!(res.headers()["content-type"], "text/css; charset=utf-8");
     assert_eq!(res.bytes().await.unwrap().as_ref(), text);
     let res = client
         .get(format!("{collection_url}/site/%3Cunsafe%3E.txt"))
@@ -478,7 +493,7 @@ async fn run() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res.headers()["content-type"], "text/css");
+    assert_eq!(res.headers()["content-type"], "text/css; charset=utf-8");
     assert_eq!(res.bytes().await.unwrap().as_ref(), text);
     let res = client
         .get(format!("{site}/missing.txt"))
