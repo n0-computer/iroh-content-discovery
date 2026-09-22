@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
             .await
     };
     let result = tokio::select! {
-        result = publisher.run() => result,
+        result = publisher.run() => result.map_err(anyhow::Error::from),
         result = serve => result,
     };
     client.close().await;

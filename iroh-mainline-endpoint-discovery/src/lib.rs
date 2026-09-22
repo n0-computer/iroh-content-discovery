@@ -55,27 +55,17 @@ pub fn infohash_hex(id: &[u8; 20]) -> String {
 }
 
 /// Error parsing an infohash or BLAKE3 hash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[n0_error::stack_error(derive)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HashParseError {
     /// Neither 40 nor 64 hexadecimal characters were supplied.
+    #[error("expected 40-char infohash hex or 64-char BLAKE3 hex")]
     InvalidLength,
     /// A non-hexadecimal character was supplied.
+    #[error("invalid hex")]
     InvalidHex,
 }
-
-impl std::fmt::Display for HashParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidLength => {
-                write!(f, "expected 40-char infohash hex or 64-char BLAKE3 hex")
-            }
-            Self::InvalidHex => write!(f, "invalid hex"),
-        }
-    }
-}
-
-impl std::error::Error for HashParseError {}
 
 fn decode_hex20(value: &str) -> Result<[u8; 20], HashParseError> {
     let mut out = [0; 20];

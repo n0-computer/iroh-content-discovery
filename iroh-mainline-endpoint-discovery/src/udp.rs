@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use n0_error::e;
 use n0_mainline::{ActorShutdown, DatagramHookGuard, Dht};
 use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 use tracing::debug;
@@ -17,45 +18,26 @@ use udp_address_records_proto::{
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// UDP address-index client error.
-#[derive(Debug)]
+#[n0_error::stack_error(derive, add_meta)]
 pub enum UdpError {
     /// The Mainline node's datagram hook could not be attached.
-    Attach(ActorShutdown),
+    Attach {
+        /// Underlying Mainline actor error.
+        #[error(from, source)]
+        source: ActorShutdown,
+    },
     /// No matching response arrived before the deadline.
-    Timeout,
+    #[error("UDP operation timed out")]
+    Timeout {},
     /// The opaque value exceeds [`MAX_VALUE_LEN`] or the UDP datagram limit.
-    TooLarge,
+    #[error("opaque value exceeds {MAX_VALUE_LEN} bytes")]
+    TooLarge {},
     /// No replica addresses are configured.
-    NoReplicas,
+    #[error("no UDP replicas configured")]
+    NoReplicas {},
     /// The client actor stopped.
-    Closed,
-}
-
-impl std::fmt::Display for UdpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Attach(err) => err.fmt(f),
-            Self::Timeout => write!(f, "UDP operation timed out"),
-            Self::TooLarge => write!(f, "opaque value exceeds {MAX_VALUE_LEN} bytes"),
-            Self::NoReplicas => write!(f, "no UDP replicas configured"),
-            Self::Closed => write!(f, "UDP client closed"),
-        }
-    }
-}
-
-impl std::error::Error for UdpError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Attach(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<ActorShutdown> for UdpError {
-    fn from(value: ActorShutdown) -> Self {
-        Self::Attach(value)
-    }
+    #[error("UDP client closed")]
+    Closed {},
 }
 
 enum ActorMsg {
@@ -108,7 +90,7 @@ impl UdpClient {
         self.tx
             .send(ActorMsg::AddReplica(replica))
             .await
-            .map_err(|_| UdpError::Closed)
+            .map_err(|_| e!(UdpError::Closed))
     }
 
     pub(crate) async fn replace_replicas(
@@ -118,7 +100,7 @@ impl UdpClient {
         self.tx
             .send(ActorMsg::ReplaceReplicas(replicas))
             .await
-            .map_err(|_| UdpError::Closed)
+            .map_err(|_| e!(UdpError::Closed))
     }
 
     /// Remove a configured replica.
@@ -126,7 +108,7 @@ impl UdpClient {
         self.tx
             .send(ActorMsg::RemoveReplica(replica))
             .await
-            .map_err(|_| UdpError::Closed)
+            .map_err(|_| e!(UdpError::Closed))
     }
 
     /// Obtain tokens and publish `value` to every responsive replica.
@@ -137,8 +119,8 @@ impl UdpClient {
         self.tx
             .send(ActorMsg::Publish(value, tx))
             .await
-            .map_err(|_| UdpError::Closed)?;
-        rx.await.map_err(|_| UdpError::Closed)?
+            .map_err(|_| e!(UdpError::Closed))?;
+        rx.await.map_err(|_| e!(UdpError::Closed))?
     }
 
     /// Publish to one replica, adding it to this client first.
@@ -157,8 +139,8 @@ impl UdpClient {
         self.tx
             .send(ActorMsg::Resolve(addr, tx))
             .await
-            .map_err(|_| UdpError::Closed)?;
-        rx.await.map_err(|_| UdpError::Closed)?
+            .map_err(|_| e!(UdpError::Closed))?;
+        rx.await.map_err(|_| e!(UdpError::Closed))?
     }
 
     /// Resolve through one replica, adding it to this client first.
@@ -266,11 +248,11 @@ impl Actor {
             }
             ActorMsg::Publish(value, response) => {
                 if value.len() > MAX_VALUE_LEN {
-                    let _ = response.send(Err(UdpError::TooLarge));
+                    let _ = response.send(Err(e!(UdpError::TooLarge)));
                     return;
                 }
                 if self.replicas.is_empty() {
-                    let _ = response.send(Err(UdpError::NoReplicas));
+                    let _ = response.send(Err(e!(UdpError::NoReplicas)));
                     return;
                 }
                 let tx = self.next_id();
@@ -295,12 +277,12 @@ impl Actor {
                         },
                     );
                 } else {
-                    let _ = response.send(Err(UdpError::TooLarge));
+                    let _ = response.send(Err(e!(UdpError::TooLarge)));
                 }
             }
             ActorMsg::Resolve(addr, response) => {
                 if self.replicas.is_empty() {
-                    let _ = response.send(Err(UdpError::NoReplicas));
+                    let _ = response.send(Err(e!(UdpError::NoReplicas)));
                     return;
                 }
                 let tx = self.next_id();
@@ -323,7 +305,7 @@ impl Actor {
                         },
                     );
                 } else {
-                    let _ = response.send(Err(UdpError::TooLarge));
+                    let _ = response.send(Err(e!(UdpError::TooLarge)));
                 }
             }
         }
@@ -417,7 +399,7 @@ impl Actor {
             return;
         };
         let result = if pending.stored.is_empty() {
-            Err(UdpError::Timeout)
+            Err(e!(UdpError::Timeout))
         } else {
             let mut addrs: Vec<_> = pending.stored.into_iter().collect();
             addrs.sort();
@@ -431,7 +413,7 @@ impl Actor {
             return;
         };
         let result = if !pending.responded {
-            Err(UdpError::Timeout)
+            Err(e!(UdpError::Timeout))
         } else {
             let mut values: Vec<_> = pending.values.into_iter().collect();
             values.sort();

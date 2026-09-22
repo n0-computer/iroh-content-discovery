@@ -1868,13 +1868,13 @@ dependencies = [
 name = "iroh-mainline-endpoint-discovery"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-stream",
  "blake3",
  "clap",
  "iroh",
  "iroh-base",
  "iroh-blobs",
+ "n0-error",
  "n0-future",
  "n0-mainline",
  "postcard",

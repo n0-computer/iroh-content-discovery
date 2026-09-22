@@ -1,5 +1,6 @@
 //! Convenience wrapper around the UDP directory client.
 
+use n0_error::e;
 use n0_future::StreamExt;
 use std::{collections::HashSet, net::SocketAddrV4, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
@@ -170,15 +171,15 @@ impl Directory {
                 };
                 match tokio::time::timeout(Duration::from_secs(30), lookup).await {
                     Ok(result) => result?,
-                    Err(_) if peers.is_empty() => return Err(UdpError::Timeout),
+                    Err(_) if peers.is_empty() => return Err(e!(UdpError::Timeout)),
                     Err(_) => {}
                 }
             } else {
-                signed_result.map_err(|_| UdpError::Timeout)??;
+                signed_result.map_err(|_| e!(UdpError::Timeout))??;
             }
         }
         if peers.is_empty() {
-            return Err(UdpError::NoReplicas);
+            return Err(e!(UdpError::NoReplicas));
         }
         self.client.replace_replicas(peers).await?;
         state.refreshed = Some(tokio::time::Instant::now());
@@ -201,7 +202,7 @@ impl Directory {
         record: &SignedRecord,
     ) -> Result<Vec<SocketAddrV4>, DirectoryError> {
         self.refresh_replicas().await?;
-        let value = record.encode().map_err(|_| DirectoryError::Encoding)?;
+        let value = record.encode().map_err(|_| e!(DirectoryError::Encoding))?;
         self.client.publish(value).await.map_err(Into::into)
     }
 
@@ -224,36 +225,18 @@ impl From<UdpClient> for Directory {
 }
 
 /// Error from [`Directory::publish`] or [`Directory::lookup`].
-#[derive(Debug)]
+#[n0_error::stack_error(derive, add_meta)]
 pub enum DirectoryError {
     /// UDP transport failed.
-    Udp(UdpError),
+    #[error(transparent)]
+    Udp {
+        /// Underlying UDP client error.
+        #[error(from, source)]
+        source: UdpError,
+    },
     /// The signed record could not be encoded.
-    Encoding,
-}
-
-impl std::fmt::Display for DirectoryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Udp(err) => err.fmt(f),
-            Self::Encoding => write!(f, "could not encode signed endpoint record"),
-        }
-    }
-}
-
-impl std::error::Error for DirectoryError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Udp(err) => Some(err),
-            Self::Encoding => None,
-        }
-    }
-}
-
-impl From<UdpError> for DirectoryError {
-    fn from(value: UdpError) -> Self {
-        Self::Udp(value)
-    }
+    #[error("could not encode signed endpoint record")]
+    Encoding {},
 }
 
 #[cfg(test)]

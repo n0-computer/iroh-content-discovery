@@ -11,12 +11,12 @@ keywords = ["iroh", "p2p", "dht", "mainline", "discovery"]
 categories = ["network-programming"]
 
 [dependencies]
-anyhow.workspace = true
 async-stream = "0.3"
 blake3.workspace = true
 clap.workspace = true
 iroh-base.workspace = true
 udp-address-records-proto = { version = "0.1.0", path = "../udp-address-records-proto" }
+n0-error = "1.0.1"
 n0-future.workspace = true
 n0-mainline.workspace = true
 postcard.workspace = true

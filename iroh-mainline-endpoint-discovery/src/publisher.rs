@@ -7,8 +7,8 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
 use iroh_base::{EndpointId, SecretKey};
+use n0_error::{Result, StackResultExt, StdResultExt};
 use n0_mainline::{Dht, Id};
 use tokio::sync::{Notify, watch};
 
@@ -126,7 +126,7 @@ impl Publisher {
         let next_mapping = value_addrs
             .first()
             .copied()
-            .context("address-index publish returned no public mapping")?;
+            .std_context("address-index publish returned no public mapping")?;
         let accelerated = *mapping != Some(next_mapping);
 
         if accelerated {
@@ -143,11 +143,11 @@ impl Publisher {
             self.dht
                 .get_closest_nodes(infohash)
                 .await
-                .with_context(|| format!("get_closest_nodes for {infohash}"))?;
+                .with_context(|_| format!("get_closest_nodes for {infohash}"))?;
             self.dht
                 .announce_peer(infohash, None)
                 .await
-                .with_context(|| format!("announce_peer infohash {infohash}"))?;
+                .with_context(|_| format!("announce_peer infohash {infohash}"))?;
 
             if index + 1 != entries.len() {
                 tokio::time::sleep(if accelerated {

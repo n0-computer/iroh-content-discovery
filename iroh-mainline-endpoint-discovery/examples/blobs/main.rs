@@ -3,12 +3,12 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
 use iroh::{endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobsProtocol, HashAndFormat, api::downloader::ContentDiscovery, store::mem::MemStore,
 };
 use iroh_mainline_endpoint_discovery::{Directory, Publisher, Resolver, infohash_from_blake3};
+use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
 use n0_future::stream;
 use n0_mainline::{Dht, Id};
 use tokio::io::AsyncReadExt;
@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
         .ok()
         .map(|value| value.parse())
         .transpose()
-        .context("invalid IROH_ADDR_INDEX socket")?;
+        .std_context("invalid IROH_ADDR_INDEX socket")?;
 
     let provider_store = MemStore::new();
     let tag = provider_store.blobs().add_bytes(DATA.to_vec()).await?;
@@ -45,9 +45,9 @@ async fn main() -> Result<()> {
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&provider_store, None))
         .spawn();
 
-    let dht = Dht::client().context("DHT")?;
+    let dht = Dht::client().std_context("DHT")?;
     if !dht.bootstrapped().await? {
-        bail!("DHT bootstrap failed");
+        bail_any!("DHT bootstrap failed");
     }
     let index = match replica {
         Some(replica) => Directory::udp(dht.clone(), replica).await?,
@@ -69,22 +69,23 @@ async fn main() -> Result<()> {
                 .downloader(&client_ep)
                 .download(blob_hash, MainlineProviders(resolver)),
         )
-        .await??;
+        .await
+        .anyerr()??;
         let mut reader = client_store.blobs().reader(blob_hash);
         let mut data = Vec::new();
         reader.read_to_end(&mut data).await?;
         println!("downloaded: {}", String::from_utf8_lossy(&data));
         client_ep.close().await;
         client_store.shutdown().await?;
-        anyhow::Ok(())
+        n0_error::Ok(())
     };
 
     tokio::select! {
         result = publisher.run() => result?,
         result = download => result?,
-        _ = tokio::signal::ctrl_c() => bail!("interrupted"),
+        _ = tokio::signal::ctrl_c() => bail_any!("interrupted"),
     }
-    provider_router.shutdown().await?;
+    provider_router.shutdown().await.anyerr()?;
     Ok(())
 }
 

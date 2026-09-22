@@ -6,8 +6,8 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use anyhow::{Context, Result};
 use iroh_base::EndpointId;
+use n0_error::{Result, StackResultExt};
 use n0_future::{FuturesUnordered, StreamExt, stream};
 use n0_mainline::{Dht, Id};
 use tokio::task::JoinSet;

@@ -187,7 +187,7 @@ async fn replicas_are_discovered_on_mainline_and_share_the_announced_socket() {
         let directory = loop {
             match Directory::discover(reader_dht.clone()).await {
                 Ok(directory) => break directory,
-                Err(iroh_mainline_endpoint_discovery::UdpError::NoReplicas) => {
+                Err(iroh_mainline_endpoint_discovery::UdpError::NoReplicas { .. }) => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("discovery failed: {err}"),
@@ -325,7 +325,7 @@ async fn signed_bootstrap_works_without_rendezvous_announcements() {
         let other = n0_mainline::SigningKey::from_bytes(&[43; 32]);
         assert!(matches!(
             Directory::discover_with_authority(reader, other.verifying_key().to_bytes()).await,
-            Err(iroh_mainline_endpoint_discovery::UdpError::NoReplicas)
+            Err(iroh_mainline_endpoint_discovery::UdpError::NoReplicas { .. })
         ));
     })
     .await
