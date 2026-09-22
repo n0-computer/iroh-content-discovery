@@ -60,16 +60,9 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
 /// Concurrent size requests per collection listing.
 const SIZE_REQUESTS: usize = 16;
 const REPO_URL: &str = "https://github.com/n0-computer/iroh-content-discovery";
-const LISTING_CSS: &str = "\
-body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
-color:#000;background:#fff;max-width:64rem;margin:2rem auto;padding:0 1rem}\
-a{color:#000}\
-header,header a,.meta,.meta a{color:#777}\
-h1{font-size:1rem;font-weight:normal;margin:1.5rem 0 .5rem;word-break:break-all}\
-table{border-collapse:collapse;width:100%;margin-top:1rem}\
-td{padding:.25rem 1rem .25rem 0;border-top:1px solid #ddd;vertical-align:top}\
-td.size{text-align:right;white-space:nowrap;color:#777}\
-td.hash{color:#777;font-size:12px;word-break:break-all}";
+const LISTING_CSS: &str = include_str!("listing.css");
+/// Path separator in listing headings; `<wbr>` lets long paths wrap after it.
+const SEPARATOR: &str = "&nbsp;/&nbsp;<wbr>";
 
 /// An HTTP gateway using a caller-owned iroh endpoint and content resolver.
 #[derive(Clone)]
@@ -547,12 +540,36 @@ fn listing(
     let title = html_escape(&format!("{root}/{dir}"));
     let query = if sizes.is_some() { "?sizes" } else { "" };
     let link = |path: &str| html_escape(&percent_encode_path(&format!("/tree/{root}/{path}")));
+    // Breadcrumbs: every ancestor links to its listing, the current directory
+    // is plain text.
+    let segments: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    let mut heading = if segments.is_empty() {
+        root.to_string()
+    } else {
+        format!("<a href=\"{}{query}\">{root}</a>", link(""))
+    };
+    let mut path = String::new();
+    for (index, segment) in segments.iter().enumerate() {
+        path.push_str(segment);
+        path.push('/');
+        heading.push_str(SEPARATOR);
+        if index + 1 == segments.len() {
+            heading.push_str(&html_escape(segment));
+        } else {
+            heading.push_str(&format!(
+                "<a href=\"{}{query}\">{}</a>",
+                link(&path),
+                html_escape(segment)
+            ));
+        }
+    }
+    heading.push_str(SEPARATOR);
     let mut html = format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{LISTING_CSS}</style>\n\
          <header><a href=\"{REPO_URL}\">iroh content discovery</a></header>\n\
-         <h1>{title}</h1>\n"
+         <h1>{heading}</h1>\n"
     );
     if sizes.is_none() {
         html.push_str("<p class=\"meta\"><a href=\"?sizes\">Fetch sizes</a></p>\n");
