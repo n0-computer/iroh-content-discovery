@@ -8,7 +8,12 @@ use std::{
 
 use clap::Parser;
 use iroh::{endpoint::presets, protocol::Router};
-use iroh_blobs::{BlobsProtocol, Hash, format::collection::Collection, store::mem::MemStore};
+use iroh_blobs::{
+    BlobFormat, BlobsProtocol, Hash,
+    api::blobs::{AddPathOptions, ImportMode},
+    format::collection::Collection,
+    store::fs::FsStore,
+};
 use iroh_mainline_endpoint_discovery::{Directory, Publisher, infohash_from_blake3};
 use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id};
@@ -39,10 +44,22 @@ async fn main() -> Result<()> {
         bail_any!("no files found at {}", root.display());
     }
 
-    let store = MemStore::new();
+    // Files are referenced in place rather than copied into the store, which
+    // only holds the outboards and files small enough to be inlined. The
+    // files must not change while they are provided.
+    let store_dir = tempfile::tempdir().std_context("store directory")?;
+    let store = FsStore::load(store_dir.path()).await?;
     let mut entries = Vec::with_capacity(files.len());
     for (name, path) in files {
-        let tag = store.blobs().add_path(&path).with_tag().await?;
+        let tag = store
+            .blobs()
+            .add_path_with_opts(AddPathOptions {
+                path,
+                mode: ImportMode::TryReference,
+                format: BlobFormat::Raw,
+            })
+            .with_tag()
+            .await?;
         entries.push((name, tag.hash));
     }
     let collection: Collection = entries.iter().cloned().collect();
@@ -93,7 +110,9 @@ async fn main() -> Result<()> {
         _ = announced => unreachable!(),
         _ = tokio::signal::ctrl_c() => Ok(()),
     };
+    // Router shutdown also shuts down the store before the directory is removed.
     router.shutdown().await.anyerr()?;
+    drop(store_dir);
     result
 }
 
