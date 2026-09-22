@@ -181,7 +181,9 @@ separate async task; dropping that future stops renewal without stopping the DHT
 The fourth workspace project, [`iroh-local-gateway`](iroh-local-gateway/README.md),
 serves `http://127.0.0.1:8080/blake3/<z32>`. It discovers one content peer through
 Mainline and the tracker, then streams Bao-verified bytes with MIME detection
-and HTTP range support for video seeking.
+and HTTP range support for video seeking. Collection roots automatically show
+an index at `/blake3/<z32>`, and `/blake3/<z32>/path/to/file` streams a file
+from the same provider.
 
 ```sh
 cargo run -p iroh-local-gateway -- --tracker 127.0.0.1:11223

@@ -30,6 +30,18 @@ export function makeRules(settings) {
       isUrlFilterCaseSensitive: true,
       resourceTypes,
     },
+  }, {
+    id: 2,
+    priority: 1,
+    action: {
+      type: "redirect",
+      redirect: { regexSubstitution: `http://127.0.0.1:${port}/blake3/\\1/\\2` },
+    },
+    condition: {
+      regexFilter: "^https?://([a-z0-9]+)\\.blake3\\.link(?::[0-9]+)?/([^?#].*)$",
+      isUrlFilterCaseSensitive: true,
+      resourceTypes,
+    },
   }];
 }
 

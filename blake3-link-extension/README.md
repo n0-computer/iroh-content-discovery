@@ -7,11 +7,14 @@ web server:
 ```text
 https://<z32>.blake3.link/
     -> http://127.0.0.1:8080/blake3/<z32>
+https://<z32>.blake3.link/path/to/file
+    -> http://127.0.0.1:8080/blake3/<z32>/path/to/file
 ```
 
 The hash is a 52-character lowercase z-base-32 encoded BLAKE3 digest, matching
-the gateway route. Query strings are retained. Only root paths on hash
-subdomains are rewritten. The apex `https://blake3.link/` stays untouched so it
+the gateway route. A collection root shows an index at the bare URL. Query
+strings are retained. Paths within collections are
+rewritten too. The apex `https://blake3.link/` stays untouched so it
 can host instructions or an extension download page. Other hosts, nested subdomains, and localhost requests are not matched.
 The extension captures a single alphanumeric label; the gateway validates its
 length, alphabet, and canonical encoding, returning 400 for invalid hashes.
@@ -31,7 +34,7 @@ length, alphabet, and canonical encoding, returning 400 for invalid hashes.
    ```
 
 Use your actual tracker address or the gateway's public-key/infohash discovery
-options. A peer must be serving and announcing the requested blob.
+options. A peer must be serving and announcing the requested root hash.
 
 After editing the extension files, click its **Reload** button on the extensions
 page. If previously loaded with different host permissions, approve the new

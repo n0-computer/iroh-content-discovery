@@ -25,6 +25,7 @@ use bytes::Bytes;
 use iroh::{Endpoint, endpoint::Connection};
 use iroh_blobs::{
     Hash,
+    format::collection::Collection,
     get::fsm::{self, AtBlobContent, BlobContentNext, ConnectedNext, EndBlobNext},
     protocol::{ChunkRangesExt, ChunkRangesSeq, GetRequest},
 };
@@ -32,6 +33,7 @@ use iroh_mainline_endpoint_discovery::{Resolver, infohash_from_blake3};
 use lru::LruCache;
 use mime_classifier::MimeClassifier;
 use n0_future::StreamExt;
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
 
 mod ranges;
@@ -40,6 +42,19 @@ use ranges::Selection;
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
+const MAX_AUTO_COLLECTION_ROOT_BYTES: u64 = 8 * 1024 * 1024;
+const COLLECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'%')
+    .add(b'#')
+    .add(b'?')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'"')
+    .add(b'\'')
+    .add(b'&');
 
 /// An HTTP gateway using a caller-owned iroh endpoint and content resolver.
 #[derive(Clone)]
@@ -51,6 +66,7 @@ struct Inner {
     classifier: MimeClassifier,
     // Reuse one peer for repeated video seeks, with bounded metadata memory.
     cache: Mutex<LruCache<Hash, Source>>,
+    collections: Mutex<LruCache<Hash, CollectionSource>>,
 }
 
 #[derive(Clone)]
@@ -58,6 +74,12 @@ struct Source {
     connection: Connection,
     size: u64,
     mime: String,
+}
+
+#[derive(Clone)]
+struct CollectionSource {
+    connection: Connection,
+    collection: Collection,
 }
 
 impl Gateway {
@@ -68,13 +90,15 @@ impl Gateway {
             resolver,
             classifier: MimeClassifier::new(),
             cache: Mutex::new(LruCache::new(128.try_into().unwrap())),
+            collections: Mutex::new(LruCache::new(128.try_into().unwrap())),
         }))
     }
 
-    /// HTTP routes for `GET` and `HEAD /blake3/{z32}` plus CORS preflight.
+    /// HTTP routes for blobs and paths inside collections, plus CORS preflight.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/blake3/{hash}", get(blob))
+            .route("/blake3/{hash}/{*path}", get(collection_path))
             .layer(
                 CorsLayer::new()
                     .allow_origin(Any)
@@ -110,6 +134,13 @@ impl Gateway {
         {
             return Ok(source);
         }
+        let connection = self.connection(hash).await?;
+        let source = self.source_on_connection(connection, hash, None).await?;
+        self.0.cache.lock().unwrap().put(hash, source.clone());
+        Ok(source)
+    }
+
+    async fn connection(&self, hash: Hash) -> Result<Connection, HttpError> {
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
         let peer = self
             .0
@@ -121,23 +152,38 @@ impl Gateway {
                 StatusCode::NOT_FOUND,
                 "no peer found for this hash",
             ))?;
-        let connection = self
-            .0
+        self.0
             .endpoint
             .connect(peer, iroh_blobs::ALPN)
             .await
-            .map_err(HttpError::upstream)?;
+            .map_err(HttpError::upstream)
+    }
+
+    async fn source_on_connection(
+        &self,
+        connection: Connection,
+        hash: Hash,
+        name: Option<&str>,
+    ) -> Result<Source, HttpError> {
         let (size, prefix) = sniff(&connection, hash)
             .await
             .map_err(HttpError::upstream)?;
+        let supplied_type = name
+            .and_then(|name| std::path::Path::new(name).extension())
+            .and_then(|extension| extension.to_str())
+            .and_then(|extension| mime_guess::from_ext(extension).first());
         let mime = self
             .0
             .classifier
             .classify(
                 mime_classifier::LoadContext::Browsing,
-                mime_classifier::NoSniffFlag::Off,
+                if supplied_type.is_some() {
+                    mime_classifier::NoSniffFlag::On
+                } else {
+                    mime_classifier::NoSniffFlag::Off
+                },
                 mime_classifier::ApacheBugFlag::Off,
-                &None,
+                &supplied_type,
                 &prefix,
             )
             .to_string();
@@ -146,7 +192,39 @@ impl Gateway {
             size,
             mime,
         };
-        self.0.cache.lock().unwrap().put(hash, source.clone());
+        Ok(source)
+    }
+
+    async fn collection(&self, hash: Hash) -> Result<CollectionSource, HttpError> {
+        let cached = self.0.collections.lock().unwrap().get(&hash).cloned();
+        if let Some(source) = cached
+            && source.connection.close_reason().is_none()
+        {
+            return Ok(source);
+        }
+        let connection = self.connection(hash).await?;
+        self.collection_on_connection(hash, connection).await
+    }
+
+    async fn collection_on_connection(
+        &self,
+        hash: Hash,
+        connection: Connection,
+    ) -> Result<CollectionSource, HttpError> {
+        let cached = self.0.collections.lock().unwrap().get(&hash).cloned();
+        if let Some(source) = cached
+            && source.connection.close_reason().is_none()
+        {
+            return Ok(source);
+        }
+        let collection = read_collection(&connection, hash)
+            .await
+            .map_err(HttpError::upstream)?;
+        let source = CollectionSource {
+            connection,
+            collection,
+        };
+        self.0.collections.lock().unwrap().put(hash, source.clone());
         Ok(source)
     }
 }
@@ -203,6 +281,94 @@ async fn blob(
     let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
         .map_err(HttpError::timeout)??;
+    if source.size >= 32
+        && source.size.is_multiple_of(32)
+        && source.size <= MAX_AUTO_COLLECTION_ROOT_BYTES
+        && let Ok(Ok(collection)) = tokio::time::timeout(
+            COLLECTION_PROBE_TIMEOUT,
+            gateway.collection_on_connection(hash, source.connection.clone()),
+        )
+        .await
+    {
+        return Ok(collection_index(&encoded, &collection.collection, method));
+    }
+    serve_blob(source, hash, &encoded, method, headers).await
+}
+
+async fn collection_path(
+    State(gateway): State<Gateway>,
+    Path((encoded, path)): Path<(String, String)>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let root = parse_hash(&encoded)
+        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
+        .await
+        .map_err(HttpError::timeout)??;
+    let path = path.strip_prefix('/').unwrap_or(&path);
+    let hash = collection
+        .collection
+        .iter()
+        .find(|(name, _)| name == path)
+        .map(|(_, hash)| *hash)
+        .ok_or(HttpError(
+            StatusCode::NOT_FOUND,
+            "path not found in collection",
+        ))?;
+    let source = tokio::time::timeout(
+        LOOKUP_TIMEOUT,
+        gateway.source_on_connection(collection.connection, hash, Some(path)),
+    )
+    .await
+    .map_err(HttpError::timeout)??;
+    serve_blob(source, hash, &z32::encode(hash.as_bytes()), method, headers).await
+}
+
+fn collection_index(encoded: &str, collection: &Collection, method: Method) -> Response {
+    let mut html = String::from("<!doctype html><meta charset=\"utf-8\"><ul>");
+    for (name, _) in collection.iter() {
+        let path = name
+            .split('/')
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        html.push_str("<li><a href=\"/blake3/");
+        html.push_str(&encoded);
+        html.push('/');
+        html.push_str(&path);
+        html.push_str("\">");
+        html.push_str(&escape_html(name));
+        html.push_str("</a></li>");
+    }
+    html.push_str("</ul>");
+    let response = Response::builder()
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::CONTENT_LENGTH, html.len());
+    if method == Method::HEAD {
+        response.body(Body::empty()).unwrap()
+    } else {
+        response.body(Body::from(html)).unwrap()
+    }
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+async fn serve_blob(
+    source: Source,
+    hash: Hash,
+    encoded: &str,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
     let etag = format!("\"{encoded}\"");
     let builder = Response::builder()
         .header(header::CONTENT_TYPE, &source.mime)
@@ -352,6 +518,25 @@ async fn start(
         bail!("expected blob root");
     };
     Ok(root.next().next().await?)
+}
+
+async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<Collection> {
+    let request = GetRequest::new(
+        hash,
+        ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::all()]),
+    );
+    let connected = fsm::start(connection.clone(), request, Default::default())
+        .next()
+        .await?;
+    let ConnectedNext::StartRoot(root) = connected.next().await? else {
+        bail!("expected collection root");
+    };
+    let (end, _, collection) = Collection::read_fsm(root).await?;
+    let EndBlobNext::Closing(closing) = end else {
+        bail!("unexpected collection child");
+    };
+    closing.next().await?;
+    Ok(collection)
 }
 
 async fn sniff(connection: &Connection, hash: Hash) -> anyhow::Result<(u64, Vec<u8>)> {
