@@ -13,6 +13,9 @@ use n0_mainline::Dht;
 use reqwest::{Client, StatusCode};
 use udp_address_records::{Limits, Server};
 
+/// Path separator in listing headings.
+const SEP: &str = "&nbsp;/&nbsp;<wbr>";
+
 #[tokio::test]
 async fn streams_video_and_ranges_through_discovery() {
     tokio::time::timeout(Duration::from_secs(60), run())
@@ -43,6 +46,7 @@ async fn run() {
     let empty_tag = store.blobs().add_bytes(Vec::new()).await.unwrap();
     let collection: Collection = [
         ("notes/hello world.txt".to_string(), text_tag.hash),
+        ("notes/deep/more.txt".to_string(), text_tag.hash),
         ("video.mp4".to_string(), video_tag.hash),
     ]
     .into_iter()
@@ -282,6 +286,7 @@ async fn run() {
         assert!(!html.contains("hello"));
         assert!(html.contains("iroh-content-discovery\">iroh content discovery</a>"));
         assert!(html.contains("<a href=\"?sizes\">Fetch sizes</a>"));
+        assert!(html.contains(&format!("<h1>{}{SEP}</h1>", &tree[6..])));
     }
     let res = client
         .get(format!("{collection_url}?sizes"))
@@ -303,7 +308,22 @@ async fn run() {
         .unwrap();
     let html = res.text().await.unwrap();
     assert!(html.contains(&format!("href=\"{tree}/?sizes\">../")));
+    assert!(html.contains(&format!(
+        "<h1><a href=\"{tree}/?sizes\">{}</a>{SEP}notes{SEP}</h1>",
+        &tree[6..]
+    )));
     assert!(html.contains(&format!("<td class=\"size\">{} B</td>", text.len())));
+    let res = client
+        .get(format!("{collection_url}/notes/deep/"))
+        .send()
+        .await
+        .unwrap();
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!(
+        "<h1><a href=\"{tree}/\">{}</a>{SEP}<a href=\"{tree}/notes/\">notes</a>{SEP}deep{SEP}</h1>",
+        &tree[6..]
+    )));
+    assert!(html.contains("more.txt"));
     let res = client
         .get(format!("{collection_url}/notes"))
         .send()

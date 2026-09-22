@@ -1,0 +1,79 @@
+body {
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #000;
+  background: #fff;
+  max-width: 64rem;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+
+a {
+  color: #000;
+}
+
+header,
+header a,
+.meta,
+.meta a {
+  color: #444;
+}
+
+h1 {
+  font-size: 1.15em;
+  font-weight: normal;
+  margin: 1.5rem 0 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 1rem;
+}
+
+td {
+  padding: 0.25rem 1rem 0.25rem 0;
+  border-top: 1px solid #ccc;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+td.size {
+  text-align: right;
+  white-space: nowrap;
+  color: #444;
+}
+
+td.hash {
+  color: #888;
+}
+
+/* On narrow screens, show name and size on one line and the hash below. */
+@media (max-width: 40rem) {
+  body {
+    margin: 1rem auto;
+  }
+
+  tr {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    border-top: 1px solid #ccc;
+  }
+
+  td {
+    border-top: none;
+  }
+
+  td:empty {
+    display: none;
+  }
+
+  td.size {
+    padding-right: 0;
+  }
+
+  td.hash {
+    grid-column: 1 / -1;
+    padding-top: 0;
+  }
+}
