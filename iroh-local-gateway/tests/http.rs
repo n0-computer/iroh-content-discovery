@@ -13,6 +13,9 @@ use n0_mainline::Dht;
 use reqwest::{Client, StatusCode};
 use udp_address_records::{Limits, Server};
 
+/// Path separator in listing headings.
+const SEP: &str = "&nbsp;/&nbsp;<wbr>";
+
 #[tokio::test]
 async fn streams_video_and_ranges_through_discovery() {
     tokio::time::timeout(Duration::from_secs(60), run())
@@ -49,6 +52,9 @@ async fn run() {
         .await
         .unwrap();
     let collection = Collection::from_iter([
+        ("notes/hello world.txt", text_tag.hash),
+        ("notes/deep/more.txt", text_tag.hash),
+        ("video.mp4", video_tag.hash),
         ("site/index.html", text_tag.hash),
         ("site/style.css", text_tag.hash),
         ("media/video.mp4", video_tag.hash),
@@ -335,6 +341,98 @@ async fn run() {
         .unwrap();
     assert!(res.status().is_success());
     assert_eq!(res.headers()["access-control-allow-origin"], "*");
+
+    let tree = format!("/tree/{}", z32::encode(collection_tag.hash().as_bytes()));
+    let collection_url = format!("{base}{tree}");
+    for top in [collection_url.clone(), format!("{collection_url}/")] {
+        let res = client.get(&top).send().await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "text/html; charset=utf-8");
+        let html = res.text().await.unwrap();
+        assert!(html.contains(&format!("href=\"{tree}/notes/\"")));
+        assert!(html.contains(&format!("href=\"{tree}/video.mp4\"")));
+        assert!(!html.contains("hello"));
+        assert!(html.contains("iroh-content-discovery\">iroh content discovery</a>"));
+        assert!(html.contains("<a href=\"?sizes\">Fetch sizes</a>"));
+        assert!(html.contains(&format!("<h1>{}{SEP}</h1>", &tree[6..])));
+    }
+    let res = client
+        .get(format!("{collection_url}?sizes"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = res.text().await.unwrap();
+    assert!(!html.contains("Fetch sizes"));
+    assert!(html.contains(&format!("href=\"{tree}/notes/?sizes\"")));
+    assert!(html.contains(&format!(
+        "<td class=\"size\">{:.1} KiB</td>",
+        video.len() as f64 / 1024.0
+    )));
+    let res = client
+        .get(format!("{collection_url}/notes/?sizes"))
+        .send()
+        .await
+        .unwrap();
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!("href=\"{tree}/?sizes\">../")));
+    assert!(html.contains(&format!(
+        "<h1><a href=\"{tree}/?sizes\">{}</a>{SEP}notes{SEP}</h1>",
+        &tree[6..]
+    )));
+    assert!(html.contains(&format!("<td class=\"size\">{} B</td>", text.len())));
+    let res = client
+        .get(format!("{collection_url}/notes/deep/"))
+        .send()
+        .await
+        .unwrap();
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!(
+        "<h1><a href=\"{tree}/\">{}</a>{SEP}<a href=\"{tree}/notes/\">notes</a>{SEP}deep{SEP}</h1>",
+        &tree[6..]
+    )));
+    assert!(html.contains("more.txt"));
+    let res = client
+        .get(format!("{collection_url}/notes"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!("href=\"{tree}/\">../")));
+    assert!(html.contains(&format!("href=\"{tree}/notes/hello%20world.txt\"")));
+    assert!(!html.contains("video.mp4"));
+    let res = client
+        .get(format!("{collection_url}/notes/hello%20world.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = client
+        .get(format!("{collection_url}/video.mp4"))
+        .header("range", "bytes=1023-32770")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.headers()["content-type"], "video/mp4");
+    assert_eq!(res.bytes().await.unwrap().as_ref(), &video[1023..32771]);
+    let res = client
+        .get(format!("{collection_url}/missing.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = client
+        .get(format!(
+            "{base}/tree/{}",
+            z32::encode(text_tag.hash.as_bytes())
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     shutdown_tx.send(()).unwrap();
     task.await.unwrap();

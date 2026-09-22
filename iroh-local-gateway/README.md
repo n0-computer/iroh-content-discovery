@@ -100,6 +100,27 @@ dropping the HTTP body drops the upstream request.
   `application/octet-stream`; no filename extension is necessary.
 - CORS permits GET/HEAD from browser pages and exposes range metadata.
 
+## Collections
+
+Blobs are served under `/blake3/<z32>`. iroh-blobs collections can be browsed
+under `/tree/<z32>`:
+
+```text
+http://127.0.0.1:8080/tree/<z32>
+http://127.0.0.1:8080/tree/<z32>/<dir>/
+http://127.0.0.1:8080/tree/<z32>/<dir>/<name>
+```
+
+Collection names are treated as `/`-separated paths. A path that matches a
+file name serves the file like `/blake3/`, with ranges and MIME detection. Any
+other path is listed as a directory: an HTML page with its subdirectories,
+its files, and a link to the parent. Add `?sizes` to also show file
+sizes; the gateway then fetches the last chunk of each listed file, which
+verifies its size, up to 16 at a time. Files are fetched from the peer that
+provided the collection, so only the collection hash needs to be announced.
+`/tree/` on a blob that is not a collection returns `422`, and a path that is
+neither a file nor a directory returns `404`.
+
 Malformed hashes return `400`; no discovered provider returns `404`; failed
 upstream operations return `502`; setup timeouts return `504`. Once HTTP headers
 have been sent, transfer failures terminate the body rather than changing its

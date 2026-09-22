@@ -5,6 +5,7 @@
 //! from that peer, without downloading a whole blob into memory or a store.
 
 use std::{
+    collections::{BTreeSet, HashMap},
     net::SocketAddr,
     ops::Range,
     sync::{Arc, Mutex},
@@ -15,7 +16,7 @@ use anyhow::bail;
 use axum::{
     Router,
     body::Body,
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -32,7 +33,7 @@ use iroh_blobs::{
 use iroh_mainline_endpoint_discovery::{Resolver, infohash_from_blake3};
 use lru::LruCache;
 use mime_classifier::MimeClassifier;
-use n0_future::StreamExt;
+use n0_future::{BufferedStreamExt, StreamExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -56,6 +57,13 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'\'')
     .add(b'&');
 
+/// Concurrent size requests per collection listing.
+const SIZE_REQUESTS: usize = 16;
+const REPO_URL: &str = "https://github.com/n0-computer/iroh-content-discovery";
+const LISTING_CSS: &str = include_str!("listing.css");
+/// Path separator in listing headings; `<wbr>` lets long paths wrap after it.
+const SEPARATOR: &str = "&nbsp;/&nbsp;<wbr>";
+
 /// An HTTP gateway using a caller-owned iroh endpoint and content resolver.
 #[derive(Clone)]
 pub struct Gateway(Arc<Inner>);
@@ -67,6 +75,7 @@ struct Inner {
     // Reuse one peer for repeated video seeks, with bounded metadata memory.
     cache: Mutex<LruCache<Hash, Source>>,
     collections: Mutex<LruCache<Hash, CollectionSource>>,
+    sizes: Mutex<LruCache<Hash, u64>>,
 }
 
 #[derive(Clone)]
@@ -91,14 +100,20 @@ impl Gateway {
             classifier: MimeClassifier::new(),
             cache: Mutex::new(LruCache::new(128.try_into().unwrap())),
             collections: Mutex::new(LruCache::new(128.try_into().unwrap())),
+            sizes: Mutex::new(LruCache::new(4096.try_into().unwrap())),
         }))
     }
 
     /// HTTP routes for blobs and paths inside collections, plus CORS preflight.
+    ///
+    /// `/tree/{hash}` also browses collection directories, with optional `?sizes`.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/blake3/{hash}", get(blob))
             .route("/blake3/{hash}/{*path}", get(collection_path))
+            .route("/tree/{hash}", get(tree_root))
+            .route("/tree/{hash}/", get(tree_root))
+            .route("/tree/{hash}/{*path}", get(tree))
             .layer(
                 CorsLayer::new()
                     .allow_origin(Any)
@@ -195,6 +210,43 @@ impl Gateway {
         Ok(source)
     }
 
+    /// Returns the verified size of `hash`, fetched over `connection` if not cached.
+    async fn size(&self, hash: Hash, connection: &Connection) -> anyhow::Result<u64> {
+        if let Some(source) = self.0.cache.lock().unwrap().peek(&hash) {
+            return Ok(source.size);
+        }
+        if let Some(size) = self.0.sizes.lock().unwrap().get(&hash) {
+            return Ok(*size);
+        }
+        let size = verified_size(connection, hash).await?;
+        self.0.sizes.lock().unwrap().put(hash, size);
+        Ok(size)
+    }
+
+    /// Returns the sizes of `hashes`, fetching up to [`SIZE_REQUESTS`] at a time.
+    ///
+    /// Hashes whose size could not be fetched are missing from the result.
+    async fn sizes(&self, hashes: Vec<Hash>, connection: Connection) -> HashMap<Hash, u64> {
+        n0_future::stream::iter(hashes)
+            .map(|hash| {
+                let gateway = self.clone();
+                let connection = connection.clone();
+                async move {
+                    match gateway.size(hash, &connection).await {
+                        Ok(size) => Some((hash, size)),
+                        Err(error) => {
+                            tracing::debug!(%error, %hash, "fetch size");
+                            None
+                        }
+                    }
+                }
+            })
+            .buffered_unordered(SIZE_REQUESTS)
+            .filter_map(|entry| entry)
+            .collect()
+            .await
+    }
+
     async fn collection(&self, hash: Hash) -> Result<CollectionSource, HttpError> {
         let cached = self.0.collections.lock().unwrap().get(&hash).cloned();
         if let Some(source) = cached
@@ -217,9 +269,10 @@ impl Gateway {
         {
             return Ok(source);
         }
-        let collection = read_collection(&connection, hash)
-            .await
-            .map_err(HttpError::upstream)?;
+        let collection = read_collection(&connection, hash).await.map_err(|error| {
+            tracing::debug!(%error, "read collection");
+            HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
+        })?;
         let source = CollectionSource {
             connection,
             collection,
@@ -360,6 +413,247 @@ fn escape_html(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+async fn tree_root(
+    state: State<Gateway>,
+    Path(encoded): Path<String>,
+    query: RawQuery,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    tree(
+        state,
+        Path((encoded, String::new())),
+        query,
+        method,
+        headers,
+    )
+    .await
+}
+
+async fn tree(
+    State(gateway): State<Gateway>,
+    Path((encoded, path)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let root = parse_hash(&encoded)
+        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let CollectionSource {
+        collection,
+        connection,
+    } = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
+        .await
+        .map_err(HttpError::timeout)??;
+    let file = collection
+        .iter()
+        .find(|(name, _)| *name == path)
+        .map(|(_, hash)| *hash);
+    if let Some(hash) = file {
+        let source = tokio::time::timeout(
+            LOOKUP_TIMEOUT,
+            gateway.source_on_connection(connection, hash, Some(&path)),
+        )
+        .await
+        .map_err(HttpError::timeout)??;
+        return serve_blob(source, hash, &z32::encode(hash.as_bytes()), method, headers).await;
+    }
+    let dir = if path.is_empty() || path.ends_with('/') {
+        path
+    } else {
+        format!("{path}/")
+    };
+    let entries = Entries::new(&dir, &collection).ok_or(HttpError(
+        StatusCode::NOT_FOUND,
+        "no such file or directory in collection",
+    ))?;
+    let with_sizes = query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair == "sizes" || pair.starts_with("sizes="))
+    });
+    let sizes = if with_sizes {
+        let hashes = entries.files.iter().map(|(_, hash)| *hash).collect();
+        Some(
+            tokio::time::timeout(LOOKUP_TIMEOUT, gateway.sizes(hashes, connection))
+                .await
+                .map_err(HttpError::timeout)?,
+        )
+    } else {
+        None
+    };
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(listing(
+            &encoded,
+            &dir,
+            &entries,
+            sizes.as_ref(),
+        )))
+        .unwrap())
+}
+
+/// The subdirectories and files directly inside one directory of a collection.
+struct Entries<'a> {
+    dirs: BTreeSet<&'a str>,
+    files: Vec<(&'a str, Hash)>,
+}
+
+impl<'a> Entries<'a> {
+    /// Collects the entries of `dir`, which is empty for the top level and
+    /// otherwise ends with `/`. Returns `None` if no name starts with `dir`.
+    fn new(dir: &str, collection: &'a Collection) -> Option<Self> {
+        let mut dirs = BTreeSet::new();
+        let mut files = Vec::new();
+        for (name, hash) in collection.iter() {
+            let Some(rest) = name.strip_prefix(dir) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((sub, _)) => {
+                    dirs.insert(sub);
+                }
+                None => files.push((rest, *hash)),
+            }
+        }
+        if !dir.is_empty() && dirs.is_empty() && files.is_empty() {
+            return None;
+        }
+        Some(Self { dirs, files })
+    }
+}
+
+/// Renders the HTML listing of `dir` in the collection at `root`.
+///
+/// With `sizes`, file sizes are shown and directory links keep `?sizes`.
+/// Without, the page links to the same listing with sizes.
+fn listing(
+    root: &str,
+    dir: &str,
+    entries: &Entries<'_>,
+    sizes: Option<&HashMap<Hash, u64>>,
+) -> String {
+    let title = html_escape(&format!("{root}/{dir}"));
+    let query = if sizes.is_some() { "?sizes" } else { "" };
+    let link = |path: &str| html_escape(&percent_encode_path(&format!("/tree/{root}/{path}")));
+    // Breadcrumbs: every ancestor links to its listing, the current directory
+    // is plain text.
+    let segments: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    let mut heading = if segments.is_empty() {
+        root.to_string()
+    } else {
+        format!("<a href=\"{}{query}\">{root}</a>", link(""))
+    };
+    let mut path = String::new();
+    for (index, segment) in segments.iter().enumerate() {
+        path.push_str(segment);
+        path.push('/');
+        heading.push_str(SEPARATOR);
+        if index + 1 == segments.len() {
+            heading.push_str(&html_escape(segment));
+        } else {
+            heading.push_str(&format!(
+                "<a href=\"{}{query}\">{}</a>",
+                link(&path),
+                html_escape(segment)
+            ));
+        }
+    }
+    heading.push_str(SEPARATOR);
+    let mut html = format!(
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{title}</title>\n<style>{LISTING_CSS}</style>\n\
+         <header><a href=\"{REPO_URL}\">iroh content discovery</a></header>\n\
+         <h1>{heading}</h1>\n"
+    );
+    if sizes.is_none() {
+        html.push_str("<p class=\"meta\"><a href=\"?sizes\">Fetch sizes</a></p>\n");
+    }
+    html.push_str("<table>\n");
+    if let Some(trimmed) = dir.strip_suffix('/') {
+        let parent = trimmed.rsplit_once('/').map_or("", |(parent, _)| parent);
+        let parent = if parent.is_empty() {
+            String::new()
+        } else {
+            format!("{parent}/")
+        };
+        html.push_str(&format!(
+            "<tr><td><a href=\"{}{query}\">../</a></td><td class=\"size\"></td><td class=\"hash\"></td></tr>\n",
+            link(&parent)
+        ));
+    }
+    for sub in &entries.dirs {
+        html.push_str(&format!(
+            "<tr><td><a href=\"{}{query}\">{}/</a></td><td class=\"size\"></td><td class=\"hash\"></td></tr>\n",
+            link(&format!("{dir}{sub}/")),
+            html_escape(sub),
+        ));
+    }
+    for (file, hash) in &entries.files {
+        let size = match sizes {
+            Some(sizes) => sizes
+                .get(hash)
+                .map_or("?".to_string(), |size| format_size(*size)),
+            None => String::new(),
+        };
+        html.push_str(&format!(
+            "<tr><td><a href=\"{}\">{}</a></td><td class=\"size\">{size}</td><td class=\"hash\">{}</td></tr>\n",
+            link(&format!("{dir}{file}")),
+            html_escape(file),
+            z32::encode(hash.as_bytes()),
+        ));
+    }
+    html.push_str("</table>\n");
+    html
+}
+
+/// Formats a byte count with binary units, e.g. `1.5 MiB`.
+fn format_size(size: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut value = size as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Percent-encodes everything except unreserved characters and `/`.
+fn percent_encode_path(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 async fn serve_blob(
@@ -537,6 +831,25 @@ async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<
     };
     closing.next().await?;
     Ok(collection)
+}
+
+/// Returns the size of `hash`, authenticated by fetching only its last chunk.
+async fn verified_size(connection: &Connection, hash: Hash) -> anyhow::Result<u64> {
+    let (mut content, size) = start(connection, hash, ChunkRanges::last_chunk()).await?;
+    let end = loop {
+        match content.next().await {
+            BlobContentNext::More((next, item)) => {
+                item?;
+                content = next;
+            }
+            BlobContentNext::Done(end) => break end,
+        }
+    };
+    let EndBlobNext::Closing(closing) = end.next() else {
+        bail!("unexpected child blob");
+    };
+    closing.next().await?;
+    Ok(size)
 }
 
 async fn sniff(connection: &Connection, hash: Hash) -> anyhow::Result<(u64, Vec<u8>)> {

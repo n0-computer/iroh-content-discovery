@@ -1882,10 +1882,12 @@ dependencies = [
  "postcard",
  "serde",
  "sha1_smol",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "udp-address-records-proto",
+ "z32",
  "zeroize",
 ]
 
