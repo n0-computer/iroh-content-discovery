@@ -34,6 +34,7 @@ use iroh_mainline_endpoint_discovery::{Resolver, infohash_from_blake3};
 use lru::LruCache;
 use mime_classifier::MimeClassifier;
 use n0_future::{BufferedStreamExt, StreamExt};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
 
 mod ranges;
@@ -42,6 +43,20 @@ use ranges::Selection;
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
+const MAX_AUTO_COLLECTION_ROOT_BYTES: u64 = 8 * 1024 * 1024;
+const COLLECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'%')
+    .add(b'#')
+    .add(b'?')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'"')
+    .add(b'\'')
+    .add(b'&');
+
 /// Concurrent size requests per collection listing.
 const SIZE_REQUESTS: usize = 16;
 const REPO_URL: &str = "https://github.com/n0-computer/iroh-content-discovery";
@@ -66,7 +81,7 @@ struct Inner {
     classifier: MimeClassifier,
     // Reuse one peer for repeated video seeks, with bounded metadata memory.
     cache: Mutex<LruCache<Hash, Source>>,
-    collections: Mutex<LruCache<Hash, Arc<Collection>>>,
+    collections: Mutex<LruCache<Hash, CollectionSource>>,
     sizes: Mutex<LruCache<Hash, u64>>,
 }
 
@@ -77,6 +92,12 @@ struct Source {
     mime: String,
 }
 
+#[derive(Clone)]
+struct CollectionSource {
+    connection: Connection,
+    collection: Collection,
+}
+
 impl Gateway {
     /// Construct a gateway. The endpoint is used to dial resolved endpoint IDs.
     pub fn new(endpoint: Endpoint, resolver: Resolver) -> Self {
@@ -85,19 +106,18 @@ impl Gateway {
             resolver,
             classifier: MimeClassifier::new(),
             cache: Mutex::new(LruCache::new(128.try_into().unwrap())),
-            collections: Mutex::new(LruCache::new(32.try_into().unwrap())),
+            collections: Mutex::new(LruCache::new(128.try_into().unwrap())),
             sizes: Mutex::new(LruCache::new(4096.try_into().unwrap())),
         }))
     }
 
-    /// HTTP routes for `GET` and `HEAD` plus CORS preflight.
+    /// HTTP routes for blobs and paths inside collections, plus CORS preflight.
     ///
-    /// `/blake3/{z32}` serves a blob. `/tree/{z32}` lists the top level of a
-    /// collection, and `/tree/{z32}/{path}` serves a file of it or lists a
-    /// directory, where directories are the `/`-separated prefixes of names.
+    /// `/tree/{hash}` also browses collection directories, with optional `?sizes`.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/blake3/{hash}", get(blob))
+            .route("/blake3/{hash}/{*path}", get(collection_path))
             .route("/tree/{hash}", get(tree_root))
             .route("/tree/{hash}/", get(tree_root))
             .route("/tree/{hash}/{*path}", get(tree))
@@ -129,45 +149,20 @@ impl Gateway {
         Ok(())
     }
 
-    /// Returns the cached or newly probed source for `hash`.
-    ///
-    /// Dials a peer found through discovery unless `via` supplies a
-    /// connection, which is used for files of an already open collection.
-    async fn source(&self, hash: Hash, via: Option<&Connection>) -> Result<Source, HttpError> {
+    async fn source(&self, hash: Hash) -> Result<Source, HttpError> {
         let cached = self.0.cache.lock().unwrap().get(&hash).cloned();
         if let Some(source) = cached
             && source.connection.close_reason().is_none()
         {
             return Ok(source);
         }
-        let connection = match via {
-            Some(connection) => connection.clone(),
-            None => self.connect(hash).await?,
-        };
-        let (size, prefix) = sniff(&connection, hash)
-            .await
-            .map_err(HttpError::upstream)?;
-        let mime = self
-            .0
-            .classifier
-            .classify(
-                mime_classifier::LoadContext::Browsing,
-                mime_classifier::NoSniffFlag::Off,
-                mime_classifier::ApacheBugFlag::Off,
-                &None,
-                &prefix,
-            )
-            .to_string();
-        let source = Source {
-            connection,
-            size,
-            mime,
-        };
+        let connection = self.connection(hash).await?;
+        let source = self.source_on_connection(connection, hash, None).await?;
         self.0.cache.lock().unwrap().put(hash, source.clone());
         Ok(source)
     }
 
-    async fn connect(&self, hash: Hash) -> Result<Connection, HttpError> {
+    async fn connection(&self, hash: Hash) -> Result<Connection, HttpError> {
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
         let peer = self
             .0
@@ -184,6 +179,42 @@ impl Gateway {
             .connect(peer, iroh_blobs::ALPN)
             .await
             .map_err(HttpError::upstream)
+    }
+
+    async fn source_on_connection(
+        &self,
+        connection: Connection,
+        hash: Hash,
+        name: Option<&str>,
+    ) -> Result<Source, HttpError> {
+        let (size, prefix) = sniff(&connection, hash)
+            .await
+            .map_err(HttpError::upstream)?;
+        let supplied_type = name
+            .and_then(|name| std::path::Path::new(name).extension())
+            .and_then(|extension| extension.to_str())
+            .and_then(|extension| mime_guess::from_ext(extension).first());
+        let mime = self
+            .0
+            .classifier
+            .classify(
+                mime_classifier::LoadContext::Browsing,
+                if supplied_type.is_some() {
+                    mime_classifier::NoSniffFlag::On
+                } else {
+                    mime_classifier::NoSniffFlag::Off
+                },
+                mime_classifier::ApacheBugFlag::Off,
+                &supplied_type,
+                &prefix,
+            )
+            .to_string();
+        let source = Source {
+            connection,
+            size,
+            mime,
+        };
+        Ok(source)
     }
 
     /// Returns the verified size of `hash`, fetched over `connection` if not cached.
@@ -223,25 +254,38 @@ impl Gateway {
             .await
     }
 
-    /// Returns the collection rooted at `hash` and a connection to its peer.
-    async fn collection(&self, hash: Hash) -> Result<(Arc<Collection>, Connection), HttpError> {
-        let source = self.source(hash, None).await?;
+    async fn collection(&self, hash: Hash) -> Result<CollectionSource, HttpError> {
         let cached = self.0.collections.lock().unwrap().get(&hash).cloned();
-        if let Some(collection) = cached {
-            return Ok((collection, source.connection));
+        if let Some(source) = cached
+            && source.connection.close_reason().is_none()
+        {
+            return Ok(source);
         }
-        let collection = Arc::new(read_collection(&source.connection, hash).await.map_err(
-            |error| {
-                tracing::debug!(%error, "read collection");
-                HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
-            },
-        )?);
-        self.0
-            .collections
-            .lock()
-            .unwrap()
-            .put(hash, collection.clone());
-        Ok((collection, source.connection))
+        let connection = self.connection(hash).await?;
+        self.collection_on_connection(hash, connection).await
+    }
+
+    async fn collection_on_connection(
+        &self,
+        hash: Hash,
+        connection: Connection,
+    ) -> Result<CollectionSource, HttpError> {
+        let cached = self.0.collections.lock().unwrap().get(&hash).cloned();
+        if let Some(source) = cached
+            && source.connection.close_reason().is_none()
+        {
+            return Ok(source);
+        }
+        let collection = read_collection(&connection, hash).await.map_err(|error| {
+            tracing::debug!(%error, "read collection");
+            HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
+        })?;
+        let source = CollectionSource {
+            connection,
+            collection,
+        };
+        self.0.collections.lock().unwrap().put(hash, source.clone());
+        Ok(source)
     }
 }
 
@@ -286,22 +330,96 @@ impl IntoResponse for HttpError {
     }
 }
 
-fn parse_path_hash(encoded: &str) -> Result<Hash, HttpError> {
-    parse_hash(encoded)
-        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))
-}
-
 async fn blob(
     State(gateway): State<Gateway>,
     Path(encoded): Path<String>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let hash = parse_path_hash(&encoded)?;
-    let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash, None))
+    let hash = parse_hash(&encoded)
+        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
         .map_err(HttpError::timeout)??;
-    serve(source, hash, &method, &headers).await
+    if source.size >= 32
+        && source.size.is_multiple_of(32)
+        && source.size <= MAX_AUTO_COLLECTION_ROOT_BYTES
+        && let Ok(Ok(collection)) = tokio::time::timeout(
+            COLLECTION_PROBE_TIMEOUT,
+            gateway.collection_on_connection(hash, source.connection.clone()),
+        )
+        .await
+    {
+        return Ok(collection_index(&encoded, &collection.collection, method));
+    }
+    serve_blob(source, hash, &encoded, method, headers).await
+}
+
+async fn collection_path(
+    State(gateway): State<Gateway>,
+    Path((encoded, path)): Path<(String, String)>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let root = parse_hash(&encoded)
+        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
+        .await
+        .map_err(HttpError::timeout)??;
+    let path = path.strip_prefix('/').unwrap_or(&path);
+    let hash = collection
+        .collection
+        .iter()
+        .find(|(name, _)| name == path)
+        .map(|(_, hash)| *hash)
+        .ok_or(HttpError(
+            StatusCode::NOT_FOUND,
+            "path not found in collection",
+        ))?;
+    let source = tokio::time::timeout(
+        LOOKUP_TIMEOUT,
+        gateway.source_on_connection(collection.connection, hash, Some(path)),
+    )
+    .await
+    .map_err(HttpError::timeout)??;
+    serve_blob(source, hash, &z32::encode(hash.as_bytes()), method, headers).await
+}
+
+fn collection_index(encoded: &str, collection: &Collection, method: Method) -> Response {
+    let mut html = String::from("<!doctype html><meta charset=\"utf-8\"><ul>");
+    for (name, _) in collection.iter() {
+        let path = name
+            .split('/')
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        html.push_str("<li><a href=\"/blake3/");
+        html.push_str(&encoded);
+        html.push('/');
+        html.push_str(&path);
+        html.push_str("\">");
+        html.push_str(&escape_html(name));
+        html.push_str("</a></li>");
+    }
+    html.push_str("</ul>");
+    let response = Response::builder()
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::CONTENT_LENGTH, html.len());
+    if method == Method::HEAD {
+        response.body(Body::empty()).unwrap()
+    } else {
+        response.body(Body::from(html)).unwrap()
+    }
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 async fn tree_root(
@@ -328,8 +446,12 @@ async fn tree(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let root = parse_path_hash(&encoded)?;
-    let (collection, connection) = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
+    let root = parse_hash(&encoded)
+        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let CollectionSource {
+        collection,
+        connection,
+    } = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
         .await
         .map_err(HttpError::timeout)??;
     let file = collection
@@ -337,10 +459,13 @@ async fn tree(
         .find(|(name, _)| *name == path)
         .map(|(_, hash)| *hash);
     if let Some(hash) = file {
-        let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash, Some(&connection)))
-            .await
-            .map_err(HttpError::timeout)??;
-        return serve(source, hash, &method, &headers).await;
+        let source = tokio::time::timeout(
+            LOOKUP_TIMEOUT,
+            gateway.source_on_connection(connection, hash, Some(&path)),
+        )
+        .await
+        .map_err(HttpError::timeout)??;
+        return serve_blob(source, hash, &z32::encode(hash.as_bytes()), method, headers).await;
     }
     let dir = if path.is_empty() || path.ends_with('/') {
         path
@@ -514,13 +639,14 @@ fn percent_encode_path(value: &str) -> String {
     out
 }
 
-async fn serve(
+async fn serve_blob(
     source: Source,
     hash: Hash,
-    method: &Method,
-    headers: &HeaderMap,
+    encoded: &str,
+    method: Method,
+    headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let etag = format!("\"{}\"", z32::encode(hash.as_bytes()));
+    let etag = format!("\"{encoded}\"");
     let builder = Response::builder()
         .header(header::CONTENT_TYPE, &source.mime)
         .header(header::ACCEPT_RANGES, "bytes")
@@ -539,7 +665,7 @@ async fn serve(
             .body(Body::empty())
             .unwrap());
     }
-    let selection = if *method == Method::HEAD
+    let selection = if method == Method::HEAD
         || headers
             .get(header::IF_RANGE)
             .is_some_and(|value| value.as_bytes() != etag.as_bytes())
@@ -595,7 +721,7 @@ async fn serve(
         }
     };
     let builder = builder.header(header::CONTENT_LENGTH, range.end - range.start);
-    let body = if *method == Method::HEAD || range.is_empty() {
+    let body = if method == Method::HEAD || range.is_empty() {
         Body::empty()
     } else {
         let chunks =
@@ -671,12 +797,11 @@ async fn start(
     Ok(root.next().next().await?)
 }
 
-/// Reads the collection metadata rooted at `hash` without fetching its files.
 async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<Collection> {
-    let request = GetRequest::builder()
-        .root(ChunkRanges::all())
-        .child(0, ChunkRanges::all())
-        .build(hash);
+    let request = GetRequest::new(
+        hash,
+        ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::all()]),
+    );
     let connected = fsm::start(connection.clone(), request, Default::default())
         .next()
         .await?;
@@ -685,7 +810,7 @@ async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<
     };
     let (end, _, collection) = Collection::read_fsm(root).await?;
     let EndBlobNext::Closing(closing) = end else {
-        bail!("unexpected child blob");
+        bail!("unexpected collection child");
     };
     closing.next().await?;
     Ok(collection)

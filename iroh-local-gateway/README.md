@@ -35,6 +35,14 @@ Open:
 http://127.0.0.1:8080/blake3/<z32>
 ```
 
+For a sendme/swarmie collection root, `/blake3/<z32>` automatically shows a
+directory index. Fetch a named file at `/blake3/<z32>/path/to/file`.
+The gateway discovers the provider using the **root hash**, reads the
+collection, and streams the selected child from that same provider. Child
+hashes do not need separate Mainline announcements. Raw blobs continue to
+stream directly from the same bare URL. Automatic collection detection is
+limited to roots of at most 8 MiB; larger roots are served as raw blobs.
+
 `<z32>` is the canonical lowercase **z-base-32 encoding of the 32-byte BLAKE3
 hash** (52 characters), not hex or RFC 4648 base32. In Rust:
 
@@ -120,8 +128,9 @@ status. Discovery, connection establishment, and MIME/size probing share a
 60-second budget; body reads have a 30-second inactivity timeout.
 
 A bounded 128-entry cache reuses peer connections and MIME/size metadata for
-successive video seeks. This version does not try alternate peers or perform
-parallel downloads.
+successive video seeks. A second bounded cache retains collection manifests
+and their provider connections. This version does not try alternate peers or
+perform parallel downloads.
 
 ## Tests
 

@@ -41,12 +41,21 @@ async fn run() {
     let video_tag = store.blobs().add_bytes(video.clone()).await.unwrap();
     let text_tag = store.blobs().add_bytes(text.clone()).await.unwrap();
     let empty_tag = store.blobs().add_bytes(Vec::new()).await.unwrap();
-    let collection: Collection = [
-        ("notes/hello world.txt".to_string(), text_tag.hash),
-        ("video.mp4".to_string(), video_tag.hash),
-    ]
-    .into_iter()
-    .collect();
+    let aligned_raw = [b'x'; 32];
+    let aligned_tag = store.blobs().add_bytes(aligned_raw.to_vec()).await.unwrap();
+    let unannounced_tag = store
+        .blobs()
+        .add_bytes(b"only in collection".to_vec())
+        .await
+        .unwrap();
+    let collection = Collection::from_iter([
+        ("notes/hello world.txt", text_tag.hash),
+        ("video.mp4", video_tag.hash),
+        ("site/index.html", text_tag.hash),
+        ("site/style.css", text_tag.hash),
+        ("media/video.mp4", video_tag.hash),
+        ("site/<unsafe>.txt", unannounced_tag.hash),
+    ]);
     let collection_tag = collection.store(&store).await.unwrap();
     let provider = Endpoint::builder(presets::Minimal)
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
@@ -69,6 +78,7 @@ async fn run() {
         video_tag.hash,
         text_tag.hash,
         empty_tag.hash,
+        aligned_tag.hash,
         collection_tag.hash(),
     ] {
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
@@ -106,6 +116,64 @@ async fn run() {
         .unwrap();
     let url = |hash: Hash| format!("{base}/blake3/{}", z32::encode(hash.as_bytes()));
     let video_url = url(video_tag.hash);
+    let collection_hash = z32::encode(collection_tag.hash().as_bytes());
+    let collection_url = format!("{base}/blake3/{collection_hash}");
+
+    let res = client.get(&collection_url).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let index = res.text().await.unwrap();
+    assert!(index.contains(&format!("/blake3/{collection_hash}/site/index.html")));
+    assert!(index.contains("media/video.mp4"));
+    assert!(index.contains("site/&lt;unsafe&gt;.txt"));
+    assert!(index.contains("site/%3Cunsafe%3E.txt"));
+    let res = client.head(&collection_url).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "text/html; charset=utf-8");
+    let res = client.get(url(aligned_tag.hash)).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), aligned_raw);
+    let res = client
+        .get(format!("{base}/blake3/{collection_hash}/site/index.html"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = client
+        .get(format!("{collection_url}/site/style.css"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["content-type"], "text/css");
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = client
+        .get(format!("{collection_url}/site/%3Cunsafe%3E.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), b"only in collection");
+    let res = client
+        .get(format!("{collection_url}/media/video.mp4"))
+        .header("range", "bytes=1023-1030")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), &video[1023..1031]);
+    let res = client
+        .head(format!("{collection_url}/media/video.mp4"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-length"], video.len().to_string());
+    let res = client
+        .get(format!("{collection_url}/missing.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
     let res = client.get(&video_url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
