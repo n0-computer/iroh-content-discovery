@@ -40,6 +40,18 @@ directory listing; see [Collections](#collections). Raw blobs continue to
 stream directly from the same bare URL. Automatic collection detection is
 limited to roots of at most 8 MiB; larger roots are served as raw blobs.
 
+The same content is also served on a per-hash subdomain of `localhost`, which
+browsers and curl resolve to the loopback address:
+
+```text
+http://<z32>.localhost:8080/
+http://<z32>.localhost:8080/<dir>/<name>
+```
+
+Each hash then has its own browser origin, and root-relative links inside a
+collection, such as `/style.css` in an HTML page, resolve within it.
+Listings served this way link to `/<path>` instead of `/blake3/<z32>/<path>`.
+
 `<z32>` is the canonical lowercase **z-base-32 encoding of the 32-byte BLAKE3
 hash** (52 characters), not hex or RFC 4648 base32. In Rust:
 

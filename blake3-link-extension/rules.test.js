@@ -21,11 +21,11 @@ function redirect(input, port = 8080) {
   return null;
 }
 
-test("hash subdomains rewrite to the local blob route", () => {
+test("hash subdomains rewrite to a local per-hash origin", () => {
   const hash = "y".repeat(52);
-  assert.equal(redirect(`https://${hash}.blake3.link/?download=1#time`), `http://127.0.0.1:8080/blake3/${hash}?download=1#time`);
-  assert.equal(redirect(`http://${hash}.blake3.link:80/`, 12345), `http://127.0.0.1:12345/blake3/${hash}`);
-  assert.equal(redirect(`https://${hash}.blake3.link/site/index.html?x=1`), `http://127.0.0.1:8080/blake3/${hash}/site/index.html?x=1`);
+  assert.equal(redirect(`https://${hash}.blake3.link/?download=1#time`), `http://${hash}.localhost:8080/?download=1#time`);
+  assert.equal(redirect(`http://${hash}.blake3.link:80/`, 12345), `http://${hash}.localhost:12345/`);
+  assert.equal(redirect(`https://${hash}.blake3.link/site/index.html?x=1`), `http://${hash}.localhost:8080/site/index.html?x=1`);
 });
 
 test("apex, lookalikes, nested subdomains, and localhost are untouched", () => {
@@ -46,5 +46,5 @@ test("ports are bounded, settings are optional only through defaults, disable re
     assert.throws(() => validateSettings({ port, enabled: true }));
   }
   assert.deepEqual(makeRules({ port: 8080, enabled: false }), []);
-  assert.equal(makeRules(DEFAULT_SETTINGS).length, 2);
+  assert.equal(makeRules(DEFAULT_SETTINGS).length, 1);
 });

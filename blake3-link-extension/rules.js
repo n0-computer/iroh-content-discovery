@@ -1,4 +1,6 @@
 export const DEFAULT_SETTINGS = { port: 8080, enabled: true };
+// Rule 2 is unused since the move to per-hash localhost origins; it stays
+// listed so upgrades remove it.
 export const RULE_IDS = [1, 2];
 export const HOST_ORIGINS = ["http://*.blake3.link/*", "https://*.blake3.link/*"];
 
@@ -27,22 +29,10 @@ export function makeRules(settings) {
     priority: 1,
     action: {
       type: "redirect",
-      redirect: { regexSubstitution: `http://127.0.0.1:${port}/blake3/\\1\\2` },
+      redirect: { regexSubstitution: `http://\\1.localhost:${port}/\\2` },
     },
     condition: {
-      regexFilter: "^https?://([a-z0-9]+)\\.blake3\\.link(?::[0-9]+)?/([?#].*)?$",
-      isUrlFilterCaseSensitive: true,
-      resourceTypes,
-    },
-  }, {
-    id: 2,
-    priority: 1,
-    action: {
-      type: "redirect",
-      redirect: { regexSubstitution: `http://127.0.0.1:${port}/blake3/\\1/\\2` },
-    },
-    condition: {
-      regexFilter: "^https?://([a-z0-9]+)\\.blake3\\.link(?::[0-9]+)?/([^?#].*)$",
+      regexFilter: "^https?://([a-z0-9]+)\\.blake3\\.link(?::[0-9]+)?/(.*)$",
       isUrlFilterCaseSensitive: true,
       resourceTypes,
     },

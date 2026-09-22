@@ -182,8 +182,9 @@ The fourth workspace project, [`iroh-local-gateway`](iroh-local-gateway/README.m
 serves `http://127.0.0.1:8080/blake3/<z32>`. It discovers one content peer through
 Mainline and the tracker, then streams Bao-verified bytes with MIME detection
 and HTTP range support for video seeking. Collection roots automatically show
-an index at `/blake3/<z32>`, and `/blake3/<z32>/path/to/file` streams a file
-from the same provider.
+a directory listing at `/blake3/<z32>`, and `/blake3/<z32>/path/to/file`
+streams a file from the same provider. The same content is served on
+`http://<z32>.localhost:8080/`, giving each hash its own browser origin.
 
 ```sh
 cargo run -p iroh-local-gateway -- --tracker 127.0.0.1:11223
@@ -195,8 +196,8 @@ options. See its README for configuration and HTTP behavior.
 ## Browser extension
 
 The fifth project, [`blake3-link-extension`](blake3-link-extension/README.md),
-rewrites `https://<z32>.blake3.link/` to
-`http://127.0.0.1:<port>/blake3/<z32>` in Chrome and Brave. Load that directory
+rewrites `https://<z32>.blake3.link/<path>` to
+`http://<z32>.localhost:<port>/<path>` in Chrome and Brave. Load that directory
 unpacked from the browser's extensions page with Developer mode enabled. The
 popup configures the local gateway port (default 8080) and enables/disables
 rewrites. The apex `blake3.link` site is unaffected.

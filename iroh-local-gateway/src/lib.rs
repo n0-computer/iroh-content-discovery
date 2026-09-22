@@ -14,10 +14,11 @@ use std::{
 
 use anyhow::bail;
 use axum::{
-    Router,
+    Extension, Router,
     body::Body,
-    extract::{Path, RawQuery, State},
+    extract::{Path, RawQuery, Request, State},
     http::{HeaderMap, Method, StatusCode, header},
+    middleware::map_request,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -110,11 +111,20 @@ impl Gateway {
     /// collection. `/blake3/{hash}/{path}` serves a file of a collection or
     /// lists a directory, where directories are the `/`-separated prefixes of
     /// names. Listings show file sizes with `?sizes`.
+    ///
+    /// Requests to `http://{z32}.localhost/{path}` are handled like
+    /// `/blake3/{z32}/{path}`, giving each hash its own browser origin.
     pub fn router(&self) -> Router {
-        Router::new()
+        let routes = Router::new()
             .route("/blake3/{hash}", get(blob))
             .route("/blake3/{hash}/", get(collection_root))
             .route("/blake3/{hash}/{*path}", get(collection_path))
+            .with_state(self.clone());
+        // The rewrite has to happen before routing, so it wraps the routes as
+        // the fallback of an otherwise empty router.
+        Router::new()
+            .fallback_service(routes)
+            .layer(map_request(rewrite_subdomain))
             .layer(
                 CorsLayer::new()
                     .allow_origin(Any)
@@ -127,7 +137,6 @@ impl Gateway {
                         header::ETAG,
                     ]),
             )
-            .with_state(self.clone())
     }
 
     /// Serve plaintext HTTP on a loopback socket until the shutdown future resolves.
@@ -324,10 +333,67 @@ impl IntoResponse for HttpError {
     }
 }
 
+/// Marks a request that named its hash as a `{z32}.localhost` subdomain.
+#[derive(Debug, Clone, Copy)]
+struct Subdomain;
+
+/// Rewrites requests for `{z32}.localhost` to the equivalent `/blake3/{z32}` path.
+async fn rewrite_subdomain(mut request: Request) -> Request {
+    let host = request.uri().host().map(str::to_owned).or_else(|| {
+        let host = request.headers().get(header::HOST)?.to_str().ok()?;
+        Some(
+            host.rsplit_once(':')
+                .map_or(host, |(host, _)| host)
+                .to_owned(),
+        )
+    });
+    let Some(label) = host
+        .as_deref()
+        .and_then(|host| host.strip_suffix(".localhost"))
+        .filter(|label| parse_hash(label).is_ok())
+    else {
+        return request;
+    };
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map_or("/", |value| value.as_str());
+    // `/` maps to the bare hash route, which also detects collections.
+    let rest = path_and_query.strip_prefix('/').unwrap_or(path_and_query);
+    let rewritten = if rest.is_empty() || rest.starts_with('?') {
+        format!("/blake3/{label}{rest}")
+    } else {
+        format!("/blake3/{label}/{rest}")
+    };
+    if let Ok(uri) = rewritten.parse() {
+        *request.uri_mut() = uri;
+        request.extensions_mut().insert(Subdomain);
+    }
+    request
+}
+
+/// The collection a listing belongs to, and the path its links start with.
+struct Root {
+    encoded: String,
+    /// `/blake3/{z32}`, or empty when the hash is the request's subdomain.
+    base: String,
+}
+
+impl Root {
+    fn new(encoded: String, subdomain: Option<Extension<Subdomain>>) -> Self {
+        let base = match subdomain {
+            Some(_) => String::new(),
+            None => format!("/blake3/{encoded}"),
+        };
+        Self { encoded, base }
+    }
+}
+
 async fn blob(
     State(gateway): State<Gateway>,
     Path(encoded): Path<String>,
     RawQuery(query): RawQuery,
+    subdomain: Option<Extension<Subdomain>>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -345,9 +411,10 @@ async fn blob(
         )
         .await
     {
+        let root = Root::new(encoded, subdomain);
         return collection_entry(
             &gateway,
-            &encoded,
+            &root,
             collection,
             String::new(),
             query,
@@ -363,6 +430,7 @@ async fn collection_root(
     state: State<Gateway>,
     Path(encoded): Path<String>,
     query: RawQuery,
+    subdomain: Option<Extension<Subdomain>>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -370,6 +438,7 @@ async fn collection_root(
         state,
         Path((encoded, String::new())),
         query,
+        subdomain,
         method,
         headers,
     )
@@ -380,6 +449,7 @@ async fn collection_path(
     State(gateway): State<Gateway>,
     Path((encoded, path)): Path<(String, String)>,
     RawQuery(query): RawQuery,
+    subdomain: Option<Extension<Subdomain>>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -389,13 +459,14 @@ async fn collection_path(
         .await
         .map_err(HttpError::timeout)??;
     let path = path.strip_prefix('/').map(str::to_owned).unwrap_or(path);
-    collection_entry(&gateway, &encoded, collection, path, query, method, headers).await
+    let root = Root::new(encoded, subdomain);
+    collection_entry(&gateway, &root, collection, path, query, method, headers).await
 }
 
 /// Serves the file at `path` in a collection, or lists it as a directory.
 async fn collection_entry(
     gateway: &Gateway,
-    encoded: &str,
+    root: &Root,
     source: CollectionSource,
     path: String,
     query: Option<String>,
@@ -447,7 +518,7 @@ async fn collection_entry(
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .body(Body::from(listing(encoded, &dir, &entries, sizes.as_ref())))
+        .body(Body::from(listing(root, &dir, &entries, sizes.as_ref())))
         .unwrap())
 }
 
@@ -486,11 +557,13 @@ impl<'a> Entries<'a> {
 /// With `sizes`, file sizes are shown and directory links keep `?sizes`.
 /// Without, the page links to the same listing with sizes.
 fn listing(
-    root: &str,
+    root: &Root,
     dir: &str,
     entries: &Entries<'_>,
     sizes: Option<&HashMap<Hash, u64>>,
 ) -> String {
+    let base = &root.base;
+    let root = &root.encoded;
     let title = html_escape(&format!("{root}/{dir}"));
     let query = if sizes.is_some() { "?sizes" } else { "" };
     let link = |path: &str| {
@@ -499,7 +572,7 @@ fn listing(
             .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
             .collect::<Vec<_>>()
             .join("/");
-        html_escape(&format!("/blake3/{root}/{path}"))
+        html_escape(&format!("{base}/{path}"))
     };
     // Breadcrumbs: every ancestor links to its listing, the current directory
     // is plain text.

@@ -7,15 +7,16 @@ web server:
 
 ```text
 https://<z32>.blake3.link/
-    -> http://127.0.0.1:8080/blake3/<z32>
+    -> http://<z32>.localhost:8080/
 https://<z32>.blake3.link/path/to/file
-    -> http://127.0.0.1:8080/blake3/<z32>/path/to/file
+    -> http://<z32>.localhost:8080/path/to/file
 ```
 
 The hash is a 52-character lowercase z-base-32 encoded BLAKE3 digest, matching
-the gateway route. A collection root shows an index at the bare URL. Query
-strings are retained. Paths within collections are
-rewritten too. The apex `https://blake3.link/` stays untouched so it
+the gateway route. Browsers resolve `*.localhost` to the loopback address, so
+each hash keeps its own origin and root-relative links inside a collection
+resolve within it. A collection root shows an index at the bare URL. Query
+strings and paths are retained. The apex `https://blake3.link/` stays untouched so it
 can host instructions or an extension download page. Other hosts, nested subdomains, and localhost requests are not matched.
 The extension captures a single alphanumeric label; the gateway validates its
 length, alphabet, and canonical encoding, returning 400 for invalid hashes.
