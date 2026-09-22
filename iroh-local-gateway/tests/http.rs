@@ -6,7 +6,7 @@ use std::{
 };
 
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
-use iroh_blobs::{BlobsProtocol, Hash, store::mem::MemStore};
+use iroh_blobs::{BlobsProtocol, Hash, format::collection::Collection, store::mem::MemStore};
 use iroh_local_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{Directory, Resolver, SignedRecord, infohash_from_blake3};
 use n0_mainline::Dht;
@@ -41,6 +41,13 @@ async fn run() {
     let video_tag = store.blobs().add_bytes(video.clone()).await.unwrap();
     let text_tag = store.blobs().add_bytes(text.clone()).await.unwrap();
     let empty_tag = store.blobs().add_bytes(Vec::new()).await.unwrap();
+    let collection: Collection = [
+        ("notes/hello world.txt".to_string(), text_tag.hash),
+        ("video.mp4".to_string(), video_tag.hash),
+    ]
+    .into_iter()
+    .collect();
+    let collection_tag = collection.store(&store).await.unwrap();
     let provider = Endpoint::builder(presets::Minimal)
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .unwrap()
@@ -58,7 +65,12 @@ async fn run() {
         .publish(&SignedRecord::sign(provider.secret_key()))
         .await
         .unwrap();
-    for hash in [video_tag.hash, text_tag.hash, empty_tag.hash] {
+    for hash in [
+        video_tag.hash,
+        text_tag.hash,
+        empty_tag.hash,
+        collection_tag.hash(),
+    ] {
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
         publisher_dht
             .announce_peer(infohash.into(), None)
@@ -257,6 +269,59 @@ async fn run() {
         .unwrap();
     assert!(res.status().is_success());
     assert_eq!(res.headers()["access-control-allow-origin"], "*");
+
+    let tree = format!("/tree/{}", z32::encode(collection_tag.hash().as_bytes()));
+    let collection_url = format!("{base}{tree}");
+    for top in [collection_url.clone(), format!("{collection_url}/")] {
+        let res = client.get(&top).send().await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "text/html; charset=utf-8");
+        let html = res.text().await.unwrap();
+        assert!(html.contains(&format!("href=\"{tree}/notes/\"")));
+        assert!(html.contains(&format!("href=\"{tree}/video.mp4\"")));
+        assert!(!html.contains("hello"));
+    }
+    let res = client
+        .get(format!("{collection_url}/notes"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!("href=\"{tree}/\">../")));
+    assert!(html.contains(&format!("href=\"{tree}/notes/hello%20world.txt\"")));
+    assert!(!html.contains("video.mp4"));
+    let res = client
+        .get(format!("{collection_url}/notes/hello%20world.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = client
+        .get(format!("{collection_url}/video.mp4"))
+        .header("range", "bytes=1023-32770")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.headers()["content-type"], "video/mp4");
+    assert_eq!(res.bytes().await.unwrap().as_ref(), &video[1023..32771]);
+    let res = client
+        .get(format!("{collection_url}/missing.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = client
+        .get(format!(
+            "{base}/tree/{}",
+            z32::encode(text_tag.hash.as_bytes())
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     shutdown_tx.send(()).unwrap();
     task.await.unwrap();
