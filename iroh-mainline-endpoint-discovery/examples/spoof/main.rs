@@ -5,11 +5,11 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
 use iroh::{SecretKey, endpoint::presets};
 use iroh_mainline_endpoint_discovery::{
     Directory, Publisher, Resolver, SignedRecord, infohash_from_blake3, parse_infohash,
 };
+use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id};
 
 const RESOLVE_DELAY: Duration = Duration::from_secs(5);
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
         .ok()
         .map(|value| value.parse())
         .transpose()
-        .context("invalid IROH_ADDR_INDEX socket")?;
+        .std_context("invalid IROH_ADDR_INDEX socket")?;
     let mut infohashes = parse_infohashes(std::env::args().skip(1))?;
 
     let secret = SecretKey::generate();
@@ -42,9 +42,9 @@ async fn main() -> Result<()> {
     let demo_infohash = Id::from(infohash_from_blake3(&demo_hash));
     infohashes.push(demo_infohash);
 
-    let dht = Dht::client().context("DHT")?;
+    let dht = Dht::client().std_context("DHT")?;
     if !dht.bootstrapped().await? {
-        bail!("DHT bootstrap failed");
+        bail_any!("DHT bootstrap failed");
     }
     let index = match replica {
         Some(replica) => Directory::udp(dht.clone(), replica).await?,
@@ -61,10 +61,12 @@ async fn main() -> Result<()> {
 
     let workflow = async {
         publisher.wait_published().await;
-        let mapping = publisher.public_v4().context("publisher has no mapping")?;
+        let mapping = publisher
+            .public_v4()
+            .std_context("publisher has no mapping")?;
         println!("published {mapping}");
 
-        let attacker_dht = Dht::client().context("attacker DHT socket")?;
+        let attacker_dht = Dht::client().std_context("attacker DHT socket")?;
         let attacker = match replica {
             Some(replica) => Directory::udp(attacker_dht, replica).await?,
             None => Directory::discover(attacker_dht).await?,
@@ -75,7 +77,7 @@ async fn main() -> Result<()> {
 
         let records = publisher.directory().lookup(mapping).await?;
         if !records.iter().any(|record| record.eid == publisher.id()) {
-            bail!("publisher value was replaced at {mapping}");
+            bail_any!("publisher value was replaced at {mapping}");
         }
 
         tokio::time::sleep(RESOLVE_DELAY).await;
@@ -85,7 +87,7 @@ async fn main() -> Result<()> {
     tokio::select! {
         result = publisher.run() => result?,
         result = workflow => result?,
-        _ = tokio::signal::ctrl_c() => bail!("interrupted"),
+        _ = tokio::signal::ctrl_c() => bail_any!("interrupted"),
     }
 
     publisher_ep.close().await;
@@ -108,7 +110,7 @@ async fn resolve_publisher(
             Err(err) => tracing::warn!(%err, "resolve"),
         }
         if Instant::now() >= deadline {
-            bail!("timed out resolving {infohash} to {expected}");
+            bail_any!("timed out resolving {infohash} to {expected}");
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -119,7 +121,7 @@ fn parse_infohashes(args: impl IntoIterator<Item = String>) -> Result<Vec<Id>> {
         .map(|value| {
             parse_infohash(&value)
                 .map(Id::from)
-                .with_context(|| format!("hash {value}"))
+                .with_std_context(|_| format!("hash {value}"))
         })
         .collect()
 }

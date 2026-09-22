@@ -2,7 +2,7 @@
 
 use std::{future::Future, time::Duration};
 
-use anyhow::Result;
+use n0_error::Result;
 use n0_mainline::{
     Dht, MutableItem,
     errors::{PutMutableError, PutQueryError},
@@ -22,11 +22,11 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// signed item with an increased sequence when changing the list.
 /// The item must have been signed for [`TRACKER_LIST_SALT`].
 pub async fn republish_tracker_list(dht: Dht, item: MutableItem) -> Result<()> {
-    anyhow::ensure!(
+    n0_error::ensure_any!(
         item.salt() == Some(TRACKER_LIST_SALT),
         "incorrect tracker-list salt"
     );
-    anyhow::ensure!(
+    n0_error::ensure_any!(
         item.seq() >= 0 && TrackerList::decode(item.value()).is_some(),
         "invalid tracker list"
     );

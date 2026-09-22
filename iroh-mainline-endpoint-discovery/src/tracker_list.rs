@@ -17,9 +17,9 @@ pub struct TrackerList(Vec<SocketAddrV4>);
 
 impl TrackerList {
     /// Build a list, rejecting invalid sockets and more than two entries.
-    pub fn new(addresses: Vec<SocketAddrV4>) -> anyhow::Result<Self> {
-        anyhow::ensure!(addresses.len() <= 2, "at most two trackers are allowed");
-        anyhow::ensure!(
+    pub fn new(addresses: Vec<SocketAddrV4>) -> n0_error::Result<Self> {
+        n0_error::ensure_any!(addresses.len() <= 2, "at most two trackers are allowed");
+        n0_error::ensure_any!(
             addresses.iter().all(valid_address),
             "invalid tracker socket"
         );
@@ -71,8 +71,8 @@ impl TrackerList {
     ///
     /// Increase the sequence number whenever the list changes. Republish the
     /// same item periodically to keep it available in the DHT.
-    pub fn sign(&self, key: &SigningKey, sequence: i64) -> anyhow::Result<MutableItem> {
-        anyhow::ensure!(sequence >= 0, "sequence must be nonnegative");
+    pub fn sign(&self, key: &SigningKey, sequence: i64) -> n0_error::Result<MutableItem> {
+        n0_error::ensure_any!(sequence >= 0, "sequence must be nonnegative");
         Ok(MutableItem::new(
             key,
             &self.encode(),

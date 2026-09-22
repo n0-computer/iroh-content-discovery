@@ -1,8 +1,8 @@
 //! Standalone signed tracker-list publisher.
 
-use anyhow::{Context, Result};
 use clap::Parser;
 use iroh_mainline_endpoint_discovery::{TrackerList, republish_tracker_list};
+use n0_error::{Result, StdResultExt};
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use std::net::SocketAddrV4;
 use zeroize::Zeroizing;
@@ -29,7 +29,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     // Read and remove the environment secret before any runtime or logging
     // threads start. Do not retain it in the long-lived async task.
-    let secret = std::env::var_os(SECRET_ENV).context("IROH_TRACKER_LIST_SECRET is required")?;
+    let secret =
+        std::env::var_os(SECRET_ENV).std_context("IROH_TRACKER_LIST_SECRET is required")?;
     // SAFETY: this standalone binary is still single-threaded, before creating
     // the runtime or initializing tracing; no concurrent environment access.
     unsafe { std::env::remove_var(SECRET_ENV) };
@@ -49,7 +50,8 @@ fn main() -> Result<()> {
     tracing::info!(%public_key, sequence = item.seq(), "starting tracker-list republisher");
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
+        .build()
+        .anyerr()?
         .block_on(async {
             let dht = Dht::builder().port(cli.udp_port).build()?;
             tokio::select! {
@@ -60,7 +62,7 @@ fn main() -> Result<()> {
 }
 
 fn sign(cli: &Cli, secret: &[u8]) -> Result<MutableItem> {
-    anyhow::ensure!(
+    n0_error::ensure_any!(
         secret.len() == 64,
         "secret must contain exactly 64 hex digits"
     );
@@ -69,7 +71,7 @@ fn sign(cli: &Cli, secret: &[u8]) -> Result<MutableItem> {
         let digit = |b: u8| {
             (b as char)
                 .to_digit(16)
-                .context("secret must contain only hex digits")
+                .std_context("secret must contain only hex digits")
         };
         *out = ((digit(pair[0])? << 4) | digit(pair[1])?) as u8;
     }
