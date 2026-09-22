@@ -5,6 +5,7 @@
 //! from that peer, without downloading a whole blob into memory or a store.
 
 use std::{
+    collections::{BTreeSet, HashMap},
     net::SocketAddr,
     ops::Range,
     sync::{Arc, Mutex},
@@ -15,7 +16,7 @@ use anyhow::bail;
 use axum::{
     Router,
     body::Body,
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -32,7 +33,7 @@ use iroh_blobs::{
 use iroh_mainline_endpoint_discovery::{Resolver, infohash_from_blake3};
 use lru::LruCache;
 use mime_classifier::MimeClassifier;
-use n0_future::StreamExt;
+use n0_future::{BufferedStreamExt, StreamExt};
 use tower_http::cors::{Any, CorsLayer};
 
 mod ranges;
@@ -41,6 +42,19 @@ use ranges::Selection;
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
+/// Concurrent size requests per collection listing.
+const SIZE_REQUESTS: usize = 16;
+const REPO_URL: &str = "https://github.com/n0-computer/iroh-content-discovery";
+const LISTING_CSS: &str = "\
+body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
+color:#000;background:#fff;max-width:64rem;margin:2rem auto;padding:0 1rem}\
+a{color:#000}\
+header,header a,.meta,.meta a{color:#777}\
+h1{font-size:1rem;font-weight:normal;margin:1.5rem 0 .5rem;word-break:break-all}\
+table{border-collapse:collapse;width:100%;margin-top:1rem}\
+td{padding:.25rem 1rem .25rem 0;border-top:1px solid #ddd;vertical-align:top}\
+td.size{text-align:right;white-space:nowrap;color:#777}\
+td.hash{color:#777;font-size:12px;word-break:break-all}";
 
 /// An HTTP gateway using a caller-owned iroh endpoint and content resolver.
 #[derive(Clone)]
@@ -53,6 +67,7 @@ struct Inner {
     // Reuse one peer for repeated video seeks, with bounded metadata memory.
     cache: Mutex<LruCache<Hash, Source>>,
     collections: Mutex<LruCache<Hash, Arc<Collection>>>,
+    sizes: Mutex<LruCache<Hash, u64>>,
 }
 
 #[derive(Clone)]
@@ -71,6 +86,7 @@ impl Gateway {
             classifier: MimeClassifier::new(),
             cache: Mutex::new(LruCache::new(128.try_into().unwrap())),
             collections: Mutex::new(LruCache::new(32.try_into().unwrap())),
+            sizes: Mutex::new(LruCache::new(4096.try_into().unwrap())),
         }))
     }
 
@@ -170,6 +186,43 @@ impl Gateway {
             .map_err(HttpError::upstream)
     }
 
+    /// Returns the verified size of `hash`, fetched over `connection` if not cached.
+    async fn size(&self, hash: Hash, connection: &Connection) -> anyhow::Result<u64> {
+        if let Some(source) = self.0.cache.lock().unwrap().peek(&hash) {
+            return Ok(source.size);
+        }
+        if let Some(size) = self.0.sizes.lock().unwrap().get(&hash) {
+            return Ok(*size);
+        }
+        let size = verified_size(connection, hash).await?;
+        self.0.sizes.lock().unwrap().put(hash, size);
+        Ok(size)
+    }
+
+    /// Returns the sizes of `hashes`, fetching up to [`SIZE_REQUESTS`] at a time.
+    ///
+    /// Hashes whose size could not be fetched are missing from the result.
+    async fn sizes(&self, hashes: Vec<Hash>, connection: Connection) -> HashMap<Hash, u64> {
+        n0_future::stream::iter(hashes)
+            .map(|hash| {
+                let gateway = self.clone();
+                let connection = connection.clone();
+                async move {
+                    match gateway.size(hash, &connection).await {
+                        Ok(size) => Some((hash, size)),
+                        Err(error) => {
+                            tracing::debug!(%error, %hash, "fetch size");
+                            None
+                        }
+                    }
+                }
+            })
+            .buffered_unordered(SIZE_REQUESTS)
+            .filter_map(|entry| entry)
+            .collect()
+            .await
+    }
+
     /// Returns the collection rooted at `hash` and a connection to its peer.
     async fn collection(&self, hash: Hash) -> Result<(Arc<Collection>, Connection), HttpError> {
         let source = self.source(hash, None).await?;
@@ -254,15 +307,24 @@ async fn blob(
 async fn tree_root(
     state: State<Gateway>,
     Path(encoded): Path<String>,
+    query: RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    tree(state, Path((encoded, String::new())), method, headers).await
+    tree(
+        state,
+        Path((encoded, String::new())),
+        query,
+        method,
+        headers,
+    )
+    .await
 }
 
 async fn tree(
     State(gateway): State<Gateway>,
     Path((encoded, path)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -285,44 +347,92 @@ async fn tree(
     } else {
         format!("{path}/")
     };
-    let html = listing(&encoded, &dir, &collection).ok_or(HttpError(
+    let entries = Entries::new(&dir, &collection).ok_or(HttpError(
         StatusCode::NOT_FOUND,
         "no such file or directory in collection",
     ))?;
+    let with_sizes = query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair == "sizes" || pair.starts_with("sizes="))
+    });
+    let sizes = if with_sizes {
+        let hashes = entries.files.iter().map(|(_, hash)| *hash).collect();
+        Some(
+            tokio::time::timeout(LOOKUP_TIMEOUT, gateway.sizes(hashes, connection))
+                .await
+                .map_err(HttpError::timeout)?,
+        )
+    } else {
+        None
+    };
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .body(Body::from(html))
+        .body(Body::from(listing(
+            &encoded,
+            &dir,
+            &entries,
+            sizes.as_ref(),
+        )))
         .unwrap())
 }
 
-/// Renders the HTML listing of directory `dir` in the collection at `root`.
-///
-/// `dir` is empty for the top level and otherwise ends with `/`. Returns
-/// `None` if no name in the collection starts with `dir`.
-fn listing(root: &str, dir: &str, collection: &Collection) -> Option<String> {
-    let mut dirs = std::collections::BTreeSet::new();
-    let mut files = Vec::new();
-    for (name, hash) in collection.iter() {
-        let Some(rest) = name.strip_prefix(dir) else {
-            continue;
-        };
-        match rest.split_once('/') {
-            Some((sub, _)) => {
-                dirs.insert(sub);
+/// The subdirectories and files directly inside one directory of a collection.
+struct Entries<'a> {
+    dirs: BTreeSet<&'a str>,
+    files: Vec<(&'a str, Hash)>,
+}
+
+impl<'a> Entries<'a> {
+    /// Collects the entries of `dir`, which is empty for the top level and
+    /// otherwise ends with `/`. Returns `None` if no name starts with `dir`.
+    fn new(dir: &str, collection: &'a Collection) -> Option<Self> {
+        let mut dirs = BTreeSet::new();
+        let mut files = Vec::new();
+        for (name, hash) in collection.iter() {
+            let Some(rest) = name.strip_prefix(dir) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((sub, _)) => {
+                    dirs.insert(sub);
+                }
+                None => files.push((rest, *hash)),
             }
-            None => files.push((rest, hash)),
         }
+        if !dir.is_empty() && dirs.is_empty() && files.is_empty() {
+            return None;
+        }
+        Some(Self { dirs, files })
     }
-    if !dir.is_empty() && dirs.is_empty() && files.is_empty() {
-        return None;
-    }
+}
+
+/// Renders the HTML listing of `dir` in the collection at `root`.
+///
+/// With `sizes`, file sizes are shown and directory links keep `?sizes`.
+/// Without, the page links to the same listing with sizes.
+fn listing(
+    root: &str,
+    dir: &str,
+    entries: &Entries<'_>,
+    sizes: Option<&HashMap<Hash, u64>>,
+) -> String {
     let title = html_escape(&format!("{root}/{dir}"));
+    let query = if sizes.is_some() { "?sizes" } else { "" };
     let link = |path: &str| html_escape(&percent_encode_path(&format!("/tree/{root}/{path}")));
     let mut html = format!(
-        "<!DOCTYPE html>\n<meta charset=\"utf-8\">\n<title>{title}</title>\n<h1>{title}</h1>\n<ul>\n"
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{title}</title>\n<style>{LISTING_CSS}</style>\n\
+         <header><a href=\"{REPO_URL}\">iroh content discovery</a></header>\n\
+         <h1>{title}</h1>\n"
     );
+    if sizes.is_none() {
+        html.push_str("<p class=\"meta\"><a href=\"?sizes\">Fetch sizes</a></p>\n");
+    }
+    html.push_str("<table>\n");
     if let Some(trimmed) = dir.strip_suffix('/') {
         let parent = trimmed.rsplit_once('/').map_or("", |(parent, _)| parent);
         let parent = if parent.is_empty() {
@@ -330,25 +440,50 @@ fn listing(root: &str, dir: &str, collection: &Collection) -> Option<String> {
         } else {
             format!("{parent}/")
         };
-        html.push_str(&format!("<li><a href=\"{}\">../</a></li>\n", link(&parent)));
-    }
-    for sub in dirs {
         html.push_str(&format!(
-            "<li><a href=\"{}\">{}/</a></li>\n",
+            "<tr><td><a href=\"{}{query}\">../</a></td><td class=\"size\"></td><td class=\"hash\"></td></tr>\n",
+            link(&parent)
+        ));
+    }
+    for sub in &entries.dirs {
+        html.push_str(&format!(
+            "<tr><td><a href=\"{}{query}\">{}/</a></td><td class=\"size\"></td><td class=\"hash\"></td></tr>\n",
             link(&format!("{dir}{sub}/")),
             html_escape(sub),
         ));
     }
-    for (file, hash) in files {
+    for (file, hash) in &entries.files {
+        let size = match sizes {
+            Some(sizes) => sizes
+                .get(hash)
+                .map_or("?".to_string(), |size| format_size(*size)),
+            None => String::new(),
+        };
         html.push_str(&format!(
-            "<li><a href=\"{}\">{}</a> <code>{}</code></li>\n",
+            "<tr><td><a href=\"{}\">{}</a></td><td class=\"size\">{size}</td><td class=\"hash\">{}</td></tr>\n",
             link(&format!("{dir}{file}")),
             html_escape(file),
             z32::encode(hash.as_bytes()),
         ));
     }
-    html.push_str("</ul>\n");
-    Some(html)
+    html.push_str("</table>\n");
+    html
+}
+
+/// Formats a byte count with binary units, e.g. `1.5 MiB`.
+fn format_size(size: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut value = size as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn html_escape(value: &str) -> String {
@@ -554,6 +689,25 @@ async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<
     };
     closing.next().await?;
     Ok(collection)
+}
+
+/// Returns the size of `hash`, authenticated by fetching only its last chunk.
+async fn verified_size(connection: &Connection, hash: Hash) -> anyhow::Result<u64> {
+    let (mut content, size) = start(connection, hash, ChunkRanges::last_chunk()).await?;
+    let end = loop {
+        match content.next().await {
+            BlobContentNext::More((next, item)) => {
+                item?;
+                content = next;
+            }
+            BlobContentNext::Done(end) => break end,
+        }
+    };
+    let EndBlobNext::Closing(closing) = end.next() else {
+        bail!("unexpected child blob");
+    };
+    closing.next().await?;
+    Ok(size)
 }
 
 async fn sniff(connection: &Connection, hash: Hash) -> anyhow::Result<(u64, Vec<u8>)> {

@@ -106,7 +106,9 @@ http://127.0.0.1:8080/tree/<z32>/<dir>/<name>
 Collection names are treated as `/`-separated paths. A path that matches a
 file name serves the file like `/blake3/`, with ranges and MIME detection. Any
 other path is listed as a directory: an HTML page with its subdirectories,
-its files, and a link to the parent. Files are fetched from the peer that
+its files, and a link to the parent. Add `?sizes` to also show file
+sizes; the gateway then fetches the last chunk of each listed file, which
+verifies its size, up to 16 at a time. Files are fetched from the peer that
 provided the collection, so only the collection hash needs to be announced.
 `/tree/` on a blob that is not a collection returns `422`, and a path that is
 neither a file nor a directory returns `404`.

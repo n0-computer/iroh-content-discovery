@@ -280,7 +280,30 @@ async fn run() {
         assert!(html.contains(&format!("href=\"{tree}/notes/\"")));
         assert!(html.contains(&format!("href=\"{tree}/video.mp4\"")));
         assert!(!html.contains("hello"));
+        assert!(html.contains("iroh-content-discovery\">iroh content discovery</a>"));
+        assert!(html.contains("<a href=\"?sizes\">Fetch sizes</a>"));
     }
+    let res = client
+        .get(format!("{collection_url}?sizes"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = res.text().await.unwrap();
+    assert!(!html.contains("Fetch sizes"));
+    assert!(html.contains(&format!("href=\"{tree}/notes/?sizes\"")));
+    assert!(html.contains(&format!(
+        "<td class=\"size\">{:.1} KiB</td>",
+        video.len() as f64 / 1024.0
+    )));
+    let res = client
+        .get(format!("{collection_url}/notes/?sizes"))
+        .send()
+        .await
+        .unwrap();
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!("href=\"{tree}/?sizes\">../")));
+    assert!(html.contains(&format!("<td class=\"size\">{} B</td>", text.len())));
     let res = client
         .get(format!("{collection_url}/notes"))
         .send()
