@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use iroh_base::SecretKey;
-use iroh_mainline_endpoint_discovery::{Directory, Resolver, SignedRecord, UdpClient};
+use iroh_mainline_endpoint_discovery::{Directory, Publisher, Resolver, SignedRecord, UdpClient};
 use n0_future::StreamExt;
 use n0_mainline::Dht;
 use tokio::net::UdpSocket;
@@ -267,6 +267,49 @@ async fn resolver_stream_yields_all_announced_endpoints() {
     })
     .await
     .expect("streaming discovery timed out");
+}
+
+#[tokio::test]
+async fn publisher_announces_endpoint_for_resolver() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let network = n0_mainline::Testnet::new(3).await.unwrap();
+        let node = || {
+            Dht::builder()
+                .bootstrap(&network.bootstrap)
+                .port(0)
+                .build()
+                .unwrap()
+        };
+        let replica = Server::new(Limits::for_tests());
+        let handle = replica.attach(node()).await.unwrap();
+        let replica_addr = v4(loopback(handle.local_addr()));
+
+        let dht = node();
+        let publisher = Publisher::new(
+            SecretKey::generate(),
+            dht.clone(),
+            Directory::udp(dht, replica_addr).await.unwrap(),
+        );
+        let infohash = n0_mainline::Id::from([72; 20]);
+        publisher.add_infohash(infohash);
+
+        let reader = node();
+        let resolver = Resolver::bind(
+            reader.clone(),
+            Directory::udp(reader, replica_addr).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        // `wait_published` fires before the announcements, so keep looking
+        // until the publisher's endpoint shows up.
+        let mut found = resolver.resolve_continuously(infohash);
+        tokio::select! {
+            result = publisher.run() => panic!("publisher stopped: {result:?}"),
+            id = found.next() => assert_eq!(id, Some(publisher.id())),
+        }
+    })
+    .await
+    .expect("publisher announcement was not resolved");
 }
 
 async fn send(socket: &UdpSocket, destination: std::net::SocketAddr, message: &Request) {
