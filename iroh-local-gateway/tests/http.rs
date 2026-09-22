@@ -167,6 +167,28 @@ async fn run() {
         "text/markdown; charset=utf-8"
     );
     assert_eq!(res.bytes().await.unwrap().as_ref(), markdown);
+    // `?raw` shows the source instead of rendering or downloading it.
+    let res = client
+        .get(format!("{collection_url}/site/index.html?raw"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = client
+        .get(format!("{collection_url}/media/video.mp4?raw"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["content-type"], "application/octet-stream");
+    let res = client
+        .get(format!("{collection_url}?raw"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "application/octet-stream");
+    assert!(!res.text().await.unwrap().contains("<h1>"));
     let res = client
         .get(format!("{collection_url}/site/style.css"))
         .send()

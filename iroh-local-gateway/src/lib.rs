@@ -389,6 +389,30 @@ fn with_charset(mime: String, prefix: &[u8]) -> String {
     format!("{mime}; charset={charset}")
 }
 
+/// Returns whether the query string sets `name`, as `?name` or `?name=...`.
+fn has_flag(query: Option<&str>, name: &str) -> bool {
+    query.is_some_and(|query| {
+        query.split('&').any(|pair| {
+            pair.strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+        })
+    })
+}
+
+/// Content type that a browser shows as text or downloads, but never renders.
+fn raw_mime(mime: &str) -> String {
+    let (base, params) = match mime.split_once(';') {
+        Some((base, params)) => (base, params),
+        None => (mime, ""),
+    };
+    if base.starts_with("text/") {
+        // Keep the charset so the text still decodes correctly.
+        format!("text/plain;{params}")
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
 /// The collection a listing belongs to, and the path its links start with.
 struct Root {
     encoded: String,
@@ -419,7 +443,10 @@ async fn blob(
     let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
         .map_err(HttpError::timeout)??;
-    if source.size >= 32
+    let raw = has_flag(query.as_deref(), "raw");
+    // `?raw` serves a collection root as the hash sequence it is.
+    if !raw
+        && source.size >= 32
         && source.size.is_multiple_of(32)
         && source.size <= MAX_AUTO_COLLECTION_ROOT_BYTES
         && let Ok(Ok(collection)) = tokio::time::timeout(
@@ -440,7 +467,7 @@ async fn blob(
         )
         .await;
     }
-    serve_blob(source, hash, &encoded, method, headers).await
+    serve_blob(source, hash, &encoded, raw, method, headers).await
 }
 
 async fn collection_root(
@@ -505,7 +532,16 @@ async fn collection_entry(
         )
         .await
         .map_err(HttpError::timeout)??;
-        return serve_blob(source, hash, &z32::encode(hash.as_bytes()), method, headers).await;
+        let raw = has_flag(query.as_deref(), "raw");
+        return serve_blob(
+            source,
+            hash,
+            &z32::encode(hash.as_bytes()),
+            raw,
+            method,
+            headers,
+        )
+        .await;
     }
     let dir = if path.is_empty() || path.ends_with('/') {
         path
@@ -516,11 +552,7 @@ async fn collection_entry(
         StatusCode::NOT_FOUND,
         "path not found in collection",
     ))?;
-    let with_sizes = query.is_some_and(|query| {
-        query
-            .split('&')
-            .any(|pair| pair == "sizes" || pair.starts_with("sizes="))
-    });
+    let with_sizes = has_flag(query.as_deref(), "sizes");
     let sizes = if with_sizes {
         let hashes = entries.files.iter().map(|(_, hash)| *hash).collect();
         Some(
@@ -695,12 +727,16 @@ fn html_escape(value: &str) -> String {
 }
 
 async fn serve_blob(
-    source: Source,
+    mut source: Source,
     hash: Hash,
     encoded: &str,
+    raw: bool,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
+    if raw {
+        source.mime = raw_mime(&source.mime);
+    }
     let etag = format!("\"{encoded}\"");
     let builder = Response::builder()
         .header(header::CONTENT_TYPE, &source.mime)
