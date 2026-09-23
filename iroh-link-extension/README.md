@@ -105,6 +105,11 @@ upload, sign, or publish anything. The gateway is distributed separately.
 
 ## Settings and behavior
 
+Open settings from the toolbar popup, or from **Extension options** on the
+extension's Details page in Chrome/Brave. In Firefox, use the extension's
+**Preferences/Options** in `about:addons`. Both entry points use the same
+settings page; the options entry opens it in a tab.
+
 The popup configures the localhost port and can disable all redirects. Saved
 settings and dynamic rules survive browser restarts. There is no always-running
 background process; the service worker only initializes rules at installation

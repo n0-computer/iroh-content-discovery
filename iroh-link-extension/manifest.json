@@ -24,6 +24,10 @@
     "default_title": "iroh link",
     "default_popup": "popup.html"
   },
+  "options_ui": {
+    "page": "popup.html",
+    "open_in_tab": true
+  },
   "browser_specific_settings": {
     "gecko": {
       "id": "blake3-link-gateway@iroh.computer",
