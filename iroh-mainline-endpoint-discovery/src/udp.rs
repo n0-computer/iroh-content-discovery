@@ -50,6 +50,7 @@ enum ActorMsg {
     ),
     Resolve(
         SocketAddrV4,
+        Option<SocketAddrV4>,
         oneshot::Sender<Result<ResolveResult, UdpError>>,
     ),
 }
@@ -136,10 +137,22 @@ impl UdpClient {
     pub async fn resolve(&self, addr: SocketAddrV4) -> Result<ResolveResult, UdpError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(ActorMsg::Resolve(addr, tx))
+            .send(ActorMsg::Resolve(addr, None, tx))
             .await
             .map_err(|_| e!(UdpError::Closed))?;
         rx.await.map_err(|_| e!(UdpError::Closed))?
+    }
+
+    /// Check one candidate without changing the configured server set.
+    pub(crate) async fn probe(&self, server: SocketAddrV4) -> Result<(), UdpError> {
+        let addr = SocketAddrV4::new(rand::random::<[u8; 4]>().into(), rand::random());
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorMsg::Resolve(addr, Some(server), tx))
+            .await
+            .map_err(|_| e!(UdpError::Closed))?;
+        // An empty Value response is just as useful as a hit for liveness.
+        rx.await.map_err(|_| e!(UdpError::Closed))?.map(|_| ())
     }
 
     /// Resolve through one server, adding it to this client first.
@@ -276,15 +289,18 @@ impl Actor {
                     let _ = response.send(Err(e!(UdpError::TooLarge)));
                 }
             }
-            ActorMsg::Resolve(addr, response) => {
-                if self.servers.is_empty() {
+            ActorMsg::Resolve(addr, server, response) => {
+                let servers = server
+                    .map(|server| HashSet::from([server]))
+                    .unwrap_or_else(|| self.servers.clone());
+                if servers.is_empty() {
                     let _ = response.send(Err(e!(UdpError::NoServers)));
                     return;
                 }
                 let tx = self.next_id();
                 let request = Request::V1(RequestV1::Get { tx, addr });
                 if let Some(bytes) = encode(&request, buf) {
-                    for server in &self.servers {
+                    for server in &servers {
                         if let Err(err) = self.dht.send_datagram(bytes.to_vec(), *server).await {
                             debug!(%server, %err, "send get");
                         }
@@ -293,7 +309,7 @@ impl Actor {
                         tx,
                         PendingResolve {
                             addr,
-                            awaiting: self.servers.clone(),
+                            awaiting: servers,
                             values: HashSet::new(),
                             responded: false,
                             response,
