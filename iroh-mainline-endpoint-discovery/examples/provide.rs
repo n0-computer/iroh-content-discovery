@@ -8,6 +8,7 @@ use std::{
 };
 
 use clap::Parser;
+use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
 use iroh::{endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobFormat, BlobsProtocol, Hash,
@@ -152,21 +153,16 @@ async fn main() -> Result<()> {
 fn pkarr_key() -> Result<SigningKey> {
     let Some(hex) = std::env::var_os(PKARR_SECRET) else {
         let secret: [u8; 32] = rand::random();
-        let printable: String = secret.iter().map(|byte| format!("{byte:02x}")).collect();
+        let printable = HEXLOWER.encode(&secret);
         println!("{PKARR_SECRET}={printable}  (generated, export it to reuse this name)");
         return Ok(SigningKey::from_bytes(&secret));
     };
     let hex = hex.to_str().std_context("secret must be hex digits")?;
-    n0_error::ensure_any!(hex.len() == 64, "secret must contain 64 hex digits");
-    let mut secret = [0; 32];
-    for (out, pair) in secret.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
-        let digit = |byte: u8| {
-            (byte as char)
-                .to_digit(16)
-                .std_context("secret must contain only hex digits")
-        };
-        *out = ((digit(pair[0])? << 4) | digit(pair[1])?) as u8;
-    }
+    let secret: [u8; 32] = HEXLOWER_PERMISSIVE
+        .decode(hex.as_bytes())
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .std_context("secret must contain 64 hex digits")?;
     Ok(SigningKey::from_bytes(&secret))
 }
 

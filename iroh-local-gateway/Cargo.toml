@@ -16,6 +16,7 @@ bao-tree = "0.16"
 blake3.workspace = true
 bytes = "1"
 clap.workspace = true
+data-encoding.workspace = true
 iroh.workspace = true
 iroh-blobs.workspace = true
 iroh-mainline-endpoint-discovery = { version = "0.1.0", path = "../iroh-mainline-endpoint-discovery" }

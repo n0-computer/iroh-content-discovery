@@ -7,6 +7,8 @@
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
+
 mod directory;
 mod publisher;
 mod record;
@@ -46,12 +48,7 @@ pub fn parse_infohash(value: &str) -> Result<[u8; 20], HashParseError> {
 
 /// Format a 20-byte infohash as lowercase hexadecimal.
 pub fn infohash_hex(id: &[u8; 20]) -> String {
-    let mut out = String::with_capacity(40);
-    for byte in id {
-        use std::fmt::Write;
-        write!(out, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    out
+    HEXLOWER.encode(id)
 }
 
 /// Error parsing an infohash or BLAKE3 hash.
@@ -68,20 +65,11 @@ pub enum HashParseError {
 }
 
 fn decode_hex20(value: &str) -> Result<[u8; 20], HashParseError> {
-    let mut out = [0; 20];
-    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        out[index] = (from_hex(pair[0])? << 4) | from_hex(pair[1])?;
-    }
-    Ok(out)
-}
-
-fn from_hex(byte: u8) -> Result<u8, HashParseError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(HashParseError::InvalidHex),
-    }
+    HEXLOWER_PERMISSIVE
+        .decode(value.as_bytes())
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(HashParseError::InvalidHex)
 }
 
 #[cfg(test)]

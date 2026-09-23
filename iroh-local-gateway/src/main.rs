@@ -4,6 +4,7 @@ use std::net::{SocketAddr, SocketAddrV4};
 
 use anyhow::Result;
 use clap::Parser;
+use data_encoding::HEXLOWER_PERMISSIVE;
 use iroh::endpoint::presets;
 use iroh_local_gateway::{Gateway, validate_listen_addr};
 use iroh_mainline_endpoint_discovery::{Directory, DiscoveryConfig, Resolver};
@@ -70,15 +71,10 @@ async fn main() -> Result<()> {
 }
 
 fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N], String> {
-    if value.len() != N * 2 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("expected {} hex digits", N * 2));
-    }
-    let mut result = [0; N];
-    for (out, pair) in result
-        .iter_mut()
-        .zip(value.as_bytes().as_chunks::<2>().0.iter())
-    {
-        *out = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
-    }
-    Ok(result)
+    let invalid = || format!("expected {} hex digits", N * 2);
+    HEXLOWER_PERMISSIVE
+        .decode(value.as_bytes())
+        .map_err(|_| invalid())?
+        .try_into()
+        .map_err(|_| invalid())
 }

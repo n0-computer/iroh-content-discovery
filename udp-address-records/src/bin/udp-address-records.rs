@@ -6,6 +6,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use clap::Parser;
+use data_encoding::HEXLOWER_PERMISSIVE;
 use iroh_metrics::{Registry, service::MetricsServer};
 use tokio::signal;
 use tracing::info;
@@ -94,12 +95,10 @@ async fn shutdown_signal() -> Result<()> {
 }
 
 fn parse_infohash(value: &str) -> std::result::Result<[u8; 20], String> {
-    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("expected 40 hexadecimal digits".to_owned());
-    }
-    let mut bytes = [0; 20];
-    for (out, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
-        *out = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
-    }
-    Ok(bytes)
+    let invalid = || "expected 40 hexadecimal digits".to_owned();
+    HEXLOWER_PERMISSIVE
+        .decode(value.as_bytes())
+        .map_err(|_| invalid())?
+        .try_into()
+        .map_err(|_| invalid())
 }

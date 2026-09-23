@@ -1,6 +1,7 @@
 //! Standalone signed tracker-list publisher.
 
 use clap::Parser;
+use data_encoding::HEXLOWER_PERMISSIVE;
 use iroh_mainline_endpoint_discovery::{TrackerList, republish_tracker_list};
 use n0_error::{Result, StdResultExt};
 use n0_mainline::{Dht, MutableItem, SigningKey};
@@ -66,15 +67,12 @@ fn sign(cli: &Cli, secret: &[u8]) -> Result<MutableItem> {
         secret.len() == 64,
         "secret must contain exactly 64 hex digits"
     );
-    let mut bytes = Zeroizing::new([0u8; 32]);
-    for (out, pair) in bytes.iter_mut().zip(secret.chunks_exact(2)) {
-        let digit = |b: u8| {
-            (b as char)
-                .to_digit(16)
-                .std_context("secret must contain only hex digits")
-        };
-        *out = ((digit(pair[0])? << 4) | digit(pair[1])?) as u8;
-    }
+    let decoded = Zeroizing::new(
+        HEXLOWER_PERMISSIVE
+            .decode(secret)
+            .map_err(|_| n0_error::anyerr!("secret must contain only hex digits"))?,
+    );
+    let bytes = Zeroizing::new(<[u8; 32]>::try_from(decoded.as_slice()).anyerr()?);
     let key = SigningKey::from_bytes(&bytes);
     // SigningKey zeroizes its secret on drop; the decoded buffer is Zeroizing.
     TrackerList::new(cli.tracker.clone())?.sign(&key, cli.sequence)
