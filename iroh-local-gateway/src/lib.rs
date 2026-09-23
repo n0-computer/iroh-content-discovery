@@ -1,7 +1,7 @@
 //! Local HTTP delivery of Bao-verified blobs discovered through Mainline.
 //!
 //! Adapted from the streaming approach in `iroh-examples/iroh-gateway`.
-//! Each content lookup chooses one signed endpoint. Data is streamed directly
+//! Each content lookup validates providers before choosing an endpoint. Data is streamed directly
 //! from that peer, without downloading a whole blob into memory or a store.
 
 use std::{
@@ -39,7 +39,9 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::Instrument;
 
 mod pkarr_redirect;
+mod providers;
 mod ranges;
+pub use providers::filter_verified_providers;
 use ranges::Selection;
 
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -172,10 +174,10 @@ impl Gateway {
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
         let started = Instant::now();
         tracing::debug!(infohash = %iroh_mainline_endpoint_discovery::infohash_hex(&infohash), "looking up content provider");
-        let peer = self
+        let providers = self
             .0
             .resolver
-            .resolve_one(infohash.into())
+            .resolve_stream(infohash.into())
             .await
             .map_err(|error| {
                 tracing::debug!(
@@ -184,10 +186,13 @@ impl Gateway {
                     "provider lookup failed"
                 );
                 HttpError::upstream(error)
-            })?
+            })?;
+        let peer = filter_verified_providers(self.0.endpoint.clone(), hash, providers)
+            .next()
+            .await
             .ok_or(HttpError(
                 StatusCode::NOT_FOUND,
-                "no peer found for this hash",
+                "no verified provider found for this hash",
             ))?;
         tracing::debug!(%peer, elapsed_ms = started.elapsed().as_millis(), "provider lookup complete; connecting");
         let started = Instant::now();

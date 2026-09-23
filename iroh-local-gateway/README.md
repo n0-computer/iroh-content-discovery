@@ -140,9 +140,12 @@ This route can be used directly on localhost; the extension also routes
 ## Discovery
 
 The gateway computes `SHA-1(blake3_hash_bytes)`, queries Mainline for content
-providers, and resolves the first available signed endpoint record through the
-tracker. It connects to **one peer**, using normal iroh endpoint discovery,
-and streams the blob using the iroh-blobs protocol. The provider must have
+providers, and resolves signed endpoint records through the tracker. The optional
+`filter_verified_providers(endpoint, hash, stream)` stage validates each distinct
+candidate with an iroh-blobs size request backed by a Bao proof. The gateway uses
+this filter with three concurrent probes and a ten-second deadline per probe,
+skipping failed candidates. It reconnects to the first validated endpoint to
+stream the blob. The provider must have
 published its signed tracker record and announced the content infohash, as in
 the workspace's `Publisher` and blobs example.
 
@@ -204,7 +207,7 @@ provided the collection, so only the collection hash needs to be announced.
 `/tree/` on a blob that is not a collection returns `422`, and a path that is
 neither a file nor a directory returns `404`.
 
-Malformed hashes return `400`; no discovered provider returns `404`; failed
+Malformed hashes return `400`; no verified provider returns `404`; failed
 upstream operations return `502`; setup timeouts return `504`. Once HTTP headers
 have been sent, transfer failures terminate the body rather than changing its
 status. Discovery, connection establishment, and MIME/size probing share a
@@ -212,8 +215,9 @@ status. Discovery, connection establishment, and MIME/size probing share a
 
 A bounded 128-entry cache reuses peer connections and MIME/size metadata for
 successive video seeks. A second bounded cache retains collection manifests
-and their provider connections. This version does not try alternate peers or
-perform parallel downloads.
+and their provider connections. After selecting a validated provider, this
+version does not retry a failed transfer with another peer or perform parallel
+downloads.
 
 ## Tests
 
