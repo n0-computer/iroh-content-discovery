@@ -4,8 +4,9 @@ use lru::LruCache;
 use std::time::{Duration, Instant};
 
 use axum::{
+    Extension,
     extract::{OriginalUri, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use n0_future::StreamExt;
@@ -14,7 +15,14 @@ use simple_dns::{
     rdata::{RData, SVCB, SVCParam},
 };
 
-use crate::{Gateway, HttpError, LOOKUP_TIMEOUT};
+use percent_encoding::percent_decode_str;
+
+use crate::{
+    Gateway, HttpError, LOOKUP_TIMEOUT, Root, Subdomain, parse_hash, serve_path, serve_root,
+};
+
+/// Targets under this suffix name content this gateway can serve itself.
+const CONTENT_SUFFIX: &str = ".blake3.link";
 
 // Bound both memory use and how long changed names can remain stale.
 const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -63,6 +71,9 @@ impl Cache {
 pub(crate) async fn redirect(
     State(gateway): State<Gateway>,
     OriginalUri(uri): OriginalUri,
+    subdomain: Option<Extension<Subdomain>>,
+    method: Method,
+    headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     // Keep the original escaping, including encoded slashes and query values.
     let rest = uri.path().strip_prefix("/pkarr/").unwrap();
@@ -102,15 +113,6 @@ pub(crate) async fn redirect(
         elapsed_ms = started.elapsed().as_millis(),
         "Pkarr DNS packet decoded"
     );
-    let authority = target(&packet, encoded).ok_or(HttpError(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "no supported apex HTTPS target",
-    ))?;
-    let mut location = format!("https://{authority}{path}");
-    if let Some(query) = uri.query() {
-        location.push('?');
-        location.push_str(query);
-    }
     if !cache_hit {
         gateway
             .0
@@ -118,6 +120,35 @@ pub(crate) async fn redirect(
             .lock()
             .unwrap()
             .insert(key, item.clone(), &packet, Instant::now());
+    }
+    let authority = target(&packet, encoded).ok_or(HttpError(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no supported apex HTTPS target",
+    ))?;
+    // A content-addressed target is served here instead of being handed back
+    // to the browser, so the key stays in the address bar and the bytes stay
+    // verified.
+    if let Some(hash) = content_hash(&authority) {
+        let base = match subdomain {
+            Some(_) => String::new(),
+            None => format!("/pkarr/{encoded}"),
+        };
+        let root = Root::at(encoded.to_owned(), base);
+        let query = uri.query().map(str::to_owned);
+        let path = percent_decode_str(path.trim_start_matches('/'))
+            .decode_utf8()
+            .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "path is not valid UTF-8"))?
+            .into_owned();
+        return if path.is_empty() {
+            serve_root(&gateway, root, hash, query, method, headers).await
+        } else {
+            serve_path(gateway, root, hash, path, query, method, headers).await
+        };
+    }
+    let mut location = format!("https://{authority}{path}");
+    if let Some(query) = uri.query() {
+        location.push('?');
+        location.push_str(query);
     }
     tracing::debug!(key = encoded, %location, "redirecting Pkarr request");
     Ok((
@@ -128,6 +159,11 @@ pub(crate) async fn redirect(
         ],
     )
         .into_response())
+}
+
+/// Returns the hash when a target names content, as `<z32>.blake3.link`.
+fn content_hash(authority: &str) -> Option<iroh_blobs::Hash> {
+    parse_hash(authority.strip_suffix(CONTENT_SUFFIX)?).ok()
 }
 
 fn parse_key(encoded: &str) -> Result<[u8; 32], HttpError> {

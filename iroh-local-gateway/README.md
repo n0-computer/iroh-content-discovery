@@ -20,13 +20,11 @@ relays. The full browser flow is:
 
 ```text
 https://<public-key>.pkarr.link/
-  -> http://<public-key>.pkarr.localhost:8080/
-  -> https://<hash>.blake3.link/
-  -> http://<hash>.blake3.localhost:8080/
+  -> http://<public-key>.pkarr.localhost:8080/   (serves the named content)
 ```
 
-The gateway resolves the signed HTTPS record on Mainline and redirects;
-the extension intercepts both domains. The content then travels through real
+The gateway resolves the signed HTTPS record on Mainline; when it names
+content, it serves it directly. The content then travels through real
 iroh connections and tracker discovery. Public mode needs working outbound UDP
 and an available address-index tracker. Pass `--tracker IP:PORT` (or set
 `IROH_ADDR_INDEX`) to select one explicitly if discovery fails. Startup can
@@ -92,7 +90,7 @@ Only loopback HTTP listeners are accepted, including `127.0.0.1` and `::1`.
 There is no TLS configuration. The iroh connection to the content peer remains
 encrypted and authenticated.
 
-## Pkarr redirects
+## Pkarr names
 
 Publish a test redirect and keep it alive with the included example:
 
@@ -126,7 +124,9 @@ On a cache miss, the gateway uses the first verified BEP44 item returned by
 Mainline; it does not wait for the full lookup to finish. `n0-mainline` verifies
 the signature, and `simple-dns` decodes the value's apex `HTTPS` records; no
 `pkarr` client or additional DHT implementation is used. It selects the supported
-target with the lowest priority and redirects to `https://<target>/path?query`.
+target with the lowest priority. A target of the form `<hash>.blake3.link`
+names content this gateway can serve, so it is served inline, under the key's
+own URL. Any other target redirects to `https://<target>/path?query`.
 Paths and queries retain their original percent encoding; the bare key uses `/`.
 Service-mode port parameters are supported. Targets must be conventional DNS
 hostnames; root targets, bare public keys, and records requiring mandatory SVCB
@@ -143,10 +143,13 @@ signed version; this favors latency over searching for the newest available vers
 packets without a supported HTTPS target `422`, invalid packets or failed
 lookups `502`, and lookup timeouts `504`.
 
-All target hostnames are treated alike, including `<hash>.blake3.link`. The
-browser extension can intercept that destination using its existing rules.
-This route can be used directly on localhost; the extension also routes
-`https://<public-key>.pkarr.link/path?query` here automatically.
+Content targets are served inline, so the key stays in the address bar, the
+bytes stay verified against the hash, and collections list in place with the
+same query flags as `/blake3`. The key keeps one origin as its content
+changes, which a per-hash URL cannot. This route can be used directly on
+localhost; the extension also routes
+`https://<public-key>.pkarr.link/path?query` to
+`http://<public-key>.pkarr.localhost:<port>/path?query`.
 
 ## Discovery
 

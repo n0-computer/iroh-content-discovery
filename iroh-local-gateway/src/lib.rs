@@ -503,6 +503,17 @@ impl Root {
         };
         Self { encoded, base }
     }
+
+    /// A listing shown under another route, such as a Pkarr key.
+    pub(crate) fn at(encoded: String, base: String) -> Self {
+        Self { encoded, base }
+    }
+}
+
+/// Parses a hash from a path segment, reporting a bad request if invalid.
+fn parse_path_hash(encoded: &str) -> Result<Hash, HttpError> {
+    parse_hash(encoded)
+        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))
 }
 
 async fn blob(
@@ -513,8 +524,20 @@ async fn blob(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let hash = parse_hash(&encoded)
-        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let hash = parse_path_hash(&encoded)?;
+    let root = Root::new(encoded, subdomain);
+    serve_root(&gateway, root, hash, query, method, headers).await
+}
+
+/// Serves the root of `hash`: a blob, or a listing if it is a collection.
+pub(crate) async fn serve_root(
+    gateway: &Gateway,
+    root: Root,
+    hash: Hash,
+    query: Option<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
     let download = has_flag(query.as_deref(), "download");
     // `?tree` states that the blob is a collection, which skips both the size
     // probe and the detection limits. `?download` wins, and asks for the bytes.
@@ -522,9 +545,8 @@ async fn blob(
         let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
             .await
             .map_err(HttpError::timeout)??;
-        let root = Root::new(encoded, subdomain);
         return collection_entry(
-            &gateway,
+            gateway,
             &root,
             collection,
             String::new(),
@@ -548,9 +570,8 @@ async fn blob(
         )
         .await
     {
-        let root = Root::new(encoded, subdomain);
         return collection_entry(
-            &gateway,
+            gateway,
             &root,
             collection,
             String::new(),
@@ -560,6 +581,7 @@ async fn blob(
         )
         .await;
     }
+    let encoded = z32::encode(hash.as_bytes());
     let download = download.then(|| encoded.clone());
     serve_blob(source, hash, &encoded, download, method, headers).await
 }
@@ -591,13 +613,25 @@ async fn collection_path(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let root = parse_hash(&encoded)
-        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
-    let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
+    let hash = parse_path_hash(&encoded)?;
+    let root = Root::new(encoded, subdomain);
+    serve_path(gateway, root, hash, path, query, method, headers).await
+}
+
+/// Serves `path` inside the collection rooted at `hash`.
+pub(crate) async fn serve_path(
+    gateway: Gateway,
+    root: Root,
+    hash: Hash,
+    path: String,
+    query: Option<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
         .await
         .map_err(HttpError::timeout)??;
     let path = path.strip_prefix('/').map(str::to_owned).unwrap_or(path);
-    let root = Root::new(encoded, subdomain);
     collection_entry(&gateway, &root, collection, path, query, method, headers).await
 }
 
