@@ -9,7 +9,7 @@ use std::{
     net::SocketAddr,
     ops::Range,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::bail;
@@ -36,6 +36,7 @@ use mime_classifier::MimeClassifier;
 use n0_future::{BufferedStreamExt, StreamExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
+use tracing::Instrument;
 
 mod pkarr_redirect;
 mod ranges;
@@ -133,6 +134,7 @@ impl Gateway {
                         header::ETAG,
                     ]),
             )
+            .layer(axum::middleware::from_fn(log_request))
             .with_state(self.clone())
     }
 
@@ -143,6 +145,7 @@ impl Gateway {
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> anyhow::Result<()> {
         validate_listen_addr(listener.local_addr()?)?;
+        tracing::debug!(address = %listener.local_addr()?, endpoint = %self.0.endpoint.id(), "gateway listening");
         axum::serve(listener, self.router())
             .with_graceful_shutdown(shutdown)
             .await?;
@@ -154,31 +157,50 @@ impl Gateway {
         if let Some(source) = cached
             && source.connection.close_reason().is_none()
         {
+            tracing::debug!(%hash, size = source.size, "reusing cached blob source");
             return Ok(source);
         }
+        tracing::debug!(%hash, "blob source cache miss or closed connection");
         let connection = self.connection(hash).await?;
         let source = self.source_on_connection(connection, hash, None).await?;
         self.0.cache.lock().unwrap().put(hash, source.clone());
         Ok(source)
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(hash = %hash))]
     async fn connection(&self, hash: Hash) -> Result<Connection, HttpError> {
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
+        let started = Instant::now();
+        tracing::debug!(infohash = %iroh_mainline_endpoint_discovery::infohash_hex(&infohash), "looking up content provider");
         let peer = self
             .0
             .resolver
             .resolve_one(infohash.into())
             .await
-            .map_err(HttpError::upstream)?
+            .map_err(|error| {
+                tracing::debug!(
+                    ?error,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "provider lookup failed"
+                );
+                HttpError::upstream(error)
+            })?
             .ok_or(HttpError(
                 StatusCode::NOT_FOUND,
                 "no peer found for this hash",
             ))?;
-        self.0
+        tracing::debug!(%peer, elapsed_ms = started.elapsed().as_millis(), "provider lookup complete; connecting");
+        let started = Instant::now();
+        let connection = self.0
             .endpoint
             .connect(peer, iroh_blobs::ALPN)
             .await
-            .map_err(HttpError::upstream)
+            .map_err(|error| {
+                tracing::debug!(%peer, ?error, elapsed_ms = started.elapsed().as_millis(), "provider connection failed");
+                HttpError::upstream(error)
+            })?;
+        tracing::debug!(%peer, elapsed_ms = started.elapsed().as_millis(), "provider connected");
+        Ok(connection)
     }
 
     async fn source_on_connection(
@@ -187,9 +209,14 @@ impl Gateway {
         hash: Hash,
         name: Option<&str>,
     ) -> Result<Source, HttpError> {
+        let started = Instant::now();
+        tracing::debug!(%hash, peer = %connection.remote_id(), "reading blob size and MIME prefix");
         let (size, prefix) = sniff(&connection, hash)
             .await
-            .map_err(HttpError::upstream)?;
+            .map_err(|error| {
+                tracing::debug!(%hash, ?error, elapsed_ms = started.elapsed().as_millis(), "blob metadata read failed");
+                HttpError::upstream(error)
+            })?;
         let supplied_type = name
             .and_then(|name| std::path::Path::new(name).extension())
             .and_then(|extension| extension.to_str())
@@ -209,6 +236,7 @@ impl Gateway {
                 &prefix,
             )
             .to_string();
+        tracing::debug!(%hash, size, %mime, elapsed_ms = started.elapsed().as_millis(), "blob metadata ready");
         let source = Source {
             connection,
             size,
@@ -259,6 +287,7 @@ impl Gateway {
         if let Some(source) = cached
             && source.connection.close_reason().is_none()
         {
+            tracing::debug!(%hash, "reusing cached collection");
             return Ok(source);
         }
         let connection = self.connection(hash).await?;
@@ -276,10 +305,12 @@ impl Gateway {
         {
             return Ok(source);
         }
+        tracing::debug!(%hash, "reading collection");
         let collection = read_collection(&connection, hash).await.map_err(|error| {
-            tracing::debug!(%error, "read collection");
+            tracing::debug!(%hash, ?error, "read collection failed");
             HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
         })?;
+        tracing::debug!(%hash, entries = collection.iter().count(), "collection ready");
         let source = CollectionSource {
             connection,
             collection,
@@ -287,6 +318,17 @@ impl Gateway {
         self.0.collections.lock().unwrap().put(hash, source.clone());
         Ok(source)
     }
+}
+
+async fn log_request(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let span = tracing::debug_span!("http_request", method = %request.method(), path = request.uri().path());
+    async move {
+        let started = Instant::now();
+        tracing::debug!(range = ?request.headers().get(header::RANGE), "request received");
+        let response = next.run(request).await;
+        tracing::debug!(status = %response.status(), elapsed_ms = started.elapsed().as_millis(), "response headers ready");
+        response
+    }.instrument(span).await
 }
 
 /// Reject non-loopback HTTP listeners.
@@ -311,12 +353,14 @@ pub fn parse_hash(value: &str) -> anyhow::Result<Hash> {
 struct HttpError(StatusCode, &'static str);
 
 impl HttpError {
-    fn upstream(error: impl std::fmt::Display) -> Self {
+    fn upstream(error: impl std::fmt::Display + std::fmt::Debug) -> Self {
+        tracing::debug!(?error, "gateway upstream error details");
         tracing::warn!(%error, "gateway upstream failed");
         Self(StatusCode::BAD_GATEWAY, "peer lookup or transfer failed")
     }
 
     fn timeout(_: tokio::time::error::Elapsed) -> Self {
+        tracing::debug!("gateway operation deadline exceeded");
         Self(
             StatusCode::GATEWAY_TIMEOUT,
             "peer lookup or transfer timed out",
@@ -326,6 +370,7 @@ impl HttpError {
 
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
+        tracing::debug!(status = %self.0, reason = self.1, "returning gateway error");
         (self.0, [(header::CACHE_CONTROL, "no-store")], self.1).into_response()
     }
 }
@@ -394,7 +439,7 @@ fn collection_index(encoded: &str, collection: &Collection, method: Method) -> R
             .collect::<Vec<_>>()
             .join("/");
         html.push_str("<li><a href=\"/blake3/");
-        html.push_str(&encoded);
+        html.push_str(encoded);
         html.push('/');
         html.push_str(&path);
         html.push_str("\">");
@@ -758,7 +803,7 @@ async fn serve_blob(
         if size != source.size {
             return Err(HttpError(StatusCode::BAD_GATEWAY, "peer changed blob size"));
         }
-        Body::from_stream(stream_content(content, source.connection, range))
+        Body::from_stream(stream_content(content, source.connection, range, hash))
     };
     Ok(builder.body(body).unwrap())
 }
@@ -798,7 +843,7 @@ fn multipart_content(
                 .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
             if size != source.size { Err(std::io::Error::other("peer changed blob size"))?; }
             yield Bytes::from(part_header(&source, &range, &boundary));
-            let mut data = Box::pin(stream_content(content, source.connection.clone(), range));
+            let mut data = Box::pin(stream_content(content, source.connection.clone(), range, hash));
             while let Some(bytes) = data.next().await { yield bytes?; }
             yield Bytes::from_static(b"\r\n");
         }
@@ -806,11 +851,13 @@ fn multipart_content(
     }
 }
 
+#[tracing::instrument(level = "debug", skip(connection, ranges), fields(hash = %hash))]
 async fn start(
     connection: &Connection,
     hash: Hash,
     ranges: ChunkRanges,
 ) -> anyhow::Result<(AtBlobContent, u64)> {
+    tracing::debug!(peer = %connection.remote_id(), ?ranges, "requesting blob ranges");
     let request = GetRequest::new(hash, ChunkRangesSeq::from_ranges([ranges]));
     let connected = fsm::start(connection.clone(), request, Default::default())
         .next()
@@ -818,7 +865,9 @@ async fn start(
     let ConnectedNext::StartRoot(root) = connected.next().await? else {
         bail!("expected blob root");
     };
-    Ok(root.next().next().await?)
+    let result = root.next().next().await?;
+    tracing::debug!(size = result.1, "blob response started");
+    Ok(result)
 }
 
 async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<Collection> {
@@ -895,8 +944,12 @@ fn stream_content(
     mut content: AtBlobContent,
     connection: Connection,
     range: Range<u64>,
+    hash: Hash,
 ) -> impl n0_future::Stream<Item = std::io::Result<Bytes>> + Send {
-    async_stream::try_stream! {
+    let peer = connection.remote_id();
+    let started = Instant::now();
+    let stream = async_stream::try_stream! {
+        tracing::debug!(%hash, %peer, ?range, "streaming blob body");
         // Keep the connection alive until the HTTP body is consumed or dropped.
         let _connection = connection;
         let mut offset = range.start;
@@ -909,6 +962,9 @@ fn stream_content(
                         if start < end {
                             if start != offset { Err(std::io::Error::other("noncontiguous blob data"))?; }
                             offset = end;
+                            if offset == range.end {
+                                tracing::debug!(%hash, %peer, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body bytes ready");
+                            }
                             yield leaf.data.slice((start - leaf.offset) as usize..(end - leaf.offset) as usize);
                         }
                     }
@@ -924,7 +980,14 @@ fn stream_content(
         };
         tokio::time::timeout(READ_TIMEOUT, closing.next()).await
             .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
-    }
+        tracing::debug!(%hash, %peer, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body complete");
+    };
+    stream.map(move |result: std::io::Result<Bytes>| {
+        if let Err(error) = &result {
+            tracing::debug!(%hash, %peer, ?error, elapsed_ms = started.elapsed().as_millis(), "blob body failed");
+        }
+        result
+    })
 }
 
 #[cfg(test)]

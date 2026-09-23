@@ -225,3 +225,21 @@ The integration test uses a local Mainline testnet, a real tracker, an iroh-blob
 provider, and a TCP HTTP listener. It checks full streaming, video MIME detection,
 byte-exact unaligned ranges, suffixes, multipart responses, HEAD, conditional requests, empty blobs,
 invalid/missing content, and CORS without relying on public DHT or relay services.
+
+## Debugging
+
+Both the gateway and the demo honor `RUST_LOG`. To trace the full lookup and
+transfer path while keeping dependency logs quiet:
+
+```sh
+RUST_LOG=info,iroh_local_gateway=debug,iroh_mainline_endpoint_discovery=debug,demo=debug \
+  cargo run -p iroh-local-gateway --example demo -- --port 8081
+```
+
+Set the extension's port to the same value. Use the same `RUST_LOG` filter with
+`cargo run -p iroh-local-gateway -- ...` for a standalone gateway.
+Debug output includes request paths and response status/timing, Pkarr packet
+sequences and redirect destinations, tracker addresses and lookup results,
+selected endpoint IDs, connection timing/errors, cache hits, blob metadata,
+and body transfer completion/errors. It does not log secret keys or blob data.
+Add `iroh=debug` to investigate address discovery and transport internals.

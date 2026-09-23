@@ -102,6 +102,7 @@ impl Directory {
     /// minutes, retaining the highest signed sequence for this directory's lifetime.
     /// Addresses are discovery candidates; they do not prove availability.
     pub async fn discover_with_config(dht: Dht, config: DiscoveryConfig) -> Result<Self, UdpError> {
+        tracing::debug!(?config, "configuring tracker discovery");
         if let Some(tracker) = config.tracker {
             return Self::udp(dht, tracker).await;
         }
@@ -143,6 +144,7 @@ impl Directory {
             Ok(())
         };
         let signed_result = tokio::time::timeout(Duration::from_secs(30), signed_lookup).await;
+        tracing::debug!(?signed_result, "signed tracker-list lookup completed");
         let mut peers = state
             .signed
             .as_ref()
@@ -151,6 +153,7 @@ impl Directory {
             .unwrap_or_default();
         if peers.is_empty() {
             if let Some(hash) = discovery.config.rendezvous_hash {
+                tracing::debug!(infohash = %crate::infohash_hex(&hash), "discovering trackers through Mainline rendezvous");
                 let lookup = async {
                     let mut stream = discovery.dht.get_peers(hash.into()).await?;
                     while let Some(batch) = stream.next().await {
@@ -179,8 +182,10 @@ impl Directory {
             }
         }
         if peers.is_empty() {
+            tracing::debug!("tracker discovery found no replicas");
             return Err(e!(UdpError::NoReplicas));
         }
+        tracing::debug!(?peers, "using discovered trackers");
         self.client.replace_replicas(peers).await?;
         state.refreshed = Some(tokio::time::Instant::now());
         Ok(())
@@ -210,11 +215,14 @@ impl Directory {
     pub async fn lookup(&self, addr: SocketAddrV4) -> Result<Vec<SignedRecord>, DirectoryError> {
         self.refresh_replicas().await?;
         let result = self.client.resolve(addr).await?;
-        Ok(result
+        let received = result.values.len();
+        let records: Vec<_> = result
             .values
             .into_iter()
             .filter_map(|value| SignedRecord::decode(&value))
-            .collect())
+            .collect();
+        tracing::debug!(%addr, received, valid = records.len(), "validated tracker endpoint records");
+        Ok(records)
     }
 }
 
