@@ -303,10 +303,7 @@ async fn publisher_announces_endpoint_for_resolver() {
         // `wait_published` fires before the announcements, so keep looking
         // until the publisher's endpoint shows up.
         let mut found = resolver.resolve_continuously(infohash);
-        tokio::select! {
-            result = publisher.run() => panic!("publisher stopped: {result:?}"),
-            id = found.next() => assert_eq!(id, Some(publisher.id())),
-        }
+        assert_eq!(found.next().await, Some(publisher.id()));
     })
     .await
     .expect("publisher announcement was not resolved");

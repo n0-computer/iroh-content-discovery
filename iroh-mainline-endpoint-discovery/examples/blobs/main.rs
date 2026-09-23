@@ -80,8 +80,8 @@ async fn main() -> Result<()> {
         n0_error::Ok(())
     };
 
+    // The publisher keeps announcing in its own task until it is dropped.
     tokio::select! {
-        result = publisher.run() => result?,
         result = download => result?,
         _ = tokio::signal::ctrl_c() => bail_any!("interrupted"),
     }

@@ -84,8 +84,8 @@ async fn main() -> Result<()> {
         resolve_publisher(&resolver, demo_infohash, publisher.id()).await
     };
 
+    // The publisher keeps announcing in its own task until it is dropped.
     tokio::select! {
-        result = publisher.run() => result?,
         result = workflow => result?,
         _ = tokio::signal::ctrl_c() => bail_any!("interrupted"),
     }
