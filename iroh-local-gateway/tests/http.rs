@@ -517,9 +517,9 @@ async fn run() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-    // `{z32}.localhost` serves the same content with its own origin.
+    // `{z32}.blake3.localhost` serves the same content with its own origin.
     let video_hash = z32::encode(video_tag.hash.as_bytes());
-    let subdomain = |hash: &str| format!("{hash}.localhost");
+    let subdomain = |hash: &str| format!("{hash}.blake3.localhost");
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(15))

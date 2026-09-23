@@ -1,4 +1,4 @@
-# blake3.link Local Gateway extension
+# blake3.link and pkarr.link Local Gateway extension
 
 Workspace project five: a Manifest V3 extension for desktop Chrome, Brave, and
 Firefox.
@@ -6,20 +6,28 @@ It sends content links to a local HTTP gateway without contacting the domain's
 web server:
 
 ```text
-https://<z32>.blake3.link/
-    -> http://<z32>.localhost:8080/
 https://<z32>.blake3.link/path/to/file
-    -> http://<z32>.localhost:8080/path/to/file
+    -> http://<z32>.blake3.localhost:8080/path/to/file
+https://<public-key>.pkarr.link/path/to/file?x=1
+    -> http://<public-key>.pkarr.localhost:8080/path/to/file?x=1
 ```
 
-The hash is a 52-character lowercase z-base-32 encoded BLAKE3 digest, matching
-the gateway route. Browsers resolve `*.localhost` to the loopback address, so
-each hash keeps its own origin and root-relative links inside a collection
-resolve within it. A collection root shows an index at the bare URL. Query
-strings and paths are retained. The apex `https://blake3.link/` stays untouched so it
-can host instructions or an extension download page. Other hosts, nested subdomains, and localhost requests are not matched.
+The hash is a 52-character lowercase z-base-32 encoded BLAKE3 digest, and the
+public key has the same shape. Browsers resolve `*.localhost` to the loopback
+address, so each hash and each key keeps its own origin, and root-relative
+links inside a collection resolve within it. A collection root shows an index
+at the bare URL. Query strings and paths are retained. The apexes
+`https://blake3.link/` and `https://pkarr.link/` stay untouched so they can
+host instructions or an extension download page. Other hosts, nested
+subdomains, and localhost requests are not matched.
 The extension captures a single alphanumeric label; the gateway validates its
 length, alphabet, and canonical encoding, returning 400 for invalid hashes.
+
+Pkarr links use a z-base-32 public key in the subdomain. The gateway verifies
+the signed DNS packet and redirects to its HTTPS target, preserving the path
+and query. Ordinary HTTPS destinations open normally; a destination under
+`<hash>.blake3.link` is routed through the content gateway by the existing rules.
+The gateway validates public keys. Both domains use the same port and enable switch.
 
 ## Install in Chrome or Brave
 
@@ -50,8 +58,8 @@ Firefox 140 or later is required.
 2. Click **Load Temporary Add-on**, then choose `manifest.json` in this
    directory.
 3. Open the extension popup and click **Save**. Firefox asks for access to
-   `*.blake3.link` sites; allow it, or redirects stay inactive. The popup
-   shows a hint while access is missing.
+   `*.blake3.link` and `*.pkarr.link` sites; allow it, or redirects stay inactive.
+   The popup shows a hint while access is missing.
 
 Temporary add-ons are removed when Firefox restarts. For a permanent install,
 Firefox needs a signed package, for example from `npx web-ext sign
@@ -71,10 +79,10 @@ background process; the service worker only initializes rules at installation
 or update. Rule matching and redirection happen in the browser network stack.
 The browser's address bar changes to the localhost URL.
 
-Firefox lets users withhold host access to `*.blake3.link`. The popup requests
-it when saving with redirects enabled.
+Firefox lets users withhold host access to `*.blake3.link` and `*.pkarr.link`.
+The popup requests it when saving with redirects enabled.
 
-Permissions are limited to `*.blake3.link`, local extension settings, and
+Permissions are limited to `*.blake3.link`, `*.pkarr.link`, local extension settings, and
 request redirection. The extension needs no access to browsing history or all
 websites. The local gateway must be running; the extension does not start it.
 
@@ -84,6 +92,6 @@ websites. The local gateway must be running; the extension does not start it.
 node --test blake3-link-extension/rules.test.js
 ```
 
-The tests check hash-subdomain routing, query preservation, lookalike-host
+The tests check hash- and public-key-subdomain routing, path/query preservation, lookalike-host
 rejection, port validation, and disabling. They model matching and are not a
 replacement for loading the extension in the browser.

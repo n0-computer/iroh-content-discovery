@@ -184,7 +184,9 @@ Mainline and the tracker, then streams Bao-verified bytes with MIME detection
 and HTTP range support for video seeking. Collection roots automatically show
 a directory listing at `/blake3/<z32>`, and `/blake3/<z32>/path/to/file`
 streams a file from the same provider. The same content is served on
-`http://<z32>.localhost:8080/`, giving each hash its own browser origin.
+`http://<z32>.blake3.localhost:8080/`, giving each hash its own browser
+origin, and Pkarr keys resolve at `/pkarr/<key>` and
+`http://<key>.pkarr.localhost:8080/`.
 
 Query flags:
 
@@ -204,7 +206,9 @@ options. See its README for configuration and HTTP behavior.
 
 The fifth project, [`blake3-link-extension`](blake3-link-extension/README.md),
 rewrites `https://<z32>.blake3.link/<path>` to
-`http://<z32>.localhost:<port>/<path>` in Chrome and Brave. Load that directory
+`http://<z32>.blake3.localhost:<port>/<path>`, and
+`https://<key>.pkarr.link/<path>` to `http://<key>.pkarr.localhost:<port>/<path>`,
+in Chrome, Brave and Firefox. Load that directory
 unpacked from the browser's extensions page with Developer mode enabled. The
 popup configures the local gateway port (default 8080) and enables/disables
 rewrites. The apex `blake3.link` site is unaffected.

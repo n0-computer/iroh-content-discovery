@@ -17,7 +17,7 @@ use axum::{
     Extension, Router,
     body::Body,
     extract::{Path, RawQuery, Request, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
     middleware::map_request,
     response::{IntoResponse, Response},
     routing::get,
@@ -38,6 +38,7 @@ use n0_future::{BufferedStreamExt, StreamExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
 
+mod pkarr_redirect;
 mod ranges;
 use ranges::Selection;
 
@@ -112,10 +113,16 @@ impl Gateway {
     /// lists a directory, where directories are the `/`-separated prefixes of
     /// names. Listings show file sizes with `?sizes`.
     ///
-    /// Requests to `http://{z32}.localhost/{path}` are handled like
-    /// `/blake3/{z32}/{path}`, giving each hash its own browser origin.
+    /// `/pkarr/{key}` resolves a signed HTTPS target and temporarily redirects.
+    ///
+    /// Requests to `http://{z32}.blake3.localhost/{path}` and
+    /// `http://{z32}.pkarr.localhost/{path}` are handled like the matching
+    /// path, giving each hash and key its own browser origin.
     pub fn router(&self) -> Router {
         let routes = Router::new()
+            .route("/pkarr/{key}", get(pkarr_redirect::redirect))
+            .route("/pkarr/{key}/", get(pkarr_redirect::redirect))
+            .route("/pkarr/{key}/{*path}", get(pkarr_redirect::redirect))
             .route("/blake3/{hash}", get(blob))
             .route("/blake3/{hash}/", get(collection_root))
             .route("/blake3/{hash}/{*path}", get(collection_path))
@@ -333,11 +340,18 @@ impl IntoResponse for HttpError {
     }
 }
 
-/// Marks a request that named its hash as a `{z32}.localhost` subdomain.
+/// Marks a request that named its hash or key as a subdomain of `localhost`.
 #[derive(Debug, Clone, Copy)]
 struct Subdomain;
 
-/// Rewrites requests for `{z32}.localhost` to the equivalent `/blake3/{z32}` path.
+/// Subdomain suffixes and the route each one is served by.
+const SUBDOMAIN_ROUTES: [(&str, &str); 2] = [
+    (".blake3.localhost", "blake3"),
+    (".pkarr.localhost", "pkarr"),
+];
+
+/// Rewrites `{z32}.blake3.localhost` and `{z32}.pkarr.localhost` requests to
+/// the equivalent `/blake3/{z32}` or `/pkarr/{z32}` path.
 async fn rewrite_subdomain(mut request: Request) -> Request {
     let host = request.uri().host().map(str::to_owned).or_else(|| {
         let host = request.headers().get(header::HOST)?.to_str().ok()?;
@@ -347,25 +361,32 @@ async fn rewrite_subdomain(mut request: Request) -> Request {
                 .to_owned(),
         )
     });
-    let Some(label) = host
-        .as_deref()
-        .and_then(|host| host.strip_suffix(".localhost"))
-        .filter(|label| parse_hash(label).is_ok())
-    else {
+    let Some((label, route)) = host.as_deref().and_then(|host| {
+        SUBDOMAIN_ROUTES.iter().find_map(|(suffix, route)| {
+            let label = host.strip_suffix(suffix)?;
+            // Both hashes and keys are canonical 32-byte z-base-32 values.
+            parse_hash(label).ok().map(|_| (label, route))
+        })
+    }) else {
         return request;
     };
     let path_and_query = request
         .uri()
         .path_and_query()
         .map_or("/", |value| value.as_str());
-    // `/` maps to the bare hash route, which also detects collections.
+    // `/` maps to the bare route, which also detects collections.
     let rest = path_and_query.strip_prefix('/').unwrap_or(path_and_query);
     let rewritten = if rest.is_empty() || rest.starts_with('?') {
-        format!("/blake3/{label}{rest}")
+        format!("/{route}/{label}{rest}")
     } else {
-        format!("/blake3/{label}/{rest}")
+        format!("/{route}/{label}/{rest}")
     };
-    if let Ok(uri) = rewritten.parse() {
+    if let Ok(uri) = rewritten.parse::<Uri>() {
+        // The outer router records the original URI before this runs, so
+        // handlers reading it see the path they were routed by.
+        request
+            .extensions_mut()
+            .insert(axum::extract::OriginalUri(uri.clone()));
         *request.uri_mut() = uri;
         request.extensions_mut().insert(Subdomain);
     }
