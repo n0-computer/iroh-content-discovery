@@ -16,7 +16,7 @@ const source = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
 if (!/^\d+(?:\.\d+){0,3}$/.test(source.version)) {
   throw new Error("Expected a numeric extension version in manifest.json");
 }
-const files = ["manifest.json", "background.js", "rules.js", "popup.html", "popup.js", "popup.css"];
+const files = ["manifest.json", "background.js", "rules.js", "popup.html", "popup.js", "popup.css", "LICENSE-APACHE", "LICENSE-MIT"];
 const output = join(root, "dist");
 await mkdir(output, { recursive: true });
 for (const browser of platform === "all" ? ["chrome", "firefox"] : [platform]) {

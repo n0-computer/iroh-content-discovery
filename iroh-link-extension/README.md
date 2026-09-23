@@ -94,8 +94,8 @@ Artifacts are written to `iroh-link-extension/dist/`:
   the existing Gecko extension ID.
 
 The version comes from `manifest.json`. Each ZIP contains the manifest at its
-root and only runtime files; tests, documentation, and packaging scripts are
-excluded. The shared source manifest remains usable for development in both
+root, runtime files, and both license texts; tests, documentation, and packaging
+scripts are excluded. The shared source manifest remains usable for development in both
 browsers. Build commands work from any directory when invoked by absolute path.
 
 These packages are unsigned. Unzip the Chrome archive to load it unpacked, or
@@ -132,3 +132,20 @@ node --test iroh-link-extension/rules.test.js
 The tests check hash- and public-key-subdomain routing, path/query preservation, lookalike-host
 rejection, port validation, and disabling. They model matching and are not a
 replacement for loading the extension in the browser.
+
+## License
+
+This project is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  https://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  https://opensource.org/licenses/MIT)
+
+at your option.
+
+## Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.
