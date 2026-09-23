@@ -59,8 +59,6 @@ async fn main() -> Result<()> {
     let endpoint = iroh::Endpoint::bind(presets::N0).await?;
     let gateway = Gateway::new(endpoint.clone(), resolver);
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    println!("http://{}/blake3/<z32>", listener.local_addr()?);
-    println!("http://{}/pkarr/<key>", listener.local_addr()?);
     let result = gateway
         .serve(listener, async {
             let _ = tokio::signal::ctrl_c().await;
