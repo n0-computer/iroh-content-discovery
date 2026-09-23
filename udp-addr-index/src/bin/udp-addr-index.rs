@@ -1,4 +1,4 @@
-//! Address-index replica command line interface.
+//! Address-index server command line interface.
 
 use n0_mainline::Dht;
 use std::time::Instant;
@@ -10,19 +10,19 @@ use data_encoding::HEXLOWER_PERMISSIVE;
 use iroh_metrics::{Registry, service::MetricsServer};
 use tokio::signal;
 use tracing::info;
-use udp_address_records::{Limits, Server};
+use udp_addr_index::{Limits, Server};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "udp-address-records",
+    name = "udp-addr-index",
     about = "Opaque return-routability-gated UDP address index"
 )]
 struct Cli {
-    /// Shared Mainline and address-index UDP port (binds all IPv4 interfaces).
+    /// Local Mainline UDP port, shared with the address index (binds all IPv4 interfaces).
     #[arg(long, default_value_t = 11223)]
-    udp_port: u16,
+    dht_port: u16,
     /// Maximum opaque value length.
-    #[arg(long, default_value_t = udp_address_records_proto::MAX_VALUE_LEN)]
+    #[arg(long, default_value_t = udp_addr_index_proto::MAX_VALUE_LEN)]
     max_value_len: usize,
     /// Maximum number of live entries.
     #[arg(long, default_value_t = 2_000_000)]
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let dht = Dht::builder().server_mode().port(cli.udp_port).build()?;
+    let dht = Dht::builder().server_mode().port(cli.dht_port).build()?;
     let mut udp = server
         .attach_with_rendezvous(dht, cli.rendezvous_hash)
         .await?;

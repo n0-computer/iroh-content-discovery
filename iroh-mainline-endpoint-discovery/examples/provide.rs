@@ -16,7 +16,7 @@ use iroh_blobs::{
     store::fs::FsStore,
 };
 use iroh_mainline_endpoint_discovery::{
-    Directory, PkarrPublisher, Publisher, infohash_from_blake3, pkarr_name,
+    AddrIndex, PkarrPublisher, Publisher, infohash_from_blake3, pkarr_name,
 };
 use n0_error::{Result, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id, SigningKey};
@@ -26,9 +26,9 @@ use n0_mainline::{Dht, Id, SigningKey};
 struct Cli {
     /// File or directory to provide.
     path: PathBuf,
-    /// Address-index replica to use instead of discovering one.
+    /// Address index server to use instead of discovering one.
     #[arg(long, env = "IROH_ADDR_INDEX")]
-    addr_index: Option<SocketAddrV4>,
+    index_server: Option<SocketAddrV4>,
     /// Do not publish a Pkarr name for the collection.
     #[arg(long)]
     no_pkarr: bool,
@@ -69,9 +69,9 @@ async fn main() -> Result<()> {
     if !dht.bootstrapped().await? {
         bail_any!("DHT bootstrap failed");
     }
-    let index = match cli.addr_index {
-        Some(replica) => Directory::udp(dht.clone(), replica).await?,
-        None => Directory::discover(dht.clone()).await?,
+    let index = match cli.index_server {
+        Some(server) => AddrIndex::udp(dht.clone(), server).await?,
+        None => AddrIndex::discover(dht.clone()).await?,
     };
     let publisher = Publisher::new(endpoint.secret_key().clone(), dht.clone(), index);
     for (_, hash) in &entries {

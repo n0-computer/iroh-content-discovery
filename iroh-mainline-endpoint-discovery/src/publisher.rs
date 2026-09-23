@@ -13,7 +13,7 @@ use n0_future::task::{self, AbortOnDropHandle};
 use n0_mainline::{Dht, Id};
 use tokio::sync::{Notify, watch};
 
-use crate::{Directory, SignedRecord};
+use crate::{AddrIndex, SignedRecord};
 
 /// How often to renew Mainline announcements and address-index values.
 pub const REFRESH: Duration = Duration::from_secs(10 * 60);
@@ -36,22 +36,22 @@ pub struct Publisher {
 struct State {
     secret: SecretKey,
     dht: Dht,
-    directory: Directory,
+    index: AddrIndex,
     entries: Mutex<HashSet<Id>>,
     notify: Notify,
     published: watch::Sender<Option<SocketAddrV4>>,
 }
 
 impl Publisher {
-    /// Use an endpoint secret key, shared Mainline node, and address-index directory.
+    /// Use an endpoint secret key, a shared Mainline node, and an address index.
     ///
     /// Publishing starts immediately, and does nothing until the first
     /// infohash is added.
-    pub fn new(secret: SecretKey, dht: Dht, directory: Directory) -> Self {
+    pub fn new(secret: SecretKey, dht: Dht, index: AddrIndex) -> Self {
         let state = Arc::new(State {
             secret,
             dht,
-            directory,
+            index,
             entries: Mutex::new(HashSet::new()),
             notify: Notify::new(),
             published: watch::channel(None).0,
@@ -71,9 +71,9 @@ impl Publisher {
         self.state.secret.public()
     }
 
-    /// Address-index directory used by this publisher.
-    pub fn directory(&self) -> &Directory {
-        &self.state.directory
+    /// Address-index index used by this publisher.
+    pub fn index(&self) -> &AddrIndex {
+        &self.state.index
     }
 
     /// Most recently announced Mainline lookup key.
@@ -163,7 +163,7 @@ impl State {
         }
 
         let record = SignedRecord::sign(&self.secret);
-        let value_addrs = self.directory.publish(&record).await?;
+        let value_addrs = self.index.publish(&record).await?;
         let next_mapping = value_addrs
             .first()
             .copied()

@@ -5,14 +5,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
 use iroh_local_gateway::Gateway;
-use iroh_mainline_endpoint_discovery::{Directory, Resolver, SignedRecord, infohash_from_blake3};
+use iroh_mainline_endpoint_discovery::{AddrIndex, Resolver, SignedRecord, infohash_from_blake3};
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use reqwest::{Client, StatusCode};
 use simple_dns::{
     CLASS, Packet, ResourceRecord,
     rdata::{HTTPS, RData, SVCB},
 };
-use udp_address_records::{Limits, Server};
+use udp_addr_index::{Limits, Server};
 
 async fn publish(dht: &Dht, key: &SigningKey, target: &str) {
     publish_ttl(dht, key, target, 0).await;
@@ -59,12 +59,12 @@ async fn run() {
     let publisher = node();
     let gateway_dht = node();
     // A content-addressed target is served inline, so the gateway needs a
-    // tracker and a provider as well as the DHT.
-    let tracker = Server::new(Limits::for_tests());
-    let tracker_handle = tracker.attach(node()).await.unwrap();
-    let tracker_addr = std::net::SocketAddrV4::new(
+    // index server and a provider as well as the DHT.
+    let server = Server::new(Limits::for_tests());
+    let server_handle = server.attach(node()).await.unwrap();
+    let server_addr = std::net::SocketAddrV4::new(
         std::net::Ipv4Addr::LOCALHOST,
-        tracker_handle.local_addr().port(),
+        server_handle.local_addr().port(),
     );
     let text = b"served through a Pkarr name\n".to_vec();
     let store = MemStore::new();
@@ -79,7 +79,7 @@ async fn run() {
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
     let provider_dht = node();
-    Directory::udp(provider_dht.clone(), tracker_addr)
+    AddrIndex::udp(provider_dht.clone(), server_addr)
         .await
         .unwrap()
         .publish(&SignedRecord::sign(provider.secret_key()))
@@ -92,10 +92,10 @@ async fn run() {
         )
         .await
         .unwrap();
-    let directory = Directory::udp(gateway_dht.clone(), tracker_addr)
+    let index = AddrIndex::udp(gateway_dht.clone(), server_addr)
         .await
         .unwrap();
-    let resolver = Resolver::bind(gateway_dht, directory).await.unwrap();
+    let resolver = Resolver::bind(gateway_dht, index).await.unwrap();
     let endpoint = Endpoint::builder(presets::Minimal)
         .address_lookup(MemoryLookup::from_endpoint_info([provider.addr()]))
         .bind()

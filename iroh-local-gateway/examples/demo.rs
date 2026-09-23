@@ -12,11 +12,11 @@ use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, pr
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_local_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{
-    Directory, DiscoveryConfig, PkarrPublisher, Publisher, Resolver, infohash_from_blake3,
+    AddrIndex, DiscoveryConfig, PkarrPublisher, Publisher, Resolver, infohash_from_blake3,
     pkarr_name,
 };
 use n0_mainline::{Dht, SigningKey, Testnet};
-use udp_address_records::{Limits, Server};
+use udp_addr_index::{Limits, Server};
 
 #[derive(Parser)]
 #[command(about = "Serve a file via Pkarr -> blake3.link -> local gateway using public Mainline")]
@@ -26,12 +26,12 @@ struct Args {
     /// Local HTTP port; configure the same port in the browser extension.
     #[arg(long, default_value_t = 8080)]
     port: u16,
-    /// Use an isolated local DHT, tracker, and iroh discovery instead of public services.
+    /// Use an isolated local DHT, server, and iroh discovery instead of public services.
     #[arg(long)]
     local_testnet: bool,
-    /// Explicit public tracker IPv4:port; otherwise discover trackers through Mainline.
+    /// Explicit public index server IPv4:port; otherwise discover index servers through Mainline.
     #[arg(long, env = "IROH_ADDR_INDEX", conflicts_with = "local_testnet")]
-    tracker: Option<SocketAddrV4>,
+    index_server: Option<SocketAddrV4>,
 }
 
 #[tokio::main]
@@ -67,7 +67,9 @@ async fn main() -> Result<()> {
         println!("Using an isolated local Mainline testnet.");
         Some(Testnet::new(3).await?)
     } else {
-        println!("Using public Mainline; discovering trackers and publishing may take a minute.");
+        println!(
+            "Using public Mainline; discovering index servers and publishing may take a minute."
+        );
         None
     };
     let node = || {
@@ -78,24 +80,24 @@ async fn main() -> Result<()> {
         }
         builder.build()
     };
-    let tracker = if args.local_testnet {
+    let server = if args.local_testnet {
         Some(Server::new(Limits::for_tests()).attach(node()?).await?)
     } else {
         None
     };
-    let tracker_addr = tracker
+    let server_addr = server
         .as_ref()
-        .map(|tracker| SocketAddrV4::new(Ipv4Addr::LOCALHOST, tracker.local_addr().port()))
-        .or(args.tracker);
+        .map(|server| SocketAddrV4::new(Ipv4Addr::LOCALHOST, server.local_addr().port()))
+        .or(args.index_server);
     let config = DiscoveryConfig {
-        tracker: tracker_addr,
+        server: server_addr,
         ..Default::default()
     };
     let provider_dht = node()?;
-    let directory = Directory::discover_with_config(provider_dht.clone(), config.clone())
+    let index = AddrIndex::discover_with_config(provider_dht.clone(), config.clone())
         .await
         .context(
-            "tracker discovery failed; supply --tracker IP:PORT for an available public tracker",
+            "index server discovery failed; supply --index server IP:PORT for an available public index server",
         )?;
     let provider = if args.local_testnet {
         Endpoint::builder(presets::Minimal)
@@ -109,11 +111,7 @@ async fn main() -> Result<()> {
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
     tracing::debug!(endpoint = %provider.id(), %hash, "demo blob provider started");
-    let publisher = Publisher::new(
-        provider.secret_key().clone(),
-        provider_dht.clone(),
-        directory,
-    );
+    let publisher = Publisher::new(provider.secret_key().clone(), provider_dht.clone(), index);
     publisher.add_infohash(infohash);
     let key = SigningKey::from_bytes(&rand::random());
     let target = format!("{encoded}.blake3.link");
@@ -129,13 +127,10 @@ async fn main() -> Result<()> {
         Endpoint::bind(presets::N0).await?
     };
     let gateway_dht = node()?;
-    let directory = Directory::discover_with_config(gateway_dht.clone(), config)
+    let index = AddrIndex::discover_with_config(gateway_dht.clone(), config)
         .await
-        .context("gateway tracker discovery failed")?;
-    let gateway = Gateway::new(
-        client.clone(),
-        Resolver::bind(gateway_dht, directory).await?,
-    );
+        .context("gateway index server discovery failed")?;
+    let gateway = Gateway::new(client.clone(), Resolver::bind(gateway_dht, index).await?);
     let serve = async {
         tokio::time::timeout(Duration::from_secs(120), publisher.wait_published())
             .await

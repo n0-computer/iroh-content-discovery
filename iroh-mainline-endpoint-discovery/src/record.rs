@@ -1,4 +1,4 @@
-//! Iroh-specific signed value stored opaquely by an address-index replica.
+//! Iroh-specific signed value, stored opaquely by an address index server.
 
 use std::{
     ops::Deref,
@@ -36,7 +36,7 @@ pub struct RecordPayloadV1 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignedRecord {
     /// Endpoint identity whose key verifies `sig`.
-    pub eid: EndpointId,
+    pub endpoint_id: EndpointId,
     /// Versioned fields covered by `sig`.
     pub payload: RecordPayload,
     /// Signature over the postcard-encoded payload.
@@ -57,18 +57,18 @@ impl SignedRecord {
         let payload = RecordPayload::V1(RecordPayloadV1 { ts: unix_secs() });
         let sig = secret.sign(&postcard::to_stdvec(&payload).expect("record payload"));
         Self {
-            eid: secret.public(),
+            endpoint_id: secret.public(),
             payload,
             sig,
         }
     }
 
-    /// Verify that `eid` signed this record's payload.
+    /// Verify that `endpoint_id` signed this record's payload.
     pub fn verify(&self) -> bool {
         let Ok(payload) = postcard::to_stdvec(&self.payload) else {
             return false;
         };
-        self.eid.verify(&payload, &self.sig).is_ok()
+        self.endpoint_id.verify(&payload, &self.sig).is_ok()
     }
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>, postcard::Error> {
@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn another_endpoint_cannot_sign_for_it() {
         let mut record = SignedRecord::sign(&SecretKey::generate());
-        record.eid = SecretKey::generate().public();
+        record.endpoint_id = SecretKey::generate().public();
         assert!(!record.verify());
     }
 }

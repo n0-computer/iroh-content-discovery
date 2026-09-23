@@ -7,7 +7,7 @@ use iroh::{endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobsProtocol, HashAndFormat, api::downloader::ContentDiscovery, store::mem::MemStore,
 };
-use iroh_mainline_endpoint_discovery::{Directory, Publisher, Resolver, infohash_from_blake3};
+use iroh_mainline_endpoint_discovery::{AddrIndex, Publisher, Resolver, infohash_from_blake3};
 use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
 use n0_future::stream;
 use n0_mainline::{Dht, Id};
@@ -21,12 +21,12 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,udp_address_records=trace")
+                tracing_subscriber::EnvFilter::new("info,udp_addr_index=trace")
             }),
         )
         .init();
 
-    let replica = std::env::var("IROH_ADDR_INDEX")
+    let server = std::env::var("IROH_ADDR_INDEX")
         .ok()
         .map(|value| value.parse())
         .transpose()
@@ -49,9 +49,9 @@ async fn main() -> Result<()> {
     if !dht.bootstrapped().await? {
         bail_any!("DHT bootstrap failed");
     }
-    let index = match replica {
-        Some(replica) => Directory::udp(dht.clone(), replica).await?,
-        None => Directory::discover(dht.clone()).await?,
+    let index = match server {
+        Some(server) => AddrIndex::udp(dht.clone(), server).await?,
+        None => AddrIndex::discover(dht.clone()).await?,
     };
     let publisher = Publisher::new(provider_ep.secret_key().clone(), dht.clone(), index.clone());
     publisher.add_infohash(infohash);

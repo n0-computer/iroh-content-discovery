@@ -31,33 +31,33 @@ pub fn filter_verified_providers(
 ) -> stream::Boxed<EndpointId> {
     let mut seen = HashSet::new();
     providers
-        .filter(move |peer| seen.insert(*peer))
-        .map(move |peer| {
+        .filter(move |provider| seen.insert(*provider))
+        .map(move |provider| {
             let endpoint = endpoint.clone();
             async move {
                 let started = Instant::now();
-                tracing::debug!(%hash, %peer, "probing provider with verified size request");
+                tracing::debug!(%hash, %provider, "probing provider with verified size request");
                 let probe = async {
-                    let connection = endpoint.connect(peer, iroh_blobs::ALPN).await?;
+                    let connection = endpoint.connect(provider, iroh_blobs::ALPN).await?;
                     crate::verified_size(&connection, hash).await
                 };
                 match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
                     Ok(Ok(size)) => {
-                        tracing::debug!(%hash, %peer, size, elapsed_ms = started.elapsed().as_millis(), "provider size validated");
-                        Some(peer)
+                        tracing::debug!(%hash, %provider, size, elapsed_ms = started.elapsed().as_millis(), "provider size validated");
+                        Some(provider)
                     }
                     Ok(Err(error)) => {
-                        tracing::debug!(%hash, %peer, ?error, elapsed_ms = started.elapsed().as_millis(), "provider probe failed; skipping");
+                        tracing::debug!(%hash, %provider, ?error, elapsed_ms = started.elapsed().as_millis(), "provider probe failed; skipping");
                         None
                     }
                     Err(_) => {
-                        tracing::debug!(%hash, %peer, elapsed_ms = started.elapsed().as_millis(), "provider probe timed out; skipping");
+                        tracing::debug!(%hash, %provider, elapsed_ms = started.elapsed().as_millis(), "provider probe timed out; skipping");
                         None
                     }
                 }
             }
         })
         .buffered_unordered(CONCURRENT_PROBES)
-        .filter_map(|peer| peer)
+        .filter_map(|provider| provider)
         .boxed()
 }

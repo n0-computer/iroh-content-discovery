@@ -2,7 +2,7 @@
 //!
 //! A successful put is stored under the packet's observed public IPv4 socket.
 //! A stateless write token prevents blind source-address spoofing. Values are
-//! opaque to the replica.
+//! opaque to the server.
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
@@ -28,7 +28,7 @@ pub use udp::UdpHandle;
 const MAX_RATE_LIMIT_BUCKETS: usize = 65_536;
 const TOKEN_DOMAIN: &[u8] = b"udp-addr-index-token-v1";
 
-/// Storage, token, and request limits for a replica.
+/// Storage, token, and request limits for a server.
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Maximum opaque value length.
@@ -50,7 +50,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_value_len: udp_address_records_proto::MAX_VALUE_LEN,
+            max_value_len: udp_addr_index_proto::MAX_VALUE_LEN,
             max_entries: 2_000_000,
             value_ttl_secs: 60 * 60,
             token_bucket_secs: 30,
@@ -72,7 +72,7 @@ impl Limits {
     }
 }
 
-/// In-memory address-index replica.
+/// In-memory address index server.
 #[derive(Debug, Clone)]
 pub struct Server {
     inner: Arc<Inner>,
@@ -88,7 +88,7 @@ struct Inner {
 }
 
 impl Server {
-    /// Create an empty replica with a randomly generated token key.
+    /// Create an empty server with a randomly generated token key.
     pub fn new(limits: Limits) -> Self {
         let mut token_key = [0; 32];
         rand::rng().fill_bytes(&mut token_key);
@@ -103,12 +103,12 @@ impl Server {
         }
     }
 
-    /// Limits used by this replica.
+    /// Limits used by this server.
     pub fn limits(&self) -> &Limits {
         &self.inner.limits
     }
 
-    /// Metrics shared by all clones of this replica.
+    /// Metrics shared by all clones of this server.
     pub fn metrics(&self) -> Arc<Metrics> {
         self.inner.metrics.clone()
     }

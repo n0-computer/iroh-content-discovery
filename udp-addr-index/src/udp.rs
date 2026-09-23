@@ -12,7 +12,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::{debug, trace};
-use udp_address_records_proto::{
+use udp_addr_index_proto::{
     MAGIC, MAX_DGRAM, RENDEZVOUS_INFOHASH, Request, RequestV1, Response, ResponseV1,
 };
 
@@ -30,7 +30,7 @@ impl UdpHandle {
         self.local_addr
     }
 
-    /// Stop serving and renewing replica announcements.
+    /// Stop serving and renewing server announcements.
     pub fn abort(&self) {
         self.task.abort();
         if let Some(announcement) = &self.announcement {
@@ -52,8 +52,8 @@ impl UdpHandle {
                     None => std::future::pending().await,
                 }
             } => {
-                result.context("replica announcement task failed")?;
-                bail!("replica announcement task stopped unexpectedly")
+                result.context("server announcement task failed")?;
+                bail!("server announcement task stopped unexpectedly")
             }
         }
     }
@@ -66,7 +66,7 @@ impl Drop for UdpHandle {
 }
 
 impl Server {
-    /// Serve on an existing Mainline socket and announce as a replica.
+    /// Serve on an existing Mainline socket and announce as a server.
     ///
     /// Announcements use the observed source port and are renewed every ten
     /// minutes. Failed announcements retry after thirty seconds. Dropping the
@@ -126,7 +126,7 @@ impl Server {
                     let delay = match result {
                         Ok(_) => Duration::from_secs(600),
                         Err(err) => {
-                            debug!(%err, "replica announcement failed");
+                            debug!(%err, "server announcement failed");
                             Duration::from_secs(30)
                         }
                     };

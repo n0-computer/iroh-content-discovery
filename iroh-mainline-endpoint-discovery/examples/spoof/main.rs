@@ -1,13 +1,13 @@
 //! Show that another UDP socket cannot replace a publisher's address-index value.
 //!
-//! A public replica is required so it and Mainline observe the same public UDP
+//! A public server is required so it and Mainline observe the same public UDP
 //! mapping for the shared DHT socket.
 
 use std::time::{Duration, Instant};
 
 use iroh::{SecretKey, endpoint::presets};
 use iroh_mainline_endpoint_discovery::{
-    Directory, Publisher, Resolver, SignedRecord, infohash_from_blake3, parse_infohash,
+    AddrIndex, Publisher, Resolver, SignedRecord, infohash_from_blake3, parse_infohash,
 };
 use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id};
@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let replica = std::env::var("IROH_ADDR_INDEX")
+    let server = std::env::var("IROH_ADDR_INDEX")
         .ok()
         .map(|value| value.parse())
         .transpose()
@@ -46,9 +46,9 @@ async fn main() -> Result<()> {
     if !dht.bootstrapped().await? {
         bail_any!("DHT bootstrap failed");
     }
-    let index = match replica {
-        Some(replica) => Directory::udp(dht.clone(), replica).await?,
-        None => Directory::discover(dht.clone()).await?,
+    let index = match server {
+        Some(server) => AddrIndex::udp(dht.clone(), server).await?,
+        None => AddrIndex::discover(dht.clone()).await?,
     };
     let publisher = Publisher::new(secret, dht.clone(), index.clone());
     let resolver = Resolver::bind(dht, index).await?;
@@ -67,16 +67,19 @@ async fn main() -> Result<()> {
         println!("published {mapping}");
 
         let attacker_dht = Dht::client().std_context("attacker DHT socket")?;
-        let attacker = match replica {
-            Some(replica) => Directory::udp(attacker_dht, replica).await?,
-            None => Directory::discover(attacker_dht).await?,
+        let attacker = match server {
+            Some(server) => AddrIndex::udp(attacker_dht, server).await?,
+            None => AddrIndex::discover(attacker_dht).await?,
         };
         let spoof = SignedRecord::sign(&SecretKey::generate());
         let attacker_addrs = attacker.publish(&spoof).await?;
         println!("attacker could only publish at {attacker_addrs:?}");
 
-        let records = publisher.directory().lookup(mapping).await?;
-        if !records.iter().any(|record| record.eid == publisher.id()) {
+        let records = publisher.index().lookup(mapping).await?;
+        if !records
+            .iter()
+            .any(|record| record.endpoint_id == publisher.id())
+        {
             bail_any!("publisher value was replaced at {mapping}");
         }
 

@@ -1,8 +1,8 @@
-//! Prometheus metrics for the address-index replica.
+//! Prometheus metrics for an address index server.
 
 use iroh_metrics::{Counter, Gauge, MetricsGroup};
 
-/// Request and storage metrics for one replica.
+/// Request and storage metrics for one server.
 #[derive(Debug, Default, MetricsGroup)]
 #[metrics(name = "addr_index")]
 pub struct Metrics {
