@@ -30,6 +30,8 @@ zeroize = "1"
 [dev-dependencies]
 iroh.workspace = true
 iroh-blobs.workspace = true
+rand.workspace = true
+simple-dns = "0.12"
 tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util"] }
 z32 = "1.3"
