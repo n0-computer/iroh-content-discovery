@@ -22,7 +22,10 @@ use tokio::sync::{Notify, watch};
 pub const PKARR_REFRESH: Duration = Duration::from_secs(10 * 60);
 
 /// Domain under which a BLAKE3 hash names content, as served by the gateway.
-pub const BLAKE3_LINK: &str = "blake3.link";
+pub const BLAKE3_DOMAIN: &str = "blake3.net";
+
+/// Domain under which a Pkarr public key names content.
+pub const PKARR_DOMAIN: &str = "pkarr.net";
 
 /// Time to wait before retrying after a failed publish.
 const RETRY: Duration = Duration::from_secs(30);
@@ -133,7 +136,7 @@ impl PkarrPublisher {
         self.set_raw(key, &packet)
     }
 
-    /// Publish `hash` under `key`, as an apex `HTTPS` record on [`BLAKE3_LINK`].
+    /// Publish `hash` under `key`, as an apex `HTTPS` record on [`BLAKE3_DOMAIN`].
     ///
     /// The key then names content that a gateway serves directly, and the
     /// name survives the content changing.
@@ -142,7 +145,7 @@ impl PkarrPublisher {
     ///
     /// Fails like [`Self::set_https`].
     pub fn set_blake3(&self, key: &SigningKey, hash: &[u8; 32]) -> Result<()> {
-        self.set_https(key, "", &format!("{}.{BLAKE3_LINK}", z32::encode(hash)))
+        self.set_https(key, "", &format!("{}.{BLAKE3_DOMAIN}", z32::encode(hash)))
     }
 
     /// Publish `packet` under `key`, replacing anything set for it.
@@ -341,7 +344,7 @@ mod tests {
         assert_eq!(target_of(&reader, &site).await, "example.com");
         assert_eq!(
             target_of(&reader, &content).await,
-            format!("{}.{BLAKE3_LINK}", z32::encode(&[5; 32]))
+            format!("{}.{BLAKE3_DOMAIN}", z32::encode(&[5; 32]))
         );
 
         // A new target replaces the old one under the same name.
@@ -349,7 +352,7 @@ mod tests {
         publisher.publish_all().await.unwrap();
         assert_eq!(
             target_of(&reader, &content).await,
-            format!("{}.{BLAKE3_LINK}", z32::encode(&[6; 32]))
+            format!("{}.{BLAKE3_DOMAIN}", z32::encode(&[6; 32]))
         );
 
         assert!(publisher.remove(&content.verifying_key().to_bytes()));

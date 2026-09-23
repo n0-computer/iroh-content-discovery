@@ -16,7 +16,8 @@ use iroh_blobs::{
     store::fs::FsStore,
 };
 use iroh_mainline_endpoint_discovery::{
-    AddrIndex, PkarrPublisher, Publisher, infohash_from_blake3, pkarr_name,
+    AddrIndex, BLAKE3_DOMAIN, PKARR_DOMAIN, PkarrPublisher, Publisher, infohash_from_blake3,
+    pkarr_name,
 };
 use n0_error::{Result, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id, SigningKey};
@@ -86,7 +87,7 @@ async fn main() -> Result<()> {
     let collection = z32::encode(collection_hash.as_bytes());
     println!("{collection}  (collection)");
     // With the browser extension, the link URLs reach the local gateway.
-    println!("https://{collection}.blake3.link/");
+    println!("https://{collection}.{BLAKE3_DOMAIN}/");
     println!("http://{collection}.blake3.localhost:8080/");
 
     // The name outlives this run; the hash it points at does not. The
@@ -96,7 +97,7 @@ async fn main() -> Result<()> {
             let publisher = PkarrPublisher::new(dht.clone());
             publisher.set_blake3(&key, collection_hash.as_bytes())?;
             let name = pkarr_name(&key.verifying_key().to_bytes());
-            println!("https://{name}.pkarr.link/");
+            println!("https://{name}.{PKARR_DOMAIN}/");
             println!("http://{name}.pkarr.localhost:8080/");
             n0_error::Ok(publisher)
         })

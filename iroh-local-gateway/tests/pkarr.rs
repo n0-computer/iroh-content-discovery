@@ -5,7 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
 use iroh_local_gateway::Gateway;
-use iroh_mainline_endpoint_discovery::{AddrIndex, Resolver, SignedRecord, infohash_from_blake3};
+use iroh_mainline_endpoint_discovery::{
+    AddrIndex, BLAKE3_DOMAIN, Resolver, SignedRecord, infohash_from_blake3,
+};
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use reqwest::{Client, StatusCode};
 use simple_dns::{
@@ -160,7 +162,7 @@ async fn run() {
     );
 
     // A content-addressed hostname is served here, not redirected to.
-    let target = format!("{}.blake3.link", z32::encode(text_tag.hash.as_bytes()));
+    let target = format!("{}.{BLAKE3_DOMAIN}", z32::encode(text_tag.hash.as_bytes()));
     publish(&publisher, &key, &target).await;
     let response = client.get(&url).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);

@@ -214,10 +214,10 @@ options. See its README for configuration and HTTP behavior.
 ## Browser extension
 
 The fifth project, [`iroh-link-extension`](iroh-link-extension/README.md),
-rewrites `https://<z32>.blake3.link/<path>` to
+rewrites `https://<z32>.blake3.net/<path>` to
 `http://<z32>.blake3.localhost:<port>/<path>`, and
-`https://<key>.pkarr.link/<path>` to `http://<key>.pkarr.localhost:<port>/<path>`,
+`https://<key>.pkarr.net/<path>` to `http://<key>.pkarr.localhost:<port>/<path>`,
 in Chrome, Brave and Firefox. Load that directory
 unpacked from the browser's extensions page with Developer mode enabled. The
 popup configures the local gateway port (default 8080) and enables/disables
-rewrites. The apex `blake3.link` site is unaffected.
+rewrites. The apex `blake3.net` site is unaffected.

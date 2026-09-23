@@ -12,14 +12,14 @@ With the browser extension installed and enabled on port 8080:
 cargo run -p iroh-local-gateway --example demo -- /path/to/video.mp4
 ```
 
-Open the printed `https://<public-key>.pkarr.link/` URL and leave the command
+Open the printed `https://<public-key>.pkarr.net/` URL and leave the command
 running. By default this uses the **public Mainline DHT**, discovers public
 address index servers, and starts the file provider, Pkarr publisher and HTTP
 gateway in one process. The provider and gateway use normal iroh discovery and
 relays. The full browser flow is:
 
 ```text
-https://<public-key>.pkarr.link/
+https://<public-key>.pkarr.net/
   -> http://<public-key>.pkarr.localhost:8080/   (serves the named content)
 ```
 
@@ -36,7 +36,7 @@ additional disk space roughly equal to the file size.
 Omit the file argument for a quick text greeting. Use `--port 8081` if needed,
 and set the same port in the extension. The printed localhost blob URL also
 works without the extension; following the Pkarr route's redirect needs the
-extension to intercept `blake3.link`. Stop any other gateway on that port first.
+extension to intercept `blake3.net`. Stop any other gateway on that port first.
 Ctrl-C stops the demo.
 
 For an isolated run without public DHT or relay services, opt in explicitly:
@@ -99,11 +99,11 @@ cargo run -p iroh-local-gateway --example pkarr-publish -- example.com
 ```
 
 Leave it running alongside your gateway. After publication succeeds, open the
-printed `https://<public-key>.pkarr.link/` URL with the extension enabled, or
+printed `https://<public-key>.pkarr.net/` URL with the extension enabled, or
 use the printed localhost URL directly. This publishes to the public Mainline
 DHT; the target is a hostname, without `https://` or a path. The example does
 not start the gateway. For a content-addressed target, replace `example.com`
-with `<hash>.blake3.link` and keep the content provider running too.
+with `<hash>.blake3.net` and keep the content provider running too.
 
 By default each run generates a temporary identity. To reuse a public key:
 
@@ -124,7 +124,7 @@ On a cache miss, the gateway uses the first verified BEP44 item returned by
 Mainline; it does not wait for the full lookup to finish. `n0-mainline` verifies
 the signature, and `simple-dns` decodes the value's apex `HTTPS` records; no
 `pkarr` client or additional DHT implementation is used. It selects the supported
-target with the lowest priority. A target of the form `<hash>.blake3.link`
+target with the lowest priority. A target of the form `<hash>.blake3.net`
 names content this gateway can serve, so it is served inline, under the key's
 own URL. Any other target redirects to `https://<target>/path?query`.
 Paths and queries retain their original percent encoding; the bare key uses `/`.
@@ -148,7 +148,7 @@ bytes stay verified against the hash, and collections list in place with the
 same query flags as `/blake3`. The key keeps one origin as its content
 changes, which a per-hash URL cannot. This route can be used directly on
 localhost; the extension also routes
-`https://<public-key>.pkarr.link/path?query` to
+`https://<public-key>.pkarr.net/path?query` to
 `http://<public-key>.pkarr.localhost:<port>/path?query`.
 
 ## Discovery

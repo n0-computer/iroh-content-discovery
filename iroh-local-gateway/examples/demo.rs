@@ -12,14 +12,14 @@ use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, pr
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_local_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{
-    AddrIndex, DiscoveryConfig, PkarrPublisher, Publisher, Resolver, infohash_from_blake3,
-    pkarr_name,
+    AddrIndex, BLAKE3_DOMAIN, DiscoveryConfig, PKARR_DOMAIN, PkarrPublisher, Publisher, Resolver,
+    infohash_from_blake3, pkarr_name,
 };
 use n0_mainline::{Dht, SigningKey, Testnet};
 use udp_addr_index::{Limits, Server};
 
 #[derive(Parser)]
-#[command(about = "Serve a file via Pkarr -> blake3.link -> local gateway using public Mainline")]
+#[command(about = "Serve a file via Pkarr and a local gateway, using public Mainline")]
 struct Args {
     /// File to serve, for example an MP4. Without a file, serve a text greeting.
     file: Option<PathBuf>,
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         None => {
             store
                 .blobs()
-                .add_bytes(b"Hello through pkarr.link, blake3.link, and an iroh peer!\n".to_vec())
+                .add_bytes(b"Hello through a Pkarr name, a hash name, and an iroh peer!\n".to_vec())
                 .await?
         }
     };
@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
     let publisher = Publisher::new(provider.secret_key().clone(), provider_dht.clone(), index);
     publisher.add_infohash(infohash);
     let key = SigningKey::from_bytes(&rand::random());
-    let target = format!("{encoded}.blake3.link");
+    let target = format!("{encoded}.{BLAKE3_DOMAIN}");
     let pkarr = PkarrPublisher::new(provider_dht.clone());
     pkarr.set_blake3(&key, hash.as_bytes())?;
     let public_key = pkarr_name(&key.verifying_key().to_bytes());
@@ -138,8 +138,8 @@ async fn main() -> Result<()> {
         tokio::time::timeout(Duration::from_secs(60), pkarr.publish_all()).await??;
         tracing::debug!(%public_key, %target, "demo Pkarr record published");
         println!("\nExtension port: {}", http_addr.port());
-        println!("Open:         https://{public_key}.pkarr.link/");
-        println!("Redirects to: https://{encoded}.blake3.link/");
+        println!("Open:         https://{public_key}.{PKARR_DOMAIN}/");
+        println!("Serves:       https://{encoded}.{BLAKE3_DOMAIN}/");
         println!("Pkarr route:  http://{http_addr}/pkarr/{public_key}/");
         println!("Blob route:   http://{http_addr}/blake3/{encoded}");
         println!("\nLeave this running. Press Ctrl-C to stop.");

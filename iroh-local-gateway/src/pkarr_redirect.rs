@@ -22,8 +22,8 @@ use crate::{
     serve_path, serve_root,
 };
 
-/// Targets under this suffix name content this gateway can serve itself.
-const CONTENT_SUFFIX: &str = ".blake3.link";
+/// Targets under this domain name content this gateway can serve itself.
+use iroh_mainline_endpoint_discovery::BLAKE3_DOMAIN;
 
 // Bound both memory use and how long changed names can remain stale.
 const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -163,9 +163,10 @@ pub(crate) async fn redirect(
         .into_response())
 }
 
-/// Returns the hash when a target names content, as `<z32>.blake3.link`.
+/// Returns the hash when a target names content, as `<z32>.blake3.net`.
 fn content_hash(authority: &str) -> Option<iroh_blobs::Hash> {
-    parse_hash(authority.strip_suffix(CONTENT_SUFFIX)?).ok()
+    let label = authority.strip_suffix(BLAKE3_DOMAIN)?.strip_suffix('.')?;
+    parse_hash(label).ok()
 }
 
 fn parse_key(encoded: &str) -> Result<[u8; 32], HttpError> {
