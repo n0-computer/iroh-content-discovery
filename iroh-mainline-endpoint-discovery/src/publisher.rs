@@ -114,7 +114,10 @@ impl Publisher {
         removed
     }
 
-    /// Wait until a Mainline announce and address-index put have succeeded.
+    /// Wait until the record is stored and every infohash is announced.
+    ///
+    /// Returning early would hand a caller a mapping that resolvers cannot
+    /// find yet, which looks exactly like missing content.
     pub async fn wait_published(&self) {
         let mut receiver = self.state.published.subscribe();
         while receiver.borrow().is_none() && receiver.changed().await.is_ok() {}
@@ -172,7 +175,6 @@ impl State {
 
         if accelerated {
             *mapping = Some(next_mapping);
-            self.published.send_replace(Some(next_mapping));
             tracing::info!(mapping = %next_mapping, "public UDP mapping changed");
         }
 
@@ -199,6 +201,9 @@ impl State {
                 .await;
             }
         }
+        // Report the mapping only once every infohash is announced, so a
+        // waiter that starts resolving does not race the announcements.
+        self.published.send_replace(Some(next_mapping));
         tracing::info!(
             n_infohashes = entries.len(),
             "renewed Mainline announcements"
