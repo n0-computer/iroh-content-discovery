@@ -3,12 +3,13 @@
 use std::{
     collections::HashSet,
     net::SocketAddrV4,
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
 use iroh_base::{EndpointId, SecretKey};
 use n0_error::{Result, StackResultExt, StdResultExt};
+use n0_future::task::{self, AbortOnDropHandle};
 use n0_mainline::{Dht, Id};
 use tokio::sync::{Notify, watch};
 
@@ -18,9 +19,21 @@ use crate::{Directory, SignedRecord};
 pub const REFRESH: Duration = Duration::from_secs(10 * 60);
 /// Delay between announcements after the public mapping changes.
 pub const ANNOUNCE_SPACING: Duration = Duration::from_millis(250);
+/// Delay before retrying after a failed reconcile.
+const RETRY: Duration = Duration::from_secs(30);
 
 /// Keeps Mainline announcements and one signed endpoint value current.
+///
+/// Publishing runs in a background task owned by this handle. Dropping the
+/// handle stops it, and the announcements expire from the DHT soon after.
+#[derive(Debug, Clone)]
 pub struct Publisher {
+    state: Arc<State>,
+    _task: Arc<AbortOnDropHandle<()>>,
+}
+
+#[derive(Debug)]
+struct State {
     secret: SecretKey,
     dht: Dht,
     directory: Directory,
@@ -31,34 +44,107 @@ pub struct Publisher {
 
 impl Publisher {
     /// Use an endpoint secret key, shared Mainline node, and address-index directory.
+    ///
+    /// Publishing starts immediately, and does nothing until the first
+    /// infohash is added.
     pub fn new(secret: SecretKey, dht: Dht, directory: Directory) -> Self {
-        Self {
+        let state = Arc::new(State {
             secret,
             dht,
             directory,
             entries: Mutex::new(HashSet::new()),
             notify: Notify::new(),
             published: watch::channel(None).0,
+        });
+        let task = task::spawn({
+            let state = state.clone();
+            async move { state.run().await }
+        });
+        Self {
+            state,
+            _task: Arc::new(AbortOnDropHandle::new(task)),
         }
     }
 
     /// Endpoint identity published by this instance.
     pub fn id(&self) -> EndpointId {
-        self.secret.public()
+        self.state.secret.public()
     }
 
     /// Address-index directory used by this publisher.
     pub fn directory(&self) -> &Directory {
-        &self.directory
+        &self.state.directory
     }
 
     /// Most recently announced Mainline lookup key.
     pub fn public_v4(&self) -> Option<SocketAddrV4> {
-        *self.published.borrow()
+        *self.state.published.borrow()
     }
 
     /// Infohashes currently registered for announcement.
     pub fn infohashes(&self) -> Vec<Id> {
+        self.state.infohashes()
+    }
+
+    /// Register an infohash. Returns whether it was newly inserted.
+    pub fn add_infohash(&self, infohash: Id) -> bool {
+        let inserted = self
+            .state
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(infohash);
+        if inserted {
+            self.state.notify.notify_one();
+        }
+        inserted
+    }
+
+    /// Stop renewing an infohash.
+    pub fn remove_infohash(&self, infohash: &Id) -> bool {
+        let removed = self
+            .state
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(infohash);
+        if removed {
+            self.state.notify.notify_one();
+        }
+        removed
+    }
+
+    /// Wait until a Mainline announce and address-index put have succeeded.
+    pub async fn wait_published(&self) {
+        let mut receiver = self.state.published.subscribe();
+        while receiver.borrow().is_none() && receiver.changed().await.is_ok() {}
+    }
+}
+
+impl State {
+    /// Reconcile when hashes are added and periodically thereafter.
+    ///
+    /// A failed reconcile is retried after thirty seconds; the publisher is
+    /// meant to keep the record alive without supervision.
+    async fn run(&self) {
+        let mut refresh = tokio::time::interval_at(tokio::time::Instant::now() + REFRESH, REFRESH);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut mapping = None;
+        loop {
+            if let Err(err) = self.reconcile(&mut mapping).await {
+                tracing::warn!(%err, "publishing failed");
+                tokio::time::sleep(RETRY).await;
+                continue;
+            }
+            tokio::select! {
+                _ = self.notify.notified() => {}
+                _ = refresh.tick() => {}
+            }
+        }
+    }
+
+    /// Infohashes currently registered, sorted.
+    fn infohashes(&self) -> Vec<Id> {
         let mut entries: Vec<_> = self
             .entries
             .lock()
@@ -68,51 +154,6 @@ impl Publisher {
             .collect();
         entries.sort();
         entries
-    }
-
-    /// Register an infohash. Returns whether it was newly inserted.
-    pub fn add_infohash(&self, infohash: Id) -> bool {
-        let inserted = self
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(infohash);
-        if inserted {
-            self.notify.notify_one();
-        }
-        inserted
-    }
-
-    /// Stop renewing an infohash.
-    pub fn remove_infohash(&self, infohash: &Id) -> bool {
-        let removed = self
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(infohash);
-        if removed {
-            self.notify.notify_one();
-        }
-        removed
-    }
-
-    /// Wait until a Mainline announce and address-index put have succeeded.
-    pub async fn wait_published(&self) {
-        let mut receiver = self.published.subscribe();
-        while receiver.borrow().is_none() && receiver.changed().await.is_ok() {}
-    }
-
-    /// Reconcile when hashes are added and periodically thereafter.
-    pub async fn run(&self) -> Result<()> {
-        let mut refresh = tokio::time::interval_at(tokio::time::Instant::now() + REFRESH, REFRESH);
-        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut mapping = None;
-        loop {
-            tokio::select! {
-                _ = self.notify.notified() => self.reconcile(&mut mapping).await?,
-                _ = refresh.tick() => self.reconcile(&mut mapping).await?,
-            }
-        }
     }
 
     async fn reconcile(&self, mapping: &mut Option<SocketAddrV4>) -> Result<()> {

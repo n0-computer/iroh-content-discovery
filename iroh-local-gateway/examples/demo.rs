@@ -155,8 +155,8 @@ async fn main() -> Result<()> {
             })
             .await
     };
+    // The publishers keep running in their own tasks until they are dropped.
     let result = tokio::select! {
-        result = publisher.run() => result.map_err(anyhow::Error::from),
         result = serve => result,
         result = tokio::signal::ctrl_c() => { result?; Ok(()) },
     };

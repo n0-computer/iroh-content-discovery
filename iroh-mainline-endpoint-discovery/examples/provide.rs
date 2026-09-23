@@ -18,7 +18,7 @@ use iroh_blobs::{
 use iroh_mainline_endpoint_discovery::{
     Directory, PkarrPublisher, Publisher, infohash_from_blake3, pkarr_name,
 };
-use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
+use n0_error::{Result, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id, SigningKey};
 
 /// Provide files and announce their hashes on Mainline.
@@ -60,6 +60,7 @@ async fn main() -> Result<()> {
     let (store, entries, collection_hash) = import_path(store_dir.path(), files).await?;
 
     let endpoint = Endpoint::bind(presets::N0).await?;
+    println!("Endpoint id: {}", endpoint.id());
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
@@ -79,7 +80,6 @@ async fn main() -> Result<()> {
     publisher.add_infohash(infohash(&collection_hash));
 
     // Hashes are printed in z-base-32, the encoding used by the gateway.
-    println!("provider {}", endpoint.id());
     for (name, hash) in &entries {
         println!("{}  {name}", z32::encode(hash.as_bytes()));
     }
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
 
     // The name outlives this run; the hash it points at does not. The
     // publisher keeps republishing in its own task until it is dropped.
-    let _pkarr = pkarr_key
+    let pkarr = pkarr_key
         .map(|key| {
             let publisher = PkarrPublisher::new(dht.clone());
             publisher.set_blake3(&key, collection_hash.as_bytes())?;
@@ -102,16 +102,13 @@ async fn main() -> Result<()> {
         })
         .transpose()?;
 
-    let announced = async {
-        publisher.wait_published().await;
-        tracing::info!("published, press Ctrl-C to stop");
-        std::future::pending::<()>().await;
-    };
-    let result = tokio::select! {
-        result = publisher.run() => result,
-        _ = announced => unreachable!(),
-        _ = tokio::signal::ctrl_c() => Ok(()),
-    };
+    // Both publishers keep running in their own tasks until they are dropped.
+    publisher.wait_published().await;
+    if let Some(pkarr) = &pkarr {
+        pkarr.wait_published().await;
+    }
+    tracing::info!("published, press Ctrl-C to stop");
+    let result = tokio::signal::ctrl_c().await.anyerr();
     // Router shutdown also shuts down the store before the directory is removed.
     router.shutdown().await.anyerr()?;
     drop(store_dir);
