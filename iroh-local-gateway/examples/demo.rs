@@ -3,7 +3,7 @@
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -12,13 +12,10 @@ use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, pr
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_local_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{
-    Directory, DiscoveryConfig, Publisher, Resolver, infohash_from_blake3,
+    Directory, DiscoveryConfig, PkarrPublisher, Publisher, Resolver, infohash_from_blake3,
+    pkarr_name,
 };
-use n0_mainline::{Dht, MutableItem, SigningKey, Testnet};
-use simple_dns::{
-    CLASS, Packet, ResourceRecord,
-    rdata::{HTTPS, RData, SVCB},
-};
+use n0_mainline::{Dht, SigningKey, Testnet};
 use udp_address_records::{Limits, Server};
 
 #[derive(Parser)]
@@ -119,21 +116,10 @@ async fn main() -> Result<()> {
     );
     publisher.add_infohash(infohash);
     let key = SigningKey::from_bytes(&rand::random());
-    let public_key = z32::encode(key.verifying_key().as_bytes());
     let target = format!("{encoded}.blake3.link");
-    let mut packet = Packet::new_reply(0);
-    packet.answers.push(ResourceRecord::new(
-        public_key.as_str().try_into()?,
-        CLASS::IN,
-        300,
-        RData::HTTPS(HTTPS(SVCB::new(0, target.as_str().try_into()?))),
-    ));
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_micros()
-        .try_into()?;
-    let item = MutableItem::new(&key, &packet.build_bytes_vec_compressed()?, timestamp, None);
-    drop(key);
+    let pkarr = PkarrPublisher::new(provider_dht.clone());
+    pkarr.set_blake3(&key, hash.as_bytes())?;
+    let public_key = pkarr_name(&key.verifying_key().to_bytes());
     let client = if args.local_testnet {
         Endpoint::builder(presets::Minimal)
             .address_lookup(MemoryLookup::from_endpoint_info([provider.addr()]))
@@ -154,22 +140,20 @@ async fn main() -> Result<()> {
         tokio::time::timeout(Duration::from_secs(120), publisher.wait_published())
             .await
             .context("content publication timed out")?;
-        tokio::time::timeout(
-            Duration::from_secs(60),
-            provider_dht.put_mutable(item.clone(), None),
-        )
-        .await??;
-        tracing::debug!(%public_key, %target, sequence = item.seq(), "demo Pkarr record published");
+        tokio::time::timeout(Duration::from_secs(60), pkarr.publish_all()).await??;
+        tracing::debug!(%public_key, %target, "demo Pkarr record published");
         println!("\nExtension port: {}", http_addr.port());
         println!("Open:         https://{public_key}.pkarr.link/");
         println!("Redirects to: https://{encoded}.blake3.link/");
         println!("Pkarr route:  http://{http_addr}/pkarr/{public_key}/");
         println!("Blob route:   http://{http_addr}/blake3/{encoded}");
         println!("\nLeave this running. Press Ctrl-C to stop.");
-        tokio::select! {
-            result = gateway.serve(listener, async { let _ = tokio::signal::ctrl_c().await; }) => result,
-            result = renew_pkarr(&provider_dht, &item) => result,
-        }
+        // The Pkarr publisher keeps republishing in its own task.
+        gateway
+            .serve(listener, async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
     };
     let result = tokio::select! {
         result = publisher.run() => result.map_err(anyhow::Error::from),
@@ -180,12 +164,4 @@ async fn main() -> Result<()> {
     router.shutdown().await?;
     // Router shutdown also shuts down the blob store before TempDir cleanup.
     result
-}
-
-async fn renew_pkarr(dht: &Dht, item: &MutableItem) -> Result<()> {
-    loop {
-        tokio::time::sleep(Duration::from_secs(600)).await;
-        tokio::time::timeout(Duration::from_secs(30), dht.put_mutable(item.clone(), None))
-            .await??;
-    }
 }

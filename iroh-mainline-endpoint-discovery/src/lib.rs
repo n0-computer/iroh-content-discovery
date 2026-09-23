@@ -10,6 +10,7 @@
 use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
 
 mod directory;
+mod pkarr;
 mod publisher;
 mod record;
 mod republisher;
@@ -19,6 +20,7 @@ mod udp;
 
 pub use blake3::Hash;
 pub use directory::{Directory, DirectoryError, DiscoveryConfig};
+pub use pkarr::{BLAKE3_LINK, PKARR_REFRESH, PkarrPublisher, pkarr_name};
 pub use publisher::{ANNOUNCE_SPACING, Publisher, REFRESH};
 pub use record::{RecordPayload, RecordPayloadV1, SignedRecord};
 pub use republisher::republish_tracker_list;

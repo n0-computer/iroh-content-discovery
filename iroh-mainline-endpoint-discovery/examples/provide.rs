@@ -4,25 +4,22 @@
 use std::{
     net::SocketAddrV4,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use clap::Parser;
 use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
-use iroh::{endpoint::presets, protocol::Router};
+use iroh::{Endpoint, endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobFormat, BlobsProtocol, Hash,
     api::blobs::{AddPathOptions, ImportMode},
     format::collection::Collection,
     store::fs::FsStore,
 };
-use iroh_mainline_endpoint_discovery::{Directory, Publisher, infohash_from_blake3};
-use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
-use n0_mainline::{Dht, Id, MutableItem, SigningKey};
-use simple_dns::{
-    CLASS, Packet, ResourceRecord,
-    rdata::{HTTPS, RData, SVCB},
+use iroh_mainline_endpoint_discovery::{
+    Directory, PkarrPublisher, Publisher, infohash_from_blake3, pkarr_name,
 };
+use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
+use n0_mainline::{Dht, Id, SigningKey};
 
 /// Provide files and announce their hashes on Mainline.
 #[derive(Debug, Parser)]
@@ -39,8 +36,6 @@ struct Cli {
 
 /// Secret key for the Pkarr name, as 64 hex digits.
 const PKARR_SECRET: &str = "PKARR_SECRET";
-/// How often the signed Pkarr packet is republished.
-const PKARR_REFRESH: Duration = Duration::from_secs(600);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,35 +56,10 @@ async fn main() -> Result<()> {
         bail_any!("no files found at {}", root.display());
     }
 
-    // Files are referenced in place rather than copied into the store, which
-    // only holds the outboards and files small enough to be inlined. The
-    // files must not change while they are provided.
     let store_dir = tempfile::tempdir().std_context("store directory")?;
-    let store = FsStore::load(store_dir.path()).await?;
-    let mut entries = Vec::with_capacity(files.len());
-    for (name, path) in files {
-        let tag = store
-            .blobs()
-            .add_path_with_opts(AddPathOptions {
-                path,
-                mode: ImportMode::TryReference,
-                format: BlobFormat::Raw,
-            })
-            .with_tag()
-            .await?;
-        entries.push((name, tag.hash));
-    }
-    let collection: Collection = entries.iter().cloned().collect();
-    let collection_tag = collection.store(&store).await?;
-    store
-        .tags()
-        .create(collection_tag.hash_and_format())
-        .await?;
-    let collection_hash = collection_tag.hash();
+    let (store, entries, collection_hash) = import_path(store_dir.path(), files).await?;
 
-    let endpoint = iroh::Endpoint::bind(presets::N0)
-        .await
-        .context("provider endpoint")?;
+    let endpoint = Endpoint::bind(presets::N0).await?;
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
@@ -119,13 +89,16 @@ async fn main() -> Result<()> {
     println!("https://{collection}.blake3.link/");
     println!("http://{collection}.blake3.localhost:8080/");
 
-    let pkarr = pkarr_key
+    // The name outlives this run; the hash it points at does not. The
+    // publisher keeps republishing in its own task until it is dropped.
+    let _pkarr = pkarr_key
         .map(|key| {
-            let public = z32::encode(key.verifying_key().as_bytes());
-            // The name outlives this run; the hash it points at does not.
-            println!("https://{public}.pkarr.link/");
-            println!("http://{public}.pkarr.localhost:8080/");
-            pkarr_item(&key, &collection)
+            let publisher = PkarrPublisher::new(dht.clone());
+            publisher.set_blake3(&key, collection_hash.as_bytes())?;
+            let name = pkarr_name(&key.verifying_key().to_bytes());
+            println!("https://{name}.pkarr.link/");
+            println!("http://{name}.pkarr.localhost:8080/");
+            n0_error::Ok(publisher)
         })
         .transpose()?;
 
@@ -134,10 +107,8 @@ async fn main() -> Result<()> {
         tracing::info!("published, press Ctrl-C to stop");
         std::future::pending::<()>().await;
     };
-    let republish = republish_pkarr(dht, pkarr);
     let result = tokio::select! {
         result = publisher.run() => result,
-        result = republish => result,
         _ = announced => unreachable!(),
         _ = tokio::signal::ctrl_c() => Ok(()),
     };
@@ -145,6 +116,38 @@ async fn main() -> Result<()> {
     router.shutdown().await.anyerr()?;
     drop(store_dir);
     result
+}
+
+/// Adds every file as a blob plus a collection, and returns their hashes.
+///
+/// Files are referenced in place rather than copied into the store, which
+/// only holds the outboards and files small enough to be inlined. The files
+/// must not change while they are provided.
+async fn import_path(
+    store_dir: &Path,
+    files: Vec<(String, PathBuf)>,
+) -> Result<(FsStore, Vec<(String, Hash)>, Hash)> {
+    let store = FsStore::load(store_dir).await?;
+    let mut entries = Vec::with_capacity(files.len());
+    for (name, path) in files {
+        let tag = store
+            .blobs()
+            .add_path_with_opts(AddPathOptions {
+                path,
+                mode: ImportMode::TryReference,
+                format: BlobFormat::Raw,
+            })
+            .with_tag()
+            .await?;
+        entries.push((name, tag.hash));
+    }
+    let collection: Collection = entries.iter().cloned().collect();
+    let collection_tag = collection.store(&store).await?;
+    store
+        .tags()
+        .create(collection_tag.hash_and_format())
+        .await?;
+    Ok((store, entries, collection_tag.hash()))
 }
 
 /// Reads the Pkarr signing key from the environment, or makes a new one.
@@ -164,39 +167,6 @@ fn pkarr_key() -> Result<SigningKey> {
         .and_then(|bytes| bytes.try_into().ok())
         .std_context("secret must contain 64 hex digits")?;
     Ok(SigningKey::from_bytes(&secret))
-}
-
-/// Signs a Pkarr packet whose apex HTTPS record names the collection.
-fn pkarr_item(key: &SigningKey, collection: &str) -> Result<MutableItem> {
-    let public = z32::encode(key.verifying_key().as_bytes());
-    let target = format!("{collection}.blake3.link");
-    let mut packet = Packet::new_reply(0);
-    packet.answers.push(ResourceRecord::new(
-        public.as_str().try_into().anyerr()?,
-        CLASS::IN,
-        300,
-        RData::HTTPS(HTTPS(SVCB::new(0, target.as_str().try_into().anyerr()?))),
-    ));
-    let bytes = packet.build_bytes_vec_compressed().anyerr()?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .anyerr()?
-        .as_micros() as i64;
-    Ok(MutableItem::new(key, &bytes, timestamp, None))
-}
-
-/// Republishes the signed packet until the process stops.
-async fn republish_pkarr(dht: Dht, item: Option<MutableItem>) -> Result<()> {
-    let Some(item) = item else {
-        return std::future::pending().await;
-    };
-    loop {
-        match dht.put_mutable(item.clone(), None).await {
-            Ok(_) => tracing::info!("published Pkarr name"),
-            Err(err) => tracing::warn!(%err, "Pkarr publish failed"),
-        }
-        tokio::time::sleep(PKARR_REFRESH).await;
-    }
 }
 
 fn infohash(hash: &Hash) -> Id {
