@@ -164,6 +164,8 @@ async fn run() {
     publish(&publisher, &key, &target).await;
     let response = client.get(&url).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // The key names content that changes, so the response must revalidate.
+    assert_eq!(response.headers()["cache-control"], "public, no-cache");
     assert_eq!(response.bytes().await.unwrap().as_ref(), text);
     let response = origin_client
         .get(format!(

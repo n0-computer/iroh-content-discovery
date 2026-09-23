@@ -195,6 +195,9 @@ dropping the HTTP body drops the upstream request.
 - `HEAD` returns full metadata without a response body and ignores `Range`.
 - Responses include `Accept-Ranges: bytes`, a hash-derived ETag and immutable
   caching headers. `If-None-Match` and strong ETag `If-Range` are supported.
+  Content reached through a Pkarr key is sent with `public, no-cache` instead,
+  since the key names content that changes; the ETag still makes revalidation
+  cheap.
 - MIME detection uses the verified prefix with the same `mime_classifier`
   library as the example gateway. Unknown binary data uses
   `application/octet-stream`; no filename extension is necessary.

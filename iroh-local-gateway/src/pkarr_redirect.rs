@@ -18,7 +18,8 @@ use simple_dns::{
 use percent_encoding::percent_decode_str;
 
 use crate::{
-    Gateway, HttpError, LOOKUP_TIMEOUT, Root, Subdomain, parse_hash, serve_path, serve_root,
+    Caching, Gateway, HttpError, LOOKUP_TIMEOUT, Root, Subdomain, parse_hash, parse_z32_bytes,
+    serve_path, serve_root,
 };
 
 /// Targets under this suffix name content this gateway can serve itself.
@@ -133,7 +134,8 @@ pub(crate) async fn redirect(
             Some(_) => String::new(),
             None => format!("/pkarr/{encoded}"),
         };
-        let root = Root::at(encoded.to_owned(), base);
+        // The key names content that changes, so responses must revalidate.
+        let root = Root::at(encoded.to_owned(), base, Caching::Revalidate);
         let query = uri.query().map(str::to_owned);
         let path = percent_decode_str(path.trim_start_matches('/'))
             .decode_utf8()
@@ -167,23 +169,12 @@ fn content_hash(authority: &str) -> Option<iroh_blobs::Hash> {
 }
 
 fn parse_key(encoded: &str) -> Result<[u8; 32], HttpError> {
-    let invalid = || {
+    parse_z32_bytes(encoded).map_err(|_| {
         HttpError(
             StatusCode::BAD_REQUEST,
             "invalid z-base-32 Pkarr public key",
         )
-    };
-    if encoded.len() != 52 {
-        return Err(invalid());
-    }
-    let key: [u8; 32] = z32::decode(encoded.as_bytes())
-        .map_err(|_| invalid())?
-        .try_into()
-        .map_err(|_| invalid())?;
-    if z32::encode(&key) != encoded {
-        return Err(invalid());
-    }
-    Ok(key)
+    })
 }
 
 async fn resolve(
