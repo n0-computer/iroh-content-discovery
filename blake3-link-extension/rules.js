@@ -1,5 +1,12 @@
 export const DEFAULT_SETTINGS = { port: 8080, enabled: true };
 export const RULE_IDS = [1, 2, 3];
+export const HOST_ORIGINS = [
+  "http://*.blake3.link/*", "https://*.blake3.link/*",
+  "http://*.pkarr.link/*", "https://*.pkarr.link/*",
+];
+
+// Firefox provides `browser`; Chrome and Brave only `chrome`.
+export const api = globalThis.browser ?? globalThis.chrome;
 
 export function validateSettings(settings) {
   if (!Number.isInteger(settings.port) || settings.port < 1 || settings.port > 65535) {
@@ -58,15 +65,15 @@ export function makeRules(settings) {
 }
 
 export async function readSettings() {
-  const { settings } = await chrome.storage.local.get("settings");
+  const { settings } = await api.storage.local.get("settings");
   return validateSettings(settings ?? DEFAULT_SETTINGS);
 }
 
 export async function applySettings(settings) {
   settings = validateSettings(settings);
-  await chrome.declarativeNetRequest.updateDynamicRules({
+  await api.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: RULE_IDS,
     addRules: makeRules(settings),
   });
-  await chrome.storage.local.set({ settings });
+  await api.storage.local.set({ settings });
 }

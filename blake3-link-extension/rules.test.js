@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { DEFAULT_SETTINGS, RULE_IDS, makeRules, validateSettings } from "./rules.js";
+import { DEFAULT_SETTINGS, HOST_ORIGINS, RULE_IDS, makeRules, validateSettings } from "./rules.js";
+
+test("runtime permission requests cover both domains declared in the manifest", () => {
+  const manifest = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
+  assert.deepEqual(HOST_ORIGINS, manifest.host_permissions);
+  for (const domain of ["blake3.link", "pkarr.link"]) {
+    for (const scheme of ["http", "https"]) {
+      assert.ok(HOST_ORIGINS.includes(`${scheme}://*.${domain}/*`));
+    }
+  }
+});
 
 // Model URL matching and transformations; Chrome/Brave enforce the actual rules.
 function redirect(input, port = 8080) {
