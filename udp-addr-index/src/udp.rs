@@ -13,7 +13,7 @@ use tokio::{
 };
 use tracing::{debug, trace};
 use udp_addr_index_proto::{
-    MAGIC, MAX_DGRAM, RENDEZVOUS_INFOHASH, Request, RequestV1, Response, ResponseV1,
+    MAGIC, MAX_DGRAM, Proto, RENDEZVOUS_INFOHASH, Request, RequestV1, Response, ResponseV1,
 };
 
 /// Running address-index service. Drop to detach from the shared DHT socket.
@@ -149,7 +149,7 @@ impl Server {
         if data.is_empty() || data.len() > MAX_DGRAM {
             return Ok(());
         }
-        let Some(Request::V1(request)) = Request::decode(data) else {
+        let Some(Proto::Request(Request::V1(request))) = Proto::decode(data) else {
             return Ok(());
         };
         let now = unix_secs();
@@ -199,7 +199,9 @@ impl Server {
         };
         if let Some(response) = response {
             let mut out = [0; MAX_DGRAM];
-            let bytes = response.encode(&mut out).expect("bounded response");
+            let bytes = Proto::Response(response)
+                .encode(&mut out)
+                .expect("bounded response");
             dht.send_datagram(bytes.to_vec(), from).await?;
         }
         Ok(())
