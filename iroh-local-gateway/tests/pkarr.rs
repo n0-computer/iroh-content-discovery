@@ -13,12 +13,16 @@ use simple_dns::{
 };
 
 async fn publish(dht: &Dht, key: &SigningKey, target: &str) {
+    publish_ttl(dht, key, target, 0).await;
+}
+
+async fn publish_ttl(dht: &Dht, key: &SigningKey, target: &str, ttl: u32) {
     let name = z32::encode(key.verifying_key().as_bytes());
     let mut packet = Packet::new_reply(0);
     packet.answers.push(ResourceRecord::new(
         name.as_str().try_into().unwrap(),
         CLASS::IN,
-        60,
+        ttl,
         RData::HTTPS(HTTPS(SVCB::new(0, target.try_into().unwrap()))),
     ));
     publish_bytes(dht, key, &packet.build_bytes_vec_compressed().unwrap()).await;
@@ -160,6 +164,27 @@ async fn run() {
     assert_eq!(
         client.get(&url).send().await.unwrap().status(),
         StatusCode::BAD_GATEWAY
+    );
+
+    // A warm cache serves the verified packet, applying each request's path
+    // independently, even after a different record is published.
+    let cached_key = SigningKey::from_bytes(&[44; 32]);
+    let cached_url = format!(
+        "{base}/{}",
+        z32::encode(cached_key.verifying_key().as_bytes())
+    );
+    publish_ttl(&publisher, &cached_key, "cached.example", 300).await;
+    let response = client.get(&cached_url).send().await.unwrap();
+    assert_eq!(response.headers()["location"], "https://cached.example/");
+    publish_ttl(&publisher, &cached_key, "changed.example", 300).await;
+    let response = client
+        .get(format!("{cached_url}/other?x=1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.headers()["location"],
+        "https://cached.example/other?x=1"
     );
 
     shutdown.send(()).unwrap();

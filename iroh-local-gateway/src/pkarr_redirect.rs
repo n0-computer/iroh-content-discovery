@@ -1,4 +1,7 @@
-//! Resolve signed Pkarr HTTPS records through the gateway's shared DHT.
+//! Resolve and cache signed Pkarr records through the gateway's shared DHT.
+
+use lru::LruCache;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{OriginalUri, State},
@@ -13,6 +16,50 @@ use simple_dns::{
 
 use crate::{Gateway, HttpError, LOOKUP_TIMEOUT};
 
+// Bound both memory use and how long changed names can remain stale.
+const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
+
+pub(crate) struct Cache(LruCache<[u8; 32], (Instant, n0_mainline::MutableItem)>);
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self(LruCache::new(1024.try_into().unwrap()))
+    }
+}
+
+impl Cache {
+    fn get(&mut self, key: &[u8; 32], now: Instant) -> Option<n0_mainline::MutableItem> {
+        if self.0.peek(key).is_some_and(|(expires, _)| *expires <= now) {
+            self.0.pop(key);
+        }
+        self.0.get(key).map(|(_, item)| item.clone())
+    }
+
+    fn insert(
+        &mut self,
+        key: [u8; 32],
+        item: n0_mainline::MutableItem,
+        packet: &Packet<'_>,
+        now: Instant,
+    ) {
+        // Using the minimum answer TTL is conservative when a packet contains
+        // multiple records. Zero TTL explicitly disables caching.
+        let ttl = Duration::from_secs(
+            packet
+                .answers
+                .iter()
+                .map(|rr| rr.ttl)
+                .min()
+                .unwrap_or(0)
+                .into(),
+        )
+        .min(MAX_CACHE_TTL);
+        if !ttl.is_zero() {
+            self.0.put(key, (now + ttl, item));
+        }
+    }
+}
+
 pub(crate) async fn redirect(
     State(gateway): State<Gateway>,
     OriginalUri(uri): OriginalUri,
@@ -25,13 +72,36 @@ pub(crate) async fn redirect(
             (key, format!("/{path}"))
         });
     let key = parse_key(encoded)?;
-    let item = tokio::time::timeout(LOOKUP_TIMEOUT, resolve(gateway.0.resolver.dht(), &key))
-        .await
-        .map_err(|_| HttpError(StatusCode::GATEWAY_TIMEOUT, "Pkarr lookup timed out"))??;
+    let started = std::time::Instant::now();
+    tracing::debug!(key = encoded, "resolving Pkarr record");
+    let cached = gateway.0.pkarr.lock().unwrap().get(&key, Instant::now());
+    let cache_hit = cached.is_some();
+    let item = if let Some(item) = cached {
+        tracing::debug!(key = encoded, "Pkarr cache hit");
+        item
+    } else {
+        tokio::time::timeout(LOOKUP_TIMEOUT, resolve(gateway.0.resolver.dht(), &key))
+            .await
+            .map_err(|_| {
+                tracing::debug!(
+                    key = encoded,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Pkarr lookup timed out"
+                );
+                HttpError(StatusCode::GATEWAY_TIMEOUT, "Pkarr lookup timed out")
+            })??
+    };
     let packet = Packet::parse(item.value()).map_err(|error| {
         tracing::warn!(%error, "invalid Pkarr DNS packet");
         HttpError(StatusCode::BAD_GATEWAY, "invalid Pkarr DNS packet")
     })?;
+    tracing::debug!(
+        key = encoded,
+        sequence = item.seq(),
+        answers = packet.answers.len(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "Pkarr DNS packet decoded"
+    );
     let authority = target(&packet, encoded).ok_or(HttpError(
         StatusCode::UNPROCESSABLE_ENTITY,
         "no supported apex HTTPS target",
@@ -41,6 +111,15 @@ pub(crate) async fn redirect(
         location.push('?');
         location.push_str(query);
     }
+    if !cache_hit {
+        gateway
+            .0
+            .pkarr
+            .lock()
+            .unwrap()
+            .insert(key, item.clone(), &packet, Instant::now());
+    }
+    tracing::debug!(key = encoded, %location, "redirecting Pkarr request");
     Ok((
         StatusCode::TEMPORARY_REDIRECT,
         [
@@ -79,16 +158,22 @@ async fn resolve(
         tracing::warn!(%error, "Pkarr lookup failed");
         HttpError(StatusCode::BAD_GATEWAY, "Pkarr lookup failed")
     })?;
-    let mut latest: Option<n0_mainline::MutableItem> = None;
-    while let Some(item) = items.next().await {
-        if latest
-            .as_ref()
-            .is_none_or(|old| (item.seq(), item.value()) > (old.seq(), old.value()))
-        {
-            latest = Some(item);
-        }
-    }
-    let item = latest.ok_or(HttpError(StatusCode::NOT_FOUND, "no Pkarr packet found"))?;
+    first_verified(&mut items, key).await
+}
+
+async fn first_verified(
+    items: &mut (impl n0_future::Stream<Item = n0_mainline::MutableItem> + Unpin),
+    key: &[u8; 32],
+) -> Result<n0_mainline::MutableItem, HttpError> {
+    let item = items
+        .next()
+        .await
+        .ok_or(HttpError(StatusCode::NOT_FOUND, "no Pkarr packet found"))?;
+    tracing::debug!(
+        sequence = item.seq(),
+        bytes = item.value().len(),
+        "received verified Pkarr item"
+    );
     // get_mutable verifies BEP44 signatures and binds each item to the requested
     // key. Its value is the DNS wire packet; no Pkarr envelope is needed.
     if item.seq() < 0 || item.key() != key {
@@ -155,6 +240,64 @@ fn authority(svcb: &SVCB<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_dns::{ResourceRecord, rdata::HTTPS};
+
+    fn signed_packet(ttl: u32) -> (n0_mainline::MutableItem, Vec<u8>) {
+        let key = n0_mainline::SigningKey::from_bytes(&[9; 32]);
+        let mut packet = Packet::new_reply(0);
+        packet.answers.push(ResourceRecord::new(
+            "example.com".try_into().unwrap(),
+            CLASS::IN,
+            ttl,
+            RData::HTTPS(HTTPS(SVCB::new(0, "target.example".try_into().unwrap()))),
+        ));
+        let bytes = packet.build_bytes_vec_compressed().unwrap();
+        (n0_mainline::MutableItem::new(&key, &bytes, 1, None), bytes)
+    }
+
+    #[tokio::test]
+    async fn first_record_does_not_wait_for_lookup_completion() {
+        let (item, _) = signed_packet(300);
+        let key = *item.key();
+        let stream = async_stream::stream! {
+            yield item;
+            std::future::pending::<()>().await;
+        };
+        let mut stream = Box::pin(stream);
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            first_verified(&mut stream, &key),
+        )
+        .await;
+        assert!(result.is_ok_and(|item| item.is_ok()));
+    }
+
+    #[test]
+    fn cache_expires_without_sliding_and_respects_dns_ttl() {
+        let now = Instant::now();
+        for (ttl, expires) in [(300, 30), (2, 2)] {
+            let (item, bytes) = signed_packet(ttl);
+            let key = *item.key();
+            let packet = Packet::parse(&bytes).unwrap();
+            let mut cache = Cache::default();
+            cache.insert(key, item, &packet, now);
+            assert!(
+                cache
+                    .get(&key, now + Duration::from_secs(expires - 1))
+                    .is_some()
+            );
+            assert!(
+                cache
+                    .get(&key, now + Duration::from_secs(expires))
+                    .is_none()
+            );
+        }
+        let (item, bytes) = signed_packet(0);
+        let key = *item.key();
+        let mut cache = Cache::default();
+        cache.insert(key, item, &Packet::parse(&bytes).unwrap(), now);
+        assert!(cache.get(&key, now).is_none());
+    }
 
     #[test]
     fn dns_targets_and_validation() {
