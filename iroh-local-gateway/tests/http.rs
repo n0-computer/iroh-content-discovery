@@ -436,12 +436,32 @@ async fn run() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let res = client
-        .get(url(Hash::new(b"not announced")))
-        .send()
-        .await
-        .unwrap();
+    let missing = url(Hash::new(b"not announced"));
+    let started = std::time::Instant::now();
+    let res = client.get(&missing).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let first = started.elapsed();
+    // A remembered failure answers without another lookup, so the second
+    // request cannot take as long as the first.
+    let started = std::time::Instant::now();
+    let res = client.get(&missing).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert!(
+        started.elapsed() * 2 < first,
+        "second lookup took {:?}, first took {first:?}",
+        started.elapsed()
+    );
+    // Concurrent requests for one cold hash share a single lookup.
+    let cold = url(Hash::new(b"also not announced"));
+    let started = std::time::Instant::now();
+    let (left, right) = tokio::join!(client.get(&cold).send(), client.get(&cold).send());
+    assert_eq!(left.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(right.unwrap().status(), StatusCode::NOT_FOUND);
+    let both = started.elapsed();
+    assert!(
+        both < first * 2,
+        "two lookups took {both:?}, one takes {first:?}"
+    );
     let res = client
         .request(reqwest::Method::OPTIONS, &video_url)
         .header("origin", "http://example.com")
