@@ -4,7 +4,7 @@ A localhost HTTP gateway for content-addressed files, including video. This is
 workspace project four, adapted from the streaming approach in
 [`iroh-examples/iroh-gateway`](https://github.com/n0-computer/iroh-examples/tree/main/iroh-gateway).
 
-## Try it locally
+## Try the full workflow
 
 With the browser extension installed and enabled on port 8080:
 
@@ -13,8 +13,10 @@ cargo run -p iroh-local-gateway --example demo -- /path/to/video.mp4
 ```
 
 Open the printed `https://<public-key>.pkarr.link/` URL and leave the command
-running. This starts a local DHT testnet, tracker, file provider, Pkarr publisher,
-and HTTP gateway in one process. The full browser flow is:
+running. By default this uses the **public Mainline DHT**, discovers public
+address-index trackers, and starts the file provider, Pkarr publisher, and HTTP
+gateway in one process. The provider and gateway use normal iroh discovery and
+relays. The full browser flow is:
 
 ```text
 https://<public-key>.pkarr.link/
@@ -23,11 +25,13 @@ https://<public-key>.pkarr.link/
   -> http://127.0.0.1:8080/blake3/<hash>
 ```
 
-The gateway resolves the signed HTTPS record on the local DHT and redirects;
+The gateway resolves the signed HTTPS record on Mainline and redirects;
 the extension intercepts both domains. The content then travels through real
-iroh connections and tracker discovery, but no public DHT or relay is needed.
-The Pkarr packet is republished every ten minutes. These demo links work only
-through this running demo's gateway. Files are imported into a
+iroh connections and tracker discovery. Public mode needs working outbound UDP
+and an available address-index tracker. Pass `--tracker IP:PORT` (or set
+`IROH_ADDR_INDEX`) to select one explicitly if discovery fails. Startup can
+take a minute. The Pkarr packet is republished every ten minutes, and the blob
+provider must stay running. Files are imported into a
 temporary disk-backed store cleaned up on normal shutdown. The example may use
 additional disk space roughly equal to the file size.
 
@@ -36,6 +40,15 @@ and set the same port in the extension. The printed localhost blob URL also
 works without the extension; following the Pkarr route's redirect needs the
 extension to intercept `blake3.link`. Stop any other gateway on that port first.
 Ctrl-C stops the demo.
+
+For an isolated run without public DHT or relay services, opt in explicitly:
+
+```sh
+cargo run -p iroh-local-gateway --example demo -- --local-testnet
+```
+
+This starts a local DHT and tracker and uses in-memory iroh address discovery.
+Links from this mode work only through this demo's gateway.
 
 ## Standalone gateway
 
