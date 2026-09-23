@@ -59,6 +59,9 @@ async fn run() {
         ("notes/readme.md", markdown_tag.hash),
         ("notes/hello world.txt", text_tag.hash),
         ("notes/deep/more.txt", text_tag.hash),
+        // Both a file and a directory prefix.
+        ("dual", text_tag.hash),
+        ("dual/inner.txt", markdown_tag.hash),
         ("video.mp4", video_tag.hash),
         ("site/index.html", text_tag.hash),
         ("site/style.css", text_tag.hash),
@@ -205,6 +208,29 @@ async fn run() {
             z32::encode(video_tag.hash.as_bytes())
         )
     );
+    // A name that is also a directory prefix lists, with or without a slash.
+    for suffix in ["/dual", "/dual/"] {
+        let res = client
+            .get(format!("{collection_url}{suffix}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{suffix}");
+        let html = res.text().await.unwrap();
+        assert!(
+            html.contains(&format!(
+                "href=\"/blake3/{collection_hash}/dual/inner.txt\""
+            )),
+            "{suffix}"
+        );
+    }
+    let res = client
+        .get(format!("{collection_url}/dual/inner.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), markdown);
     // `?tree` states that the root is a collection, without detecting it.
     let res = client
         .get(format!("{collection_url}?tree"))
@@ -261,6 +287,11 @@ async fn run() {
 
     let res = client.get(&video_url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+    // A hash URL names the bytes, so the response never changes.
+    assert_eq!(
+        res.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
     assert_eq!(res.headers()["content-type"], "video/mp4");
     assert_eq!(res.headers()["accept-ranges"], "bytes");
     assert_eq!(res.content_length(), Some(video.len() as u64));
@@ -568,6 +599,19 @@ async fn run() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(res.bytes().await.unwrap().as_ref(), &video[..10]);
+    // Host names are case-insensitive.
+    let res = client
+        .get(format!(
+            "http://{}:{}/",
+            subdomain(&video_hash),
+            listen_addr.port()
+        ))
+        .header("host", subdomain(&video_hash).to_uppercase())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "video/mp4");
     // Other hosts are not rewritten.
     let res = client
         .get(format!("http://other.localhost:{}/", listen_addr.port()))

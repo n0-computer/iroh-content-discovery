@@ -4,6 +4,7 @@
 use std::{
     net::SocketAddrV4,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use clap::Parser;
@@ -16,7 +17,11 @@ use iroh_blobs::{
 };
 use iroh_mainline_endpoint_discovery::{Directory, Publisher, infohash_from_blake3};
 use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
-use n0_mainline::{Dht, Id};
+use n0_mainline::{Dht, Id, MutableItem, SigningKey};
+use simple_dns::{
+    CLASS, Packet, ResourceRecord,
+    rdata::{HTTPS, RData, SVCB},
+};
 
 /// Provide files and announce their hashes on Mainline.
 #[derive(Debug, Parser)]
@@ -26,7 +31,15 @@ struct Cli {
     /// Address-index replica to use instead of discovering one.
     #[arg(long, env = "IROH_ADDR_INDEX")]
     addr_index: Option<SocketAddrV4>,
+    /// Do not publish a Pkarr name for the collection.
+    #[arg(long)]
+    no_pkarr: bool,
 }
+
+/// Secret key for the Pkarr name, as 64 hex digits.
+const PKARR_SECRET: &str = "PKARR_SECRET";
+/// How often the signed Pkarr packet is republished.
+const PKARR_REFRESH: Duration = Duration::from_secs(600);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,6 +50,9 @@ async fn main() -> Result<()> {
         )
         .init();
     let cli = Cli::parse();
+    // Read or make the Pkarr key first, so a generated secret is the first
+    // thing printed and cannot scroll away behind the hashes.
+    let pkarr_key = (!cli.no_pkarr).then(pkarr_key).transpose()?;
 
     let root = std::fs::canonicalize(&cli.path).std_context("invalid path")?;
     let files = collect_files(&root)?;
@@ -85,7 +101,7 @@ async fn main() -> Result<()> {
         Some(replica) => Directory::udp(dht.clone(), replica).await?,
         None => Directory::discover(dht.clone()).await?,
     };
-    let publisher = Publisher::new(endpoint.secret_key().clone(), dht, index);
+    let publisher = Publisher::new(endpoint.secret_key().clone(), dht.clone(), index);
     for (_, hash) in &entries {
         publisher.add_infohash(infohash(hash));
     }
@@ -98,17 +114,29 @@ async fn main() -> Result<()> {
     }
     let collection = z32::encode(collection_hash.as_bytes());
     println!("{collection}  (collection)");
-    // With the browser extension, the blake3.link URL redirects to the second.
+    // With the browser extension, the link URLs reach the local gateway.
     println!("https://{collection}.blake3.link/");
-    println!("http://{collection}.localhost:8080/");
+    println!("http://{collection}.blake3.localhost:8080/");
+
+    let pkarr = pkarr_key
+        .map(|key| {
+            let public = z32::encode(key.verifying_key().as_bytes());
+            // The name outlives this run; the hash it points at does not.
+            println!("https://{public}.pkarr.link/");
+            println!("http://{public}.pkarr.localhost:8080/");
+            pkarr_item(&key, &collection)
+        })
+        .transpose()?;
 
     let announced = async {
         publisher.wait_published().await;
         tracing::info!("published, press Ctrl-C to stop");
         std::future::pending::<()>().await;
     };
+    let republish = republish_pkarr(dht, pkarr);
     let result = tokio::select! {
         result = publisher.run() => result,
+        result = republish => result,
         _ = announced => unreachable!(),
         _ = tokio::signal::ctrl_c() => Ok(()),
     };
@@ -116,6 +144,63 @@ async fn main() -> Result<()> {
     router.shutdown().await.anyerr()?;
     drop(store_dir);
     result
+}
+
+/// Reads the Pkarr signing key from the environment, or makes a new one.
+///
+/// A generated key is printed so the same name can be reused on the next run.
+fn pkarr_key() -> Result<SigningKey> {
+    let Some(hex) = std::env::var_os(PKARR_SECRET) else {
+        let secret: [u8; 32] = rand::random();
+        let printable: String = secret.iter().map(|byte| format!("{byte:02x}")).collect();
+        println!("{PKARR_SECRET}={printable}  (generated, export it to reuse this name)");
+        return Ok(SigningKey::from_bytes(&secret));
+    };
+    let hex = hex.to_str().std_context("secret must be hex digits")?;
+    n0_error::ensure_any!(hex.len() == 64, "secret must contain 64 hex digits");
+    let mut secret = [0; 32];
+    for (out, pair) in secret.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
+        let digit = |byte: u8| {
+            (byte as char)
+                .to_digit(16)
+                .std_context("secret must contain only hex digits")
+        };
+        *out = ((digit(pair[0])? << 4) | digit(pair[1])?) as u8;
+    }
+    Ok(SigningKey::from_bytes(&secret))
+}
+
+/// Signs a Pkarr packet whose apex HTTPS record names the collection.
+fn pkarr_item(key: &SigningKey, collection: &str) -> Result<MutableItem> {
+    let public = z32::encode(key.verifying_key().as_bytes());
+    let target = format!("{collection}.blake3.link");
+    let mut packet = Packet::new_reply(0);
+    packet.answers.push(ResourceRecord::new(
+        public.as_str().try_into().anyerr()?,
+        CLASS::IN,
+        300,
+        RData::HTTPS(HTTPS(SVCB::new(0, target.as_str().try_into().anyerr()?))),
+    ));
+    let bytes = packet.build_bytes_vec_compressed().anyerr()?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .anyerr()?
+        .as_micros() as i64;
+    Ok(MutableItem::new(key, &bytes, timestamp, None))
+}
+
+/// Republishes the signed packet until the process stops.
+async fn republish_pkarr(dht: Dht, item: Option<MutableItem>) -> Result<()> {
+    let Some(item) = item else {
+        return std::future::pending().await;
+    };
+    loop {
+        match dht.put_mutable(item.clone(), None).await {
+            Ok(_) => tracing::info!("published Pkarr name"),
+            Err(err) => tracing::warn!(%err, "Pkarr publish failed"),
+        }
+        tokio::time::sleep(PKARR_REFRESH).await;
+    }
 }
 
 fn infohash(hash: &Hash) -> Id {

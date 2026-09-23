@@ -199,6 +199,17 @@ Query flags:
 cargo run -p iroh-local-gateway -- --tracker 127.0.0.1:11223
 ```
 
+To serve content, the `provide` example adds a file or directory as blobs plus
+a collection, announces every hash, and publishes a Pkarr name for the
+collection, printing both link URLs:
+
+```sh
+cargo run -p iroh-mainline-endpoint-discovery --example provide -- ./site
+```
+
+It reads `PKARR_SECRET` (64 hex digits) to keep the same name across runs, and
+prints a generated one if unset. Use `--no-pkarr` to publish hashes only.
+
 The gateway also accepts the BEP44 public key and rendezvous hash discovery
 options. See its README for configuration and HTTP behavior.
 

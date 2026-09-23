@@ -359,12 +359,20 @@ pub fn validate_listen_addr(addr: SocketAddr) -> anyhow::Result<()> {
 
 /// Parse a canonical, lowercase z-base-32 encoded 32-byte BLAKE3 hash.
 pub fn parse_hash(value: &str) -> anyhow::Result<Hash> {
+    Ok(Hash::from_bytes(parse_z32_bytes(value)?))
+}
+
+/// Parse 32 bytes from canonical, lowercase z-base-32.
+///
+/// Hashes and Pkarr public keys share this encoding, so a label alone does
+/// not say which one it is.
+pub fn parse_z32_bytes(value: &str) -> anyhow::Result<[u8; 32]> {
     anyhow::ensure!(value.len() == 52, "expected 52 z-base-32 characters");
     let bytes: [u8; 32] = z32::decode(value.as_bytes())?
         .try_into()
-        .map_err(|_| anyhow::anyhow!("expected a 32-byte hash"))?;
-    anyhow::ensure!(z32::encode(&bytes) == value, "noncanonical z-base-32 hash");
-    Ok(Hash::from_bytes(bytes))
+        .map_err(|_| anyhow::anyhow!("expected 32 bytes"))?;
+    anyhow::ensure!(z32::encode(&bytes) == value, "noncanonical z-base-32");
+    Ok(bytes)
 }
 
 struct HttpError(StatusCode, &'static str);
@@ -413,11 +421,14 @@ async fn rewrite_subdomain(mut request: Request) -> Request {
                 .to_owned(),
         )
     });
+    // Host names are case-insensitive, so compare in lower case. The label is
+    // then canonical z-base-32, which is lower case by definition.
+    let host = host.map(|host| host.to_ascii_lowercase());
     let Some((label, route)) = host.as_deref().and_then(|host| {
         SUBDOMAIN_ROUTES.iter().find_map(|(suffix, route)| {
             let label = host.strip_suffix(suffix)?;
-            // Both hashes and keys are canonical 32-byte z-base-32 values.
-            parse_hash(label).ok().map(|_| (label, route))
+            // Hashes and keys are both 32 bytes in z-base-32.
+            parse_z32_bytes(label).ok().map(|_| (label, route))
         })
     }) else {
         return request;
@@ -488,11 +499,30 @@ fn attachment(filename: &str) -> String {
     format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
 }
 
+/// How long a response may be reused, which depends on what its URL names.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Caching {
+    /// The URL names the bytes, so the response can never change.
+    Immutable,
+    /// The URL names a Pkarr key, whose content changes, so revalidate.
+    Revalidate,
+}
+
+impl Caching {
+    fn header(self) -> &'static str {
+        match self {
+            Self::Immutable => "public, max-age=31536000, immutable",
+            Self::Revalidate => "public, no-cache",
+        }
+    }
+}
+
 /// The collection a listing belongs to, and the path its links start with.
 struct Root {
     encoded: String,
     /// `/blake3/{z32}`, or empty when the hash is the request's subdomain.
     base: String,
+    caching: Caching,
 }
 
 impl Root {
@@ -501,8 +531,27 @@ impl Root {
             Some(_) => String::new(),
             None => format!("/blake3/{encoded}"),
         };
-        Self { encoded, base }
+        Self {
+            encoded,
+            base,
+            caching: Caching::Immutable,
+        }
     }
+
+    /// A listing shown under another route, such as a Pkarr key.
+    pub(crate) fn at(encoded: String, base: String, caching: Caching) -> Self {
+        Self {
+            encoded,
+            base,
+            caching,
+        }
+    }
+}
+
+/// Parses a hash from a path segment, reporting a bad request if invalid.
+fn parse_path_hash(encoded: &str) -> Result<Hash, HttpError> {
+    parse_hash(encoded)
+        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))
 }
 
 async fn blob(
@@ -513,8 +562,20 @@ async fn blob(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let hash = parse_hash(&encoded)
-        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let hash = parse_path_hash(&encoded)?;
+    let root = Root::new(encoded, subdomain);
+    serve_root(&gateway, root, hash, query, method, headers).await
+}
+
+/// Serves the root of `hash`: a blob, or a listing if it is a collection.
+pub(crate) async fn serve_root(
+    gateway: &Gateway,
+    root: Root,
+    hash: Hash,
+    query: Option<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
     let download = has_flag(query.as_deref(), "download");
     // `?tree` states that the blob is a collection, which skips both the size
     // probe and the detection limits. `?download` wins, and asks for the bytes.
@@ -522,9 +583,8 @@ async fn blob(
         let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
             .await
             .map_err(HttpError::timeout)??;
-        let root = Root::new(encoded, subdomain);
         return collection_entry(
-            &gateway,
+            gateway,
             &root,
             collection,
             String::new(),
@@ -548,9 +608,8 @@ async fn blob(
         )
         .await
     {
-        let root = Root::new(encoded, subdomain);
         return collection_entry(
-            &gateway,
+            gateway,
             &root,
             collection,
             String::new(),
@@ -560,8 +619,18 @@ async fn blob(
         )
         .await;
     }
+    let encoded = z32::encode(hash.as_bytes());
     let download = download.then(|| encoded.clone());
-    serve_blob(source, hash, &encoded, download, method, headers).await
+    serve_blob(
+        source,
+        hash,
+        &encoded,
+        download,
+        root.caching,
+        method,
+        headers,
+    )
+    .await
 }
 
 async fn collection_root(
@@ -591,13 +660,25 @@ async fn collection_path(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let root = parse_hash(&encoded)
-        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
-    let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
+    let hash = parse_path_hash(&encoded)?;
+    let root = Root::new(encoded, subdomain);
+    serve_path(gateway, root, hash, path, query, method, headers).await
+}
+
+/// Serves `path` inside the collection rooted at `hash`.
+pub(crate) async fn serve_path(
+    gateway: Gateway,
+    root: Root,
+    hash: Hash,
+    path: String,
+    query: Option<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
         .await
         .map_err(HttpError::timeout)??;
     let path = path.strip_prefix('/').map(str::to_owned).unwrap_or(path);
-    let root = Root::new(encoded, subdomain);
     collection_entry(&gateway, &root, collection, path, query, method, headers).await
 }
 
@@ -615,10 +696,19 @@ async fn collection_entry(
         collection,
         connection,
     } = source;
-    let file = collection
-        .iter()
-        .find(|(name, _)| *name == path)
-        .map(|(_, hash)| *hash);
+    // A name can be both a file and the prefix of other names. List the
+    // directory then, with or without a trailing slash, so its entries stay
+    // reachable; the file keeps its own name only when nothing is below it.
+    let prefix = format!("{path}/");
+    let directory = collection.iter().any(|(name, _)| name.starts_with(&prefix));
+    let file = (!directory)
+        .then(|| {
+            collection
+                .iter()
+                .find(|(name, _)| *name == path)
+                .map(|(_, hash)| *hash)
+        })
+        .flatten();
     if let Some(hash) = file {
         let source = tokio::time::timeout(
             LOOKUP_TIMEOUT,
@@ -637,6 +727,7 @@ async fn collection_entry(
             hash,
             &z32::encode(hash.as_bytes()),
             download,
+            root.caching,
             method,
             headers,
         )
@@ -664,7 +755,7 @@ async fn collection_entry(
     };
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::CACHE_CONTROL, root.caching.header())
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::from(listing(root, &dir, &entries, sizes.as_ref())))
         .unwrap())
@@ -832,6 +923,7 @@ async fn serve_blob(
     hash: Hash,
     encoded: &str,
     download: Option<String>,
+    caching: Caching,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -840,7 +932,7 @@ async fn serve_blob(
         .header(header::CONTENT_TYPE, &source.mime)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ETAG, &etag)
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::CACHE_CONTROL, caching.header())
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     let builder = match &download {
         Some(filename) => builder.header(header::CONTENT_DISPOSITION, attachment(filename)),

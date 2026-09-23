@@ -2,15 +2,17 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use iroh::{Endpoint, endpoint::presets};
+use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
+use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
 use iroh_local_gateway::Gateway;
-use iroh_mainline_endpoint_discovery::{Directory, Resolver};
+use iroh_mainline_endpoint_discovery::{Directory, Resolver, SignedRecord, infohash_from_blake3};
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use reqwest::{Client, StatusCode};
 use simple_dns::{
     CLASS, Packet, ResourceRecord,
     rdata::{HTTPS, RData, SVCB},
 };
+use udp_address_records::{Limits, Server};
 
 async fn publish(dht: &Dht, key: &SigningKey, target: &str) {
     publish_ttl(dht, key, target, 0).await;
@@ -56,12 +58,49 @@ async fn run() {
     };
     let publisher = node();
     let gateway_dht = node();
-    // Pkarr only uses the DHT; no content tracker or provider is needed.
-    let directory = Directory::udp(gateway_dht.clone(), "127.0.0.1:9".parse().unwrap())
+    // A content-addressed target is served inline, so the gateway needs a
+    // tracker and a provider as well as the DHT.
+    let tracker = Server::new(Limits::for_tests());
+    let tracker_handle = tracker.attach(node()).await.unwrap();
+    let tracker_addr = std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::LOCALHOST,
+        tracker_handle.local_addr().port(),
+    );
+    let text = b"served through a Pkarr name\n".to_vec();
+    let store = MemStore::new();
+    let text_tag = store.blobs().add_bytes(text.clone()).await.unwrap();
+    let provider = Endpoint::builder(presets::Minimal)
+        .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let provider_router = Router::builder(provider.clone())
+        .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
+        .spawn();
+    let provider_dht = node();
+    Directory::udp(provider_dht.clone(), tracker_addr)
+        .await
+        .unwrap()
+        .publish(&SignedRecord::sign(provider.secret_key()))
+        .await
+        .unwrap();
+    provider_dht
+        .announce_peer(
+            infohash_from_blake3(&blake3::Hash::from_bytes(*text_tag.hash.as_bytes())).into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let directory = Directory::udp(gateway_dht.clone(), tracker_addr)
         .await
         .unwrap();
     let resolver = Resolver::bind(gateway_dht, directory).await.unwrap();
-    let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .address_lookup(MemoryLookup::from_endpoint_info([provider.addr()]))
+        .bind()
+        .await
+        .unwrap();
     let gateway = Gateway::new(endpoint.clone(), resolver);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listen_addr = listener.local_addr().unwrap();
@@ -120,16 +159,27 @@ async fn run() {
         "https://example.com/a/b?x=1"
     );
 
-    // A content-addressed hostname is returned unchanged, just like any domain.
-    let target = format!("{}.blake3.link", z32::encode(&[1; 32]));
+    // A content-addressed hostname is served here, not redirected to.
+    let target = format!("{}.blake3.link", z32::encode(text_tag.hash.as_bytes()));
     publish(&publisher, &key, &target).await;
-    let response = client.head(format!("{url}/file")).send().await.unwrap();
-    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(
-        response.headers()["location"],
-        format!("https://{target}/file")
-    );
-    assert!(response.bytes().await.unwrap().is_empty());
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // The key names content that changes, so the response must revalidate.
+    assert_eq!(response.headers()["cache-control"], "public, no-cache");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), text);
+    let response = origin_client
+        .get(format!(
+            "http://{encoded_key}.pkarr.localhost:{}/",
+            listen_addr.port()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), text);
+    // Content that the key does not name is still a miss.
+    let response = client.get(format!("{url}/missing")).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     publish(&publisher, &key, ".").await;
     assert_eq!(
@@ -190,4 +240,5 @@ async fn run() {
     shutdown.send(()).unwrap();
     task.await.unwrap();
     endpoint.close().await;
+    provider_router.shutdown().await.unwrap();
 }
