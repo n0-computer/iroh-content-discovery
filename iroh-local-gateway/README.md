@@ -4,7 +4,7 @@ A localhost HTTP gateway for content-addressed files, including video. This is
 workspace project four, adapted from the streaming approach in
 [`iroh-examples/iroh-gateway`](https://github.com/n0-computer/iroh-examples/tree/main/iroh-gateway).
 
-## Try it locally
+## Try the full workflow
 
 With the browser extension installed and enabled on port 8080:
 
@@ -12,16 +12,43 @@ With the browser extension installed and enabled on port 8080:
 cargo run -p iroh-local-gateway --example demo -- /path/to/video.mp4
 ```
 
-Open the printed `https://<z32>.blake3.link/` URL and leave the command running.
-This starts a local DHT testnet, tracker, file provider, and HTTP gateway in one
-process. The content still travels through real iroh connections and tracker
-discovery, but no public DHT or relay is needed. Files are imported into a
+Open the printed `https://<public-key>.pkarr.link/` URL and leave the command
+running. By default this uses the **public Mainline DHT**, discovers public
+address-index trackers, and starts the file provider, Pkarr publisher, and HTTP
+gateway in one process. The provider and gateway use normal iroh discovery and
+relays. The full browser flow is:
+
+```text
+https://<public-key>.pkarr.link/
+  -> http://127.0.0.1:8080/pkarr/<public-key>/
+  -> https://<hash>.blake3.link/
+  -> http://127.0.0.1:8080/blake3/<hash>
+```
+
+The gateway resolves the signed HTTPS record on Mainline and redirects;
+the extension intercepts both domains. The content then travels through real
+iroh connections and tracker discovery. Public mode needs working outbound UDP
+and an available address-index tracker. Pass `--tracker IP:PORT` (or set
+`IROH_ADDR_INDEX`) to select one explicitly if discovery fails. Startup can
+take a minute. The Pkarr packet is republished every ten minutes, and the blob
+provider must stay running. Files are imported into a
 temporary disk-backed store cleaned up on normal shutdown. The example may use
 additional disk space roughly equal to the file size.
 
 Omit the file argument for a quick text greeting. Use `--port 8081` if needed,
-and set the same port in the extension. The printed direct localhost URL also
-works without the extension. Ctrl-C stops the demo.
+and set the same port in the extension. The printed localhost blob URL also
+works without the extension; following the Pkarr route's redirect needs the
+extension to intercept `blake3.link`. Stop any other gateway on that port first.
+Ctrl-C stops the demo.
+
+For an isolated run without public DHT or relay services, opt in explicitly:
+
+```sh
+cargo run -p iroh-local-gateway --example demo -- --local-testnet
+```
+
+This starts a local DHT and tracker and uses in-memory iroh address discovery.
+Links from this mode work only through this demo's gateway.
 
 ## Standalone gateway
 
@@ -53,6 +80,57 @@ let path = format!("/blake3/{}", z32::encode(hash.as_bytes()));
 Only loopback HTTP listeners are accepted, including `127.0.0.1` and `::1`.
 There is no TLS configuration. The iroh connection to the content peer remains
 encrypted and authenticated.
+
+## Pkarr redirects
+
+Publish a test redirect and keep it alive with the included example:
+
+```sh
+cargo run -p iroh-local-gateway --example pkarr-publish -- example.com
+```
+
+Leave it running alongside your gateway. After publication succeeds, open the
+printed `https://<public-key>.pkarr.link/` URL with the extension enabled, or
+use the printed localhost URL directly. This publishes to the public Mainline
+DHT; the target is a hostname, without `https://` or a path. The example does
+not start the gateway. For a content-addressed target, replace `example.com`
+with `<hash>.blake3.link` and keep the content provider running too.
+
+By default each run generates a temporary identity. To reuse a public key:
+
+```sh
+cargo run -p iroh-local-gateway --example pkarr-publish -- example.com --key-file /tmp/pkarr-test.key
+```
+
+The example creates the file if missing (mode `0600` on Unix), or reads its
+32-byte secret key. Restart with the same key file and a different hostname to
+update the destination. Stop the old publisher before changing the target.
+It republishes every ten minutes, retries transient failures after thirty
+seconds, and exits on Ctrl-C or a sequence conflict. Stopping does not delete
+the record immediately; the DHT eventually expires it without republication.
+
+`/pkarr/<public-key>` and `/pkarr/<public-key>/path?query` resolve a Pkarr
+public key (canonical lowercase z-base-32) through the same Mainline node.
+The gateway retrieves the newest BEP44 item it observes. `n0-mainline` verifies
+the signature, and `simple-dns` decodes the value's apex `HTTPS` records; no
+`pkarr` client or additional DHT implementation is used. It selects the supported
+target with the lowest priority and redirects to `https://<target>/path?query`.
+Paths and queries retain their original percent encoding; the bare key uses `/`.
+Service-mode port parameters are supported. Targets must be conventional DNS
+hostnames; root targets, bare public keys, and records requiring mandatory SVCB
+parameters or no-default-alpn are not supported. A/AAAA records alone do not
+define a redirect target.
+
+Responses use `307 Temporary Redirect` and `Cache-Control: no-store`, so a new
+signed record can change the destination. Each request performs a DHT lookup,
+with a 60-second timeout. Invalid keys return `400`, missing packets `404`,
+packets without a supported HTTPS target `422`, invalid packets or failed
+lookups `502`, and lookup timeouts `504`.
+
+All target hostnames are treated alike, including `<hash>.blake3.link`. The
+browser extension can intercept that destination using its existing rules.
+This route can be used directly on localhost; the extension also routes
+`https://<public-key>.pkarr.link/path?query` here automatically.
 
 ## Discovery
 
