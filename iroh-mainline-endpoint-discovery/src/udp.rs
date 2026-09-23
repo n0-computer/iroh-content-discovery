@@ -40,12 +40,15 @@ pub enum UdpError {
     Closed {},
 }
 
+/// Builds the value to store from the public socket a server observed.
+pub type ValueFor = Box<dyn Fn(SocketAddrV4) -> Vec<u8> + Send>;
+
 enum ActorMsg {
     AddServer(SocketAddrV4),
     ReplaceServers(HashSet<SocketAddrV4>),
     RemoveServer(SocketAddrV4),
     Publish(
-        Vec<u8>,
+        ValueFor,
         oneshot::Sender<Result<Vec<SocketAddrV4>, UdpError>>,
     ),
     Resolve(
@@ -110,13 +113,20 @@ impl UdpClient {
             .map_err(|_| e!(UdpError::Closed))
     }
 
-    /// Obtain tokens and publish `value` to every responsive server.
+    /// Obtain tokens and publish a value to every responsive server.
+    ///
+    /// The value is built per server, from the public socket that server
+    /// observed, which is only known once it has answered. Servers behind
+    /// different paths can legitimately see different sockets.
     ///
     /// Returns the public IPv4 sockets under which servers stored the value.
-    pub async fn publish(&self, value: Vec<u8>) -> Result<Vec<SocketAddrV4>, UdpError> {
+    pub async fn publish(
+        &self,
+        value: impl Fn(SocketAddrV4) -> Vec<u8> + Send + 'static,
+    ) -> Result<Vec<SocketAddrV4>, UdpError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(ActorMsg::Publish(value, tx))
+            .send(ActorMsg::Publish(Box::new(value), tx))
             .await
             .map_err(|_| e!(UdpError::Closed))?;
         rx.await.map_err(|_| e!(UdpError::Closed))?
@@ -126,7 +136,7 @@ impl UdpClient {
     pub async fn publish_to(
         &self,
         server: SocketAddrV4,
-        value: Vec<u8>,
+        value: impl Fn(SocketAddrV4) -> Vec<u8> + Send + 'static,
     ) -> Result<Vec<SocketAddrV4>, UdpError> {
         self.add_server(server).await?;
         self.publish(value).await
@@ -161,7 +171,9 @@ pub struct ResolveResult {
 }
 
 struct PendingPublish {
-    value: Vec<u8>,
+    value: ValueFor,
+    /// Set when a built value did not fit, so the failure is not a timeout.
+    too_large: bool,
     awaiting: HashSet<SocketAddrV4>,
     /// Servers already sent a put, so a repeated or forged `Prepared` cannot
     /// make us send the value again.
@@ -246,10 +258,6 @@ impl Actor {
                 self.servers.remove(&addr);
             }
             ActorMsg::Publish(value, response) => {
-                if value.len() > MAX_VALUE_LEN {
-                    let _ = response.send(Err(e!(UdpError::TooLarge)));
-                    return;
-                }
                 if self.servers.is_empty() {
                     let _ = response.send(Err(e!(UdpError::NoServers)));
                     return;
@@ -269,6 +277,7 @@ impl Actor {
                         tx,
                         PendingPublish {
                             value,
+                            too_large: false,
                             awaiting: self.servers.clone(),
                             prepared: HashSet::new(),
                             stored: HashSet::new(),
@@ -325,11 +334,16 @@ impl Actor {
                 if !pending.awaiting.contains(&from) || !pending.prepared.insert(from) {
                     return;
                 }
-                let request = Request::V1(RequestV1::Put {
-                    tx,
-                    token,
-                    value: pending.value.clone(),
-                });
+                let value = (pending.value)(addr);
+                if value.len() > MAX_VALUE_LEN {
+                    pending.too_large = true;
+                    pending.awaiting.remove(&from);
+                    if pending.awaiting.is_empty() {
+                        self.finish_publish(tx);
+                    }
+                    return;
+                }
+                let request = Request::V1(RequestV1::Put { tx, token, value });
                 if let Some(bytes) = encode(request, buf)
                     && let Err(err) = self.dht.send_datagram(bytes.to_vec(), from).await
                 {
@@ -401,7 +415,11 @@ impl Actor {
             return;
         };
         let result = if pending.stored.is_empty() {
-            Err(e!(UdpError::Timeout))
+            if pending.too_large {
+                Err(e!(UdpError::TooLarge))
+            } else {
+                Err(e!(UdpError::Timeout))
+            }
         } else {
             let mut addrs: Vec<_> = pending.stored.into_iter().collect();
             addrs.sort();

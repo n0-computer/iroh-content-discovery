@@ -13,7 +13,7 @@ use n0_future::task::{self, AbortOnDropHandle};
 use n0_mainline::{Dht, Id};
 use tokio::sync::{Notify, watch};
 
-use crate::{AddrIndex, SignedRecord};
+use crate::AddrIndex;
 
 /// How often to renew Mainline announcements and address-index values.
 pub const REFRESH: Duration = Duration::from_secs(10 * 60);
@@ -165,8 +165,7 @@ impl State {
             return Ok(());
         }
 
-        let record = SignedRecord::sign(&self.secret);
-        let value_addrs = self.index.publish(&record).await?;
+        let value_addrs = self.index.publish(&self.secret).await?;
         let next_mapping = value_addrs
             .first()
             .copied()

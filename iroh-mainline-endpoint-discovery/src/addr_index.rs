@@ -8,6 +8,8 @@ use udp_addr_index_proto::RENDEZVOUS_INFOHASH;
 
 use n0_mainline::Dht;
 
+use iroh_base::SecretKey;
+
 use crate::{SignedRecord, UdpClient, UdpError};
 
 /// Initial index server discovery sources, tried in priority order.
@@ -199,19 +201,26 @@ impl AddrIndex {
         }
     }
 
-    /// Publish a signed endpoint record to all responsive servers.
+    /// Publish a record for `secret`'s endpoint to all responsive servers.
+    ///
+    /// Each server gets a record signed for the socket it observed, so a
+    /// reader can tell a record published here from one copied out of another
+    /// publisher's slot.
     ///
     /// Returns the public UDP sockets under which servers stored it.
-    pub async fn publish(
-        &self,
-        record: &SignedRecord,
-    ) -> Result<Vec<SocketAddrV4>, AddrIndexError> {
+    pub async fn publish(&self, secret: &SecretKey) -> Result<Vec<SocketAddrV4>, AddrIndexError> {
         self.refresh_replicas().await?;
-        let value = record.encode().map_err(|_| e!(AddrIndexError::Encoding))?;
-        self.client.publish(value).await.map_err(Into::into)
+        let secret = secret.clone();
+        self.client
+            .publish(move |addr| SignedRecord::sign(&secret, addr).encode())
+            .await
+            .map_err(Into::into)
     }
 
-    /// Lookup the endpoint that listed `addr`.
+    /// Lookup the endpoints that listed `addr`.
+    ///
+    /// Records that were not signed for `addr` are discarded, so a record
+    /// republished under another socket is not returned.
     pub async fn lookup(&self, addr: SocketAddrV4) -> Result<Vec<SignedRecord>, AddrIndexError> {
         self.refresh_replicas().await?;
         let result = self.client.resolve(addr).await?;
@@ -219,7 +228,7 @@ impl AddrIndex {
         let records: Vec<_> = result
             .values
             .into_iter()
-            .filter_map(|value| SignedRecord::decode(&value))
+            .filter_map(|value| SignedRecord::decode(&value, addr))
             .collect();
         tracing::debug!(%addr, received, valid = records.len(), "validated index server endpoint records");
         Ok(records)
@@ -242,9 +251,6 @@ pub enum AddrIndexError {
         #[error(from, source)]
         source: UdpError,
     },
-    /// The signed record could not be encoded.
-    #[error("could not encode signed endpoint record")]
-    Encoding {},
 }
 
 #[cfg(test)]

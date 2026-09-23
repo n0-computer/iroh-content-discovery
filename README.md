@@ -36,6 +36,12 @@ A resolver checks the signature, takes the endpoint ID, and dials it through
 iroh's normal discovery. The `host:port` in the DHT and the index is a
 rendezvous key, never an iroh address.
 
+The record is signed for the socket the server observed, and a reader discards
+a record it finds under any other socket. Reads are public, so anyone can copy
+a record; without that binding they could store it in their own slot, which the
+server accepts because they really do receive there, and every resolver would
+then return that endpoint as a provider for content it does not serve.
+
 `Resolver::resolve_stream` yields endpoint IDs as peer batches and index lookups
 complete, translating up to 16 peers at a time so one slow lookup cannot hold up
 the rest. An iroh-blobs downloader can start on the first provider while

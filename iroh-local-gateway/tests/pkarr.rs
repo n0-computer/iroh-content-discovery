@@ -5,9 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
 use iroh_local_gateway::Gateway;
-use iroh_mainline_endpoint_discovery::{
-    AddrIndex, BLAKE3_DOMAIN, Resolver, SignedRecord, infohash_from_blake3,
-};
+use iroh_mainline_endpoint_discovery::{AddrIndex, BLAKE3_DOMAIN, Resolver, infohash_from_blake3};
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use reqwest::{Client, StatusCode};
 use simple_dns::{
@@ -84,7 +82,7 @@ async fn run() {
     AddrIndex::udp(provider_dht.clone(), server_addr)
         .await
         .unwrap()
-        .publish(&SignedRecord::sign(provider.secret_key()))
+        .publish(provider.secret_key())
         .await
         .unwrap();
     provider_dht

@@ -8,7 +8,7 @@ use std::{
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
 use iroh_blobs::{BlobsProtocol, Hash, format::collection::Collection, store::mem::MemStore};
 use iroh_local_gateway::Gateway;
-use iroh_mainline_endpoint_discovery::{AddrIndex, Resolver, SignedRecord, infohash_from_blake3};
+use iroh_mainline_endpoint_discovery::{AddrIndex, Resolver, infohash_from_blake3};
 use n0_mainline::Dht;
 use reqwest::{Client, StatusCode};
 use udp_addr_index::{Limits, Server};
@@ -82,10 +82,7 @@ async fn run() {
     let index = AddrIndex::udp(publisher_dht.clone(), server_addr)
         .await
         .unwrap();
-    index
-        .publish(&SignedRecord::sign(provider.secret_key()))
-        .await
-        .unwrap();
+    index.publish(provider.secret_key()).await.unwrap();
     for hash in [
         video_tag.hash,
         text_tag.hash,
