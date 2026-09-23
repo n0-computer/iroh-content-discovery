@@ -399,20 +399,6 @@ fn has_flag(query: Option<&str>, name: &str) -> bool {
     })
 }
 
-/// Content type that a browser shows as text or downloads, but never renders.
-fn raw_mime(mime: &str) -> String {
-    let (base, params) = match mime.split_once(';') {
-        Some((base, params)) => (base, params),
-        None => (mime, ""),
-    };
-    if base.starts_with("text/") {
-        // Keep the charset so the text still decodes correctly.
-        format!("text/plain;{params}")
-    } else {
-        "application/octet-stream".to_string()
-    }
-}
-
 /// Returns a `Content-Disposition` value that saves the body as `filename`.
 ///
 /// Sends both the plain and the RFC 6266 extended form, since the plain one
@@ -456,10 +442,10 @@ async fn blob(
 ) -> Result<Response, HttpError> {
     let hash = parse_hash(&encoded)
         .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
-    let raw = has_flag(query.as_deref(), "raw");
+    let download = has_flag(query.as_deref(), "download");
     // `?tree` states that the blob is a collection, which skips both the size
-    // probe and the detection limits. `?raw` wins, and asks for the bytes.
-    if !raw && has_flag(query.as_deref(), "tree") {
+    // probe and the detection limits. `?download` wins, and asks for the bytes.
+    if !download && has_flag(query.as_deref(), "tree") {
         let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
             .await
             .map_err(HttpError::timeout)??;
@@ -478,8 +464,8 @@ async fn blob(
     let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
         .map_err(HttpError::timeout)??;
-    // `?raw` serves a collection root as the hash sequence it is.
-    if !raw
+    // `?download` saves a collection root as the hash sequence it is.
+    if !download
         && source.size >= 32
         && source.size.is_multiple_of(32)
         && source.size <= MAX_AUTO_COLLECTION_ROOT_BYTES
@@ -501,8 +487,8 @@ async fn blob(
         )
         .await;
     }
-    let download = has_flag(query.as_deref(), "download").then(|| encoded.clone());
-    serve_blob(source, hash, &encoded, raw, download, method, headers).await
+    let download = download.then(|| encoded.clone());
+    serve_blob(source, hash, &encoded, download, method, headers).await
 }
 
 async fn collection_root(
@@ -567,7 +553,6 @@ async fn collection_entry(
         )
         .await
         .map_err(HttpError::timeout)??;
-        let raw = has_flag(query.as_deref(), "raw");
         // Save under the file's own name, not the hash.
         let download = has_flag(query.as_deref(), "download").then(|| {
             path.rsplit_once('/')
@@ -578,7 +563,6 @@ async fn collection_entry(
             source,
             hash,
             &z32::encode(hash.as_bytes()),
-            raw,
             download,
             method,
             headers,
@@ -771,17 +755,13 @@ fn html_escape(value: &str) -> String {
 }
 
 async fn serve_blob(
-    mut source: Source,
+    source: Source,
     hash: Hash,
     encoded: &str,
-    raw: bool,
     download: Option<String>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    if raw {
-        source.mime = raw_mime(&source.mime);
-    }
     let etag = format!("\"{encoded}\"");
     let builder = Response::builder()
         .header(header::CONTENT_TYPE, &source.mime)

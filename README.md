@@ -183,11 +183,15 @@ serves `http://127.0.0.1:8080/blake3/<z32>`. It discovers one content peer throu
 Mainline and the tracker, then streams Bao-verified bytes with MIME detection
 and HTTP range support for video seeking. Collection roots automatically show
 a directory listing at `/blake3/<z32>`, and `/blake3/<z32>/path/to/file`
-streams a file from the same provider. `?tree` serves a known collection
-without detecting it, `?raw` serves a file's source or a root's raw bytes,
-`?download` saves a file under its collection name, and `?sizes` adds file
-sizes to a listing. The same content is served on
+streams a file from the same provider. The same content is served on
 `http://<z32>.localhost:8080/`, giving each hash its own browser origin.
+
+Query flags:
+
+- `?tree` serves a known collection without detecting it first.
+- `?download` saves a file under its collection name, or a root as its raw
+  bytes.
+- `?sizes` adds file sizes to a listing.
 
 ```sh
 cargo run -p iroh-local-gateway -- --tracker 127.0.0.1:11223

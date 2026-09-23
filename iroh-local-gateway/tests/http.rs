@@ -179,6 +179,20 @@ async fn run() {
         "attachment; filename=\"hello world.txt\"; filename*=UTF-8''hello%20world.txt"
     );
     assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    // On a collection root, `?download` saves the hash sequence itself.
+    let res = client
+        .get(format!("{collection_url}?download"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains(&collection_hash)
+    );
+    assert!(!res.text().await.unwrap().contains("<h1>"));
     let res = client
         .get(format!("{}?download", url(video_tag.hash)))
         .send()
@@ -209,28 +223,6 @@ async fn run() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    // `?raw` shows the source instead of rendering or downloading it.
-    let res = client
-        .get(format!("{collection_url}/site/index.html?raw"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.headers()["content-type"], "text/plain; charset=utf-8");
-    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
-    let res = client
-        .get(format!("{collection_url}/media/video.mp4?raw"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.headers()["content-type"], "application/octet-stream");
-    let res = client
-        .get(format!("{collection_url}?raw"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(res.headers()["content-type"], "application/octet-stream");
-    assert!(!res.text().await.unwrap().contains("<h1>"));
     let res = client
         .get(format!("{collection_url}/site/style.css"))
         .send()
