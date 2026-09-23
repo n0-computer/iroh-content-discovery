@@ -56,6 +56,32 @@ encrypted and authenticated.
 
 ## Pkarr redirects
 
+Publish a test redirect and keep it alive with the included example:
+
+```sh
+cargo run -p iroh-local-gateway --example pkarr-publish -- example.com
+```
+
+Leave it running alongside your gateway. After publication succeeds, open the
+printed `https://<public-key>.pkarr.link/` URL with the extension enabled, or
+use the printed localhost URL directly. This publishes to the public Mainline
+DHT; the target is a hostname, without `https://` or a path. The example does
+not start the gateway. For a content-addressed target, replace `example.com`
+with `<hash>.blake3.link` and keep the content provider running too.
+
+By default each run generates a temporary identity. To reuse a public key:
+
+```sh
+cargo run -p iroh-local-gateway --example pkarr-publish -- example.com --key-file /tmp/pkarr-test.key
+```
+
+The example creates the file if missing (mode `0600` on Unix), or reads its
+32-byte secret key. Restart with the same key file and a different hostname to
+update the destination. Stop the old publisher before changing the target.
+It republishes every ten minutes, retries transient failures after thirty
+seconds, and exits on Ctrl-C or a sequence conflict. Stopping does not delete
+the record immediately; the DHT eventually expires it without republication.
+
 `/pkarr/<public-key>` and `/pkarr/<public-key>/path?query` resolve a Pkarr
 public key (canonical lowercase z-base-32) through the same Mainline node.
 The gateway retrieves the newest BEP44 item it observes. `n0-mainline` verifies
