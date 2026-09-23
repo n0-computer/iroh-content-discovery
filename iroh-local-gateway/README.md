@@ -111,7 +111,8 @@ the record immediately; the DHT eventually expires it without republication.
 
 `/pkarr/<public-key>` and `/pkarr/<public-key>/path?query` resolve a Pkarr
 public key (canonical lowercase z-base-32) through the same Mainline node.
-The gateway retrieves the newest BEP44 item it observes. `n0-mainline` verifies
+On a cache miss, the gateway uses the first verified BEP44 item returned by
+Mainline; it does not wait for the full lookup to finish. `n0-mainline` verifies
 the signature, and `simple-dns` decodes the value's apex `HTTPS` records; no
 `pkarr` client or additional DHT implementation is used. It selects the supported
 target with the lowest priority and redirects to `https://<target>/path?query`.
@@ -122,8 +123,12 @@ parameters or no-default-alpn are not supported. A/AAAA records alone do not
 define a redirect target.
 
 Responses use `307 Temporary Redirect` and `Cache-Control: no-store`, so a new
-signed record can change the destination. Each request performs a DHT lookup,
-with a 60-second timeout. Invalid keys return `400`, missing packets `404`,
+signed record can change the destination. The gateway caches successful signed packets
+in memory by public key (up to 1024 entries), for the minimum answer TTL capped at
+30 seconds. Cache hits do not extend expiry; zero-TTL records and errors are not
+cached. Paths and queries are applied separately on each request. Cache misses
+perform a DHT lookup with a 60-second timeout. The first response can be an older
+signed version; this favors latency over searching for the newest available version. Invalid keys return `400`, missing packets `404`,
 packets without a supported HTTPS target `422`, invalid packets or failed
 lookups `502`, and lookup timeouts `504`.
 
@@ -135,9 +140,12 @@ This route can be used directly on localhost; the extension also routes
 ## Discovery
 
 The gateway computes `SHA-1(blake3_hash_bytes)`, queries Mainline for content
-providers, and resolves the first available signed endpoint record through the
-tracker. It connects to **one peer**, using normal iroh endpoint discovery,
-and streams the blob using the iroh-blobs protocol. The provider must have
+providers, and resolves signed endpoint records through the tracker. The optional
+`filter_verified_providers(endpoint, hash, stream)` stage validates each distinct
+candidate with an iroh-blobs size request backed by a Bao proof. The gateway uses
+this filter with three concurrent probes and a ten-second deadline per probe,
+skipping failed candidates. It reconnects to the first validated endpoint to
+stream the blob. The provider must have
 published its signed tracker record and announced the content infohash, as in
 the workspace's `Publisher` and blobs example.
 
@@ -199,7 +207,7 @@ provided the collection, so only the collection hash needs to be announced.
 `/tree/` on a blob that is not a collection returns `422`, and a path that is
 neither a file nor a directory returns `404`.
 
-Malformed hashes return `400`; no discovered provider returns `404`; failed
+Malformed hashes return `400`; no verified provider returns `404`; failed
 upstream operations return `502`; setup timeouts return `504`. Once HTTP headers
 have been sent, transfer failures terminate the body rather than changing its
 status. Discovery, connection establishment, and MIME/size probing share a
@@ -207,8 +215,9 @@ status. Discovery, connection establishment, and MIME/size probing share a
 
 A bounded 128-entry cache reuses peer connections and MIME/size metadata for
 successive video seeks. A second bounded cache retains collection manifests
-and their provider connections. This version does not try alternate peers or
-perform parallel downloads.
+and their provider connections. After selecting a validated provider, this
+version does not retry a failed transfer with another peer or perform parallel
+downloads.
 
 ## Tests
 
@@ -220,3 +229,21 @@ The integration test uses a local Mainline testnet, a real tracker, an iroh-blob
 provider, and a TCP HTTP listener. It checks full streaming, video MIME detection,
 byte-exact unaligned ranges, suffixes, multipart responses, HEAD, conditional requests, empty blobs,
 invalid/missing content, and CORS without relying on public DHT or relay services.
+
+## Debugging
+
+Both the gateway and the demo honor `RUST_LOG`. To trace the full lookup and
+transfer path while keeping dependency logs quiet:
+
+```sh
+RUST_LOG=info,iroh_local_gateway=debug,iroh_mainline_endpoint_discovery=debug,demo=debug \
+  cargo run -p iroh-local-gateway --example demo -- --port 8081
+```
+
+Set the extension's port to the same value. Use the same `RUST_LOG` filter with
+`cargo run -p iroh-local-gateway -- ...` for a standalone gateway.
+Debug output includes request paths and response status/timing, Pkarr packet
+sequences and redirect destinations, tracker addresses and lookup results,
+selected endpoint IDs, connection timing/errors, cache hits, blob metadata,
+and body transfer completion/errors. It does not log secret keys or blob data.
+Add `iroh=debug` to investigate address discovery and transport internals.

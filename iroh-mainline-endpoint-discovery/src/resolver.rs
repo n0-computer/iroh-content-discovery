@@ -42,6 +42,7 @@ impl Resolver {
     /// Dropping the stream cancels its pending lookups. The caller should
     /// impose a deadline.
     pub async fn resolve_stream(&self, infohash: Id) -> Result<stream::Boxed<EndpointId>> {
+        tracing::debug!(%infohash, "starting Mainline provider stream");
         let mut peers = self.dht.get_peers(infohash).await.context("get_peers")?;
         let directory = self.dir.clone();
         let stream = async_stream::stream! {
@@ -61,13 +62,17 @@ impl Resolver {
                 let poll_lookups = !lookups.is_empty();
                 tokio::select! {
                     batch = peers.next(), if poll_peers => match batch {
-                        Some(batch) => pending_peers.extend(batch),
+                        Some(batch) => {
+                            tracing::debug!(%infohash, count = batch.len(), "Mainline peers received");
+                            pending_peers.extend(batch);
+                        },
                         None => peers_done = true,
                     },
                     result = lookups.next(), if poll_lookups => {
                         if let Some((peer, result)) = result {
                             match result {
                                 Ok(records) => for record in records {
+                                    tracing::debug!(%infohash, %peer, endpoint = %record.eid, "discovered content provider");
                                     yield record.eid;
                                 },
                                 Err(err) => tracing::debug!(%peer, %err, "directory resolve"),
@@ -105,27 +110,46 @@ impl Resolver {
     ///
     /// Directory lookups are sequential and duplicate sockets are skipped.
     /// The caller should impose a deadline on this network operation.
+    #[tracing::instrument(level = "debug", skip(self), fields(infohash = %infohash))]
     pub async fn resolve_one(&self, infohash: Id) -> Result<Option<EndpointId>> {
+        let started = std::time::Instant::now();
+        tracing::debug!("starting Mainline get_peers");
         let mut stream = self.dht.get_peers(infohash).await.context("get_peers")?;
         let mut peers = HashSet::new();
         let mut last_error = None;
         let mut any_ok = false;
         while let Some(batch) = stream.next().await {
+            tracing::debug!(
+                count = batch.len(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "Mainline peers received"
+            );
             for peer in batch {
                 if !peers.insert(peer) {
                     continue;
                 }
+                tracing::debug!(%peer, "looking up signed endpoint in tracker");
                 match self.dir.lookup(peer).await {
                     Ok(records) => {
+                        tracing::debug!(%peer, count = records.len(), "tracker endpoint records received");
                         any_ok = true;
                         if let Some(record) = records.into_iter().next() {
+                            tracing::debug!(%peer, endpoint = %record.eid, elapsed_ms = started.elapsed().as_millis(), "selected content provider");
                             return Ok(Some(record.eid));
                         }
                     }
-                    Err(error) => last_error = Some(error),
+                    Err(error) => {
+                        tracing::debug!(%peer, ?error, "tracker endpoint lookup failed");
+                        last_error = Some(error);
+                    }
                 }
             }
         }
+        tracing::debug!(
+            peers = peers.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "Mainline lookup exhausted without a provider"
+        );
         if !any_ok && let Some(error) = last_error {
             return Err(error.into());
         }

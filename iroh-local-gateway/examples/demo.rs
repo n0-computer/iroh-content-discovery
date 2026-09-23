@@ -40,6 +40,12 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     // Bind first so an occupied port fails before importing a potentially large file.
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, args.port)).await?;
     let http_addr = listener.local_addr()?;
@@ -105,6 +111,7 @@ async fn main() -> Result<()> {
     let router = Router::builder(provider.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
+    tracing::debug!(endpoint = %provider.id(), %hash, "demo blob provider started");
     let publisher = Publisher::new(
         provider.secret_key().clone(),
         provider_dht.clone(),
@@ -152,6 +159,7 @@ async fn main() -> Result<()> {
             provider_dht.put_mutable(item.clone(), None),
         )
         .await??;
+        tracing::debug!(%public_key, %target, sequence = item.seq(), "demo Pkarr record published");
         println!("\nExtension port: {}", http_addr.port());
         println!("Open:         https://{public_key}.pkarr.link/");
         println!("Redirects to: https://{encoded}.blake3.link/");
