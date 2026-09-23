@@ -50,6 +50,9 @@ async fn main() -> Result<()> {
         )
         .init();
     let cli = Cli::parse();
+    // Read or make the Pkarr key first, so a generated secret is the first
+    // thing printed and cannot scroll away behind the hashes.
+    let pkarr_key = (!cli.no_pkarr).then(pkarr_key).transpose()?;
 
     let root = std::fs::canonicalize(&cli.path).std_context("invalid path")?;
     let files = collect_files(&root)?;
@@ -115,16 +118,15 @@ async fn main() -> Result<()> {
     println!("https://{collection}.blake3.link/");
     println!("http://{collection}.blake3.localhost:8080/");
 
-    let pkarr = if cli.no_pkarr {
-        None
-    } else {
-        let key = pkarr_key()?;
-        let public = z32::encode(key.verifying_key().as_bytes());
-        // The name outlives this run; the hash it points at does not.
-        println!("https://{public}.pkarr.link/");
-        println!("http://{public}.pkarr.localhost:8080/");
-        Some(pkarr_item(&key, &collection)?)
-    };
+    let pkarr = pkarr_key
+        .map(|key| {
+            let public = z32::encode(key.verifying_key().as_bytes());
+            // The name outlives this run; the hash it points at does not.
+            println!("https://{public}.pkarr.link/");
+            println!("http://{public}.pkarr.localhost:8080/");
+            pkarr_item(&key, &collection)
+        })
+        .transpose()?;
 
     let announced = async {
         publisher.wait_published().await;
