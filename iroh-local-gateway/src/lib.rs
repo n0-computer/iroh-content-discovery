@@ -73,6 +73,7 @@ struct Inner {
     endpoint: Endpoint,
     resolver: Resolver,
     classifier: MimeClassifier,
+    pkarr: Mutex<pkarr_redirect::Cache>,
     // Reuse one peer for repeated video seeks, with bounded metadata memory.
     cache: Mutex<LruCache<Hash, Source>>,
     collections: Mutex<LruCache<Hash, CollectionSource>>,
@@ -99,6 +100,7 @@ impl Gateway {
             endpoint,
             resolver,
             classifier: MimeClassifier::new(),
+            pkarr: Mutex::new(pkarr_redirect::Cache::default()),
             cache: Mutex::new(LruCache::new(128.try_into().unwrap())),
             collections: Mutex::new(LruCache::new(128.try_into().unwrap())),
             sizes: Mutex::new(LruCache::new(4096.try_into().unwrap())),

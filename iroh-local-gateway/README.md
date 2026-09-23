@@ -111,7 +111,8 @@ the record immediately; the DHT eventually expires it without republication.
 
 `/pkarr/<public-key>` and `/pkarr/<public-key>/path?query` resolve a Pkarr
 public key (canonical lowercase z-base-32) through the same Mainline node.
-The gateway retrieves the newest BEP44 item it observes. `n0-mainline` verifies
+On a cache miss, the gateway uses the first verified BEP44 item returned by
+Mainline; it does not wait for the full lookup to finish. `n0-mainline` verifies
 the signature, and `simple-dns` decodes the value's apex `HTTPS` records; no
 `pkarr` client or additional DHT implementation is used. It selects the supported
 target with the lowest priority and redirects to `https://<target>/path?query`.
@@ -122,8 +123,12 @@ parameters or no-default-alpn are not supported. A/AAAA records alone do not
 define a redirect target.
 
 Responses use `307 Temporary Redirect` and `Cache-Control: no-store`, so a new
-signed record can change the destination. Each request performs a DHT lookup,
-with a 60-second timeout. Invalid keys return `400`, missing packets `404`,
+signed record can change the destination. The gateway caches successful signed packets
+in memory by public key (up to 1024 entries), for the minimum answer TTL capped at
+30 seconds. Cache hits do not extend expiry; zero-TTL records and errors are not
+cached. Paths and queries are applied separately on each request. Cache misses
+perform a DHT lookup with a 60-second timeout. The first response can be an older
+signed version; this favors latency over searching for the newest available version. Invalid keys return `400`, missing packets `404`,
 packets without a supported HTTPS target `422`, invalid packets or failed
 lookups `502`, and lookup timeouts `504`.
 
