@@ -42,7 +42,7 @@ export function makeRules(settings) {
       redirect: { regexSubstitution: `http://\\1.${origin}:${port}/\\2` },
     },
     condition: {
-      regexFilter: `^https?://([a-z0-9]+)\\.${name.replace(".", "\\.")}(?::[0-9]+)?/(.*)$`,
+      regexFilter: `^https?://([a-z0-9]{52})\\.${name.replace(".", "\\.")}(?::[0-9]+)?/(.*)$`,
       isUrlFilterCaseSensitive: true,
       resourceTypes,
     },
