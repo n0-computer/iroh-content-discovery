@@ -1,31 +1,37 @@
 //! Pkarr redirects over a local DHT and a real HTTP listener.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iroh::{Endpoint, endpoint::presets};
 use iroh_local_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{Directory, Resolver};
-use n0_mainline::{Dht, MutableItem};
-use pkarr::{Keypair, SignedPacket, dns::rdata::SVCB};
+use n0_mainline::{Dht, MutableItem, SigningKey};
 use reqwest::{Client, StatusCode};
+use simple_dns::{
+    CLASS, Packet, ResourceRecord,
+    rdata::{HTTPS, RData, SVCB},
+};
 
-async fn publish(dht: &Dht, key: &Keypair, target: &str) {
-    let packet = SignedPacket::builder()
-        .https(
-            ".".try_into().unwrap(),
-            SVCB::new(0, target.try_into().unwrap()),
-            60,
-        )
-        .sign(key)
+async fn publish(dht: &Dht, key: &SigningKey, target: &str) {
+    let name = z32::encode(key.verifying_key().as_bytes());
+    let mut packet = Packet::new_reply(0);
+    packet.answers.push(ResourceRecord::new(
+        name.as_str().try_into().unwrap(),
+        CLASS::IN,
+        60,
+        RData::HTTPS(HTTPS(SVCB::new(0, target.try_into().unwrap()))),
+    ));
+    publish_bytes(dht, key, &packet.build_bytes_vec_compressed().unwrap()).await;
+}
+
+async fn publish_bytes(dht: &Dht, key: &SigningKey, bytes: &[u8]) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    dht.put_mutable(MutableItem::new(key, bytes, timestamp, None), None)
+        .await
         .unwrap();
-    let item = MutableItem::new_signed_unchecked(
-        *key.public_key().as_bytes(),
-        packet.signature().to_bytes(),
-        &packet.encoded_packet(),
-        packet.timestamp().as_u64() as i64,
-        None,
-    );
-    dht.put_mutable(item, None).await.unwrap();
 }
 
 #[tokio::test]
@@ -68,8 +74,8 @@ async fn run() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
-    let key = Keypair::from_secret_key(&[42; 32]);
-    let url = format!("{base}/{}", key.public_key().to_z32());
+    let key = SigningKey::from_bytes(&[42; 32]);
+    let url = format!("{base}/{}", z32::encode(key.verifying_key().as_bytes()));
     publish(&publisher, &key, "example.com").await;
     for (suffix, path) in [
         ("", "/"),
@@ -113,15 +119,25 @@ async fn run() {
             .status(),
         StatusCode::BAD_REQUEST
     );
-    let missing = Keypair::from_secret_key(&[43; 32]);
+    let missing = SigningKey::from_bytes(&[43; 32]);
     assert_eq!(
         client
-            .get(format!("{base}/{}", missing.public_key().to_z32()))
+            .get(format!(
+                "{base}/{}",
+                z32::encode(missing.verifying_key().as_bytes())
+            ))
             .send()
             .await
             .unwrap()
             .status(),
         StatusCode::NOT_FOUND
+    );
+
+    // A valid BEP44 signature does not imply valid DNS data.
+    publish_bytes(&publisher, &key, b"not a DNS packet").await;
+    assert_eq!(
+        client.get(&url).send().await.unwrap().status(),
+        StatusCode::BAD_GATEWAY
     );
 
     shutdown.send(()).unwrap();

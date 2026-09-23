@@ -58,8 +58,9 @@ encrypted and authenticated.
 
 `/pkarr/<public-key>` and `/pkarr/<public-key>/path?query` resolve a Pkarr
 public key (canonical lowercase z-base-32) through the same Mainline node.
-The gateway retrieves the newest BEP44 item it observes, verifies its signature,
-and reads the signed DNS packet's apex `HTTPS` records. It selects the supported
+The gateway retrieves the newest BEP44 item it observes. `n0-mainline` verifies
+the signature, and `simple-dns` decodes the value's apex `HTTPS` records; no
+`pkarr` client or additional DHT implementation is used. It selects the supported
 target with the lowest priority and redirects to `https://<target>/path?query`.
 Paths and queries retain their original percent encoding; the bare key uses `/`.
 Service-mode port parameters are supported. Targets must be conventional DNS
