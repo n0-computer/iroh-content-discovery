@@ -1,5 +1,5 @@
 export const DEFAULT_SETTINGS = { port: 8080, enabled: true };
-export const RULE_IDS = [1, 2];
+export const RULE_IDS = [1, 2, 3];
 
 export function validateSettings(settings) {
   if (!Number.isInteger(settings.port) || settings.port < 1 || settings.port > 65535) {
@@ -39,6 +39,18 @@ export function makeRules(settings) {
     },
     condition: {
       regexFilter: "^https?://([a-z0-9]+)\\.blake3\\.link(?::[0-9]+)?/([^?#].*)$",
+      isUrlFilterCaseSensitive: true,
+      resourceTypes,
+    },
+  }, {
+    id: 3,
+    priority: 1,
+    action: {
+      type: "redirect",
+      redirect: { regexSubstitution: `http://127.0.0.1:${port}/pkarr/\\1/\\2` },
+    },
+    condition: {
+      regexFilter: "^https?://([a-z0-9]+)\\.pkarr\\.link(?::[0-9]+)?/(.*)$",
       isUrlFilterCaseSensitive: true,
       resourceTypes,
     },

@@ -25,6 +25,11 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    /// The shared Mainline node used for lookups.
+    pub fn dht(&self) -> &Dht {
+        &self.dht
+    }
+
     /// Use the supplied shared Mainline node and address-index directory.
     pub async fn bind(dht: Dht, dir: Directory) -> Result<Self> {
         Ok(Self { dht, dir })

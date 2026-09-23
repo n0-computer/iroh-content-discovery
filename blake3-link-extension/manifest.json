@@ -1,15 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "blake3.link Local Gateway",
-  "version": "0.1.0",
-  "description": "Open blake3.link content through your local iroh HTTP gateway.",
+  "name": "blake3.link and pkarr.link Local Gateway",
+  "version": "0.2.0",
+  "description": "Open blake3.link content and resolve pkarr.link names through your local iroh HTTP gateway.",
   "permissions": [
     "declarativeNetRequestWithHostAccess",
     "storage"
   ],
   "host_permissions": [
     "http://*.blake3.link/*",
-    "https://*.blake3.link/*"
+    "https://*.blake3.link/*",
+    "http://*.pkarr.link/*",
+    "https://*.pkarr.link/*"
   ],
   "background": {
     "service_worker": "background.js",

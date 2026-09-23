@@ -37,6 +37,7 @@ use n0_future::{BufferedStreamExt, StreamExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
 
+mod pkarr_redirect;
 mod ranges;
 use ranges::Selection;
 
@@ -107,8 +108,12 @@ impl Gateway {
     /// HTTP routes for blobs and paths inside collections, plus CORS preflight.
     ///
     /// `/tree/{hash}` also browses collection directories, with optional `?sizes`.
+    /// `/pkarr/{key}` resolves a signed HTTPS target and temporarily redirects.
     pub fn router(&self) -> Router {
         Router::new()
+            .route("/pkarr/{key}", get(pkarr_redirect::redirect))
+            .route("/pkarr/{key}/", get(pkarr_redirect::redirect))
+            .route("/pkarr/{key}/{*path}", get(pkarr_redirect::redirect))
             .route("/blake3/{hash}", get(blob))
             .route("/blake3/{hash}/{*path}", get(collection_path))
             .route("/tree/{hash}", get(tree_root))

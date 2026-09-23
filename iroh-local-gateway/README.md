@@ -54,6 +54,30 @@ Only loopback HTTP listeners are accepted, including `127.0.0.1` and `::1`.
 There is no TLS configuration. The iroh connection to the content peer remains
 encrypted and authenticated.
 
+## Pkarr redirects
+
+`/pkarr/<public-key>` and `/pkarr/<public-key>/path?query` resolve a Pkarr
+public key (canonical lowercase z-base-32) through the same Mainline node.
+The gateway retrieves the newest BEP44 item it observes, verifies its signature,
+and reads the signed DNS packet's apex `HTTPS` records. It selects the supported
+target with the lowest priority and redirects to `https://<target>/path?query`.
+Paths and queries retain their original percent encoding; the bare key uses `/`.
+Service-mode port parameters are supported. Targets must be conventional DNS
+hostnames; root targets, bare public keys, and records requiring mandatory SVCB
+parameters or no-default-alpn are not supported. A/AAAA records alone do not
+define a redirect target.
+
+Responses use `307 Temporary Redirect` and `Cache-Control: no-store`, so a new
+signed record can change the destination. Each request performs a DHT lookup,
+with a 60-second timeout. Invalid keys return `400`, missing packets `404`,
+packets without a supported HTTPS target `422`, invalid packets or failed
+lookups `502`, and lookup timeouts `504`.
+
+All target hostnames are treated alike, including `<hash>.blake3.link`. The
+browser extension can intercept that destination using its existing rules.
+This route can be used directly on localhost; the extension also routes
+`https://<public-key>.pkarr.link/path?query` here automatically.
+
 ## Discovery
 
 The gateway computes `SHA-1(blake3_hash_bytes)`, queries Mainline for content

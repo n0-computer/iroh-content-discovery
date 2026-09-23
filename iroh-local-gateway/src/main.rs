@@ -11,7 +11,7 @@ use n0_mainline::Dht;
 use udp_address_records_proto::RENDEZVOUS_INFOHASH;
 
 #[derive(Parser)]
-#[command(about = "Stream discovered blobs over localhost HTTP at /blake3/<z32>")]
+#[command(about = "Serve local content at /blake3/<z32> and Pkarr redirects at /pkarr/<key>")]
 struct Args {
     /// Loopback HTTP listen address (plaintext).
     #[arg(long, default_value = "127.0.0.1:8080")]
@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
     let gateway = Gateway::new(endpoint.clone(), resolver);
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     println!("http://{}/blake3/<z32>", listener.local_addr()?);
+    println!("http://{}/pkarr/<key>", listener.local_addr()?);
     let result = gateway
         .serve(listener, async {
             let _ = tokio::signal::ctrl_c().await;
