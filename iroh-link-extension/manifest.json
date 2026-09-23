@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "blake3.link and pkarr.link Local Gateway",
+  "name": "iroh link",
   "version": "0.2.0",
   "description": "Open blake3.link content and resolve pkarr.link names through your local iroh HTTP gateway.",
   "permissions": [
@@ -21,7 +21,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Local gateway",
+    "default_title": "iroh link",
     "default_popup": "popup.html"
   },
   "browser_specific_settings": {

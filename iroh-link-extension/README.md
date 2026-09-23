@@ -1,4 +1,4 @@
-# blake3.link and pkarr.link Local Gateway extension
+# iroh link extension
 
 Workspace project five: a Manifest V3 extension for desktop Chrome, Brave, and
 Firefox.
@@ -33,7 +33,7 @@ The gateway validates public keys. Both domains use the same port and enable swi
 
 1. Open `chrome://extensions` in Chrome or `brave://extensions` in Brave.
 2. Enable **Developer mode**.
-3. Click **Load unpacked**, then choose this `blake3-link-extension` directory
+3. Click **Load unpacked**, then choose this `iroh-link-extension` directory
    (the directory containing `manifest.json`). No build step is required.
 4. Open the extension popup, set the gateway port (default **8080**), leave
    local redirects enabled, and click **Save**.
@@ -80,13 +80,13 @@ or store credentials are needed.
 From the repository root:
 
 ```sh
-npm --prefix blake3-link-extension run package
+npm --prefix iroh-link-extension run package
 # Or build just one browser package:
-npm --prefix blake3-link-extension run package:chrome
-npm --prefix blake3-link-extension run package:firefox
+npm --prefix iroh-link-extension run package:chrome
+npm --prefix iroh-link-extension run package:firefox
 ```
 
-Artifacts are written to `blake3-link-extension/dist/`:
+Artifacts are written to `iroh-link-extension/dist/`:
 
 - `iroh-link-<version>-chrome.zip` for Chrome/Brave, with a service worker and
   no Firefox-specific manifest fields.
@@ -121,7 +121,7 @@ websites. The local gateway must be running; the extension does not start it.
 ## Tests
 
 ```sh
-node --test blake3-link-extension/rules.test.js
+node --test iroh-link-extension/rules.test.js
 ```
 
 The tests check hash- and public-key-subdomain routing, path/query preservation, lookalike-host
