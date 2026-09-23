@@ -51,7 +51,12 @@ async fn run() {
         .add_bytes(b"only in collection".to_vec())
         .await
         .unwrap();
+    let markdown = "# Uebersicht\n\nnaive cafe, gru\u{00df}e, \u{2713}\n"
+        .as_bytes()
+        .to_vec();
+    let markdown_tag = store.blobs().add_bytes(markdown.clone()).await.unwrap();
     let collection = Collection::from_iter([
+        ("notes/readme.md", markdown_tag.hash),
         ("notes/hello world.txt", text_tag.hash),
         ("notes/deep/more.txt", text_tag.hash),
         ("video.mp4", video_tag.hash),
@@ -103,7 +108,8 @@ async fn run() {
     let resolver = Resolver::bind(gateway_dht, directory).await.unwrap();
     let gateway = Gateway::new(client_endpoint.clone(), resolver);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
+    let listen_addr = listener.local_addr().unwrap();
+    let base = format!("http://{listen_addr}");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         gateway
@@ -126,9 +132,17 @@ async fn run() {
     let res = client.get(&collection_url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let index = res.text().await.unwrap();
+    assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/site/\"")));
+    assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/media/\"")));
+    let res = client
+        .get(format!("{collection_url}/site/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let index = res.text().await.unwrap();
     assert!(index.contains(&format!("/blake3/{collection_hash}/site/index.html")));
-    assert!(index.contains("media/video.mp4"));
-    assert!(index.contains("site/&lt;unsafe&gt;.txt"));
+    assert!(index.contains("&lt;unsafe&gt;.txt"));
     assert!(index.contains("site/%3Cunsafe%3E.txt"));
     let res = client.head(&collection_url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -144,11 +158,77 @@ async fn run() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.bytes().await.unwrap().as_ref(), text);
     let res = client
+        .get(format!("{collection_url}/notes/readme.md"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.headers()["content-type"],
+        "text/markdown; charset=utf-8"
+    );
+    assert_eq!(res.bytes().await.unwrap().as_ref(), markdown);
+    // `?download` saves the file under its collection name.
+    let res = client
+        .get(format!("{collection_url}/notes/hello%20world.txt?download"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()["content-disposition"],
+        "attachment; filename=\"hello world.txt\"; filename*=UTF-8''hello%20world.txt"
+    );
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    // On a collection root, `?download` saves the hash sequence itself.
+    let res = client
+        .get(format!("{collection_url}?download"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains(&collection_hash)
+    );
+    assert!(!res.text().await.unwrap().contains("<h1>"));
+    let res = client
+        .get(format!("{}?download", url(video_tag.hash)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.headers()["content-disposition"],
+        format!(
+            "attachment; filename=\"{0}\"; filename*=UTF-8''{0}",
+            z32::encode(video_tag.hash.as_bytes())
+        )
+    );
+    // `?tree` states that the root is a collection, without detecting it.
+    let res = client
+        .get(format!("{collection_url}?tree"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!("href=\"/blake3/{collection_hash}/site/\"")));
+    let res = client
+        .get(format!(
+            "{base}/blake3/{}?tree",
+            z32::encode(text_tag.hash.as_bytes())
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let res = client
         .get(format!("{collection_url}/site/style.css"))
         .send()
         .await
         .unwrap();
-    assert_eq!(res.headers()["content-type"], "text/css");
+    assert_eq!(res.headers()["content-type"], "text/css; charset=utf-8");
     assert_eq!(res.bytes().await.unwrap().as_ref(), text);
     let res = client
         .get(format!("{collection_url}/site/%3Cunsafe%3E.txt"))
@@ -342,7 +422,7 @@ async fn run() {
     assert!(res.status().is_success());
     assert_eq!(res.headers()["access-control-allow-origin"], "*");
 
-    let tree = format!("/tree/{}", z32::encode(collection_tag.hash().as_bytes()));
+    let tree = format!("/blake3/{collection_hash}");
     let collection_url = format!("{base}{tree}");
     for top in [collection_url.clone(), format!("{collection_url}/")] {
         let res = client.get(&top).send().await.unwrap();
@@ -354,7 +434,7 @@ async fn run() {
         assert!(!html.contains("hello"));
         assert!(html.contains("iroh-content-discovery\">iroh content discovery</a>"));
         assert!(html.contains("<a href=\"?sizes\">Fetch sizes</a>"));
-        assert!(html.contains(&format!("<h1>{}{SEP}</h1>", &tree[6..])));
+        assert!(html.contains(&format!("<h1>{}{SEP}</h1>", collection_hash)));
     }
     let res = client
         .get(format!("{collection_url}?sizes"))
@@ -378,7 +458,7 @@ async fn run() {
     assert!(html.contains(&format!("href=\"{tree}/?sizes\">../")));
     assert!(html.contains(&format!(
         "<h1><a href=\"{tree}/?sizes\">{}</a>{SEP}notes{SEP}</h1>",
-        &tree[6..]
+        collection_hash
     )));
     assert!(html.contains(&format!("<td class=\"size\">{} B</td>", text.len())));
     let res = client
@@ -389,7 +469,7 @@ async fn run() {
     let html = res.text().await.unwrap();
     assert!(html.contains(&format!(
         "<h1><a href=\"{tree}/\">{}</a>{SEP}<a href=\"{tree}/notes/\">notes</a>{SEP}deep{SEP}</h1>",
-        &tree[6..]
+        collection_hash
     )));
     assert!(html.contains("more.txt"));
     let res = client
@@ -401,6 +481,9 @@ async fn run() {
     let html = res.text().await.unwrap();
     assert!(html.contains(&format!("href=\"{tree}/\">../")));
     assert!(html.contains(&format!("href=\"{tree}/notes/hello%20world.txt\"")));
+    assert!(html.contains(&format!(
+        "href=\"{tree}/notes/hello%20world.txt?download\">Download</a>"
+    )));
     assert!(!html.contains("video.mp4"));
     let res = client
         .get(format!("{collection_url}/notes/hello%20world.txt"))
@@ -426,13 +509,72 @@ async fn run() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let res = client
         .get(format!(
-            "{base}/tree/{}",
+            "{base}/blake3/{}/",
             z32::encode(text_tag.hash.as_bytes())
         ))
         .send()
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // `{z32}.blake3.localhost` serves the same content with its own origin.
+    let video_hash = z32::encode(video_tag.hash.as_bytes());
+    let subdomain = |hash: &str| format!("{hash}.blake3.localhost");
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(15))
+        .resolve(&subdomain(&collection_hash), listen_addr)
+        .resolve(&subdomain(&video_hash), listen_addr)
+        .resolve("other.localhost", listen_addr)
+        .build()
+        .unwrap();
+    let origin = |hash: &str| format!("http://{}:{}", subdomain(hash), listen_addr.port());
+    let site = origin(&collection_hash);
+    let res = client.get(format!("{site}/")).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = res.text().await.unwrap();
+    assert!(html.contains("href=\"/site/\""));
+    assert!(html.contains("href=\"/video.mp4\""));
+    assert!(!html.contains("/blake3/"));
+    let res = client
+        .get(format!("{site}/notes/?sizes"))
+        .send()
+        .await
+        .unwrap();
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!(
+        "<h1><a href=\"/?sizes\">{collection_hash}</a>{SEP}notes{SEP}</h1>"
+    )));
+    assert!(html.contains("href=\"/notes/hello%20world.txt\""));
+    assert!(html.contains(&format!("<td class=\"size\">{} B</td>", text.len())));
+    let res = client
+        .get(format!("{site}/site/style.css"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["content-type"], "text/css; charset=utf-8");
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = client
+        .get(format!("{site}/missing.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = client
+        .get(format!("{}/", origin(&video_hash)))
+        .header("range", "bytes=0-9")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), &video[..10]);
+    // Other hosts are not rewritten.
+    let res = client
+        .get(format!("http://other.localhost:{}/", listen_addr.port()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
     shutdown_tx.send(()).unwrap();
     task.await.unwrap();

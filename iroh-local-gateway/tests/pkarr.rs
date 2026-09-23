@@ -64,7 +64,8 @@ async fn run() {
     let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
     let gateway = Gateway::new(endpoint.clone(), resolver);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}/pkarr", listener.local_addr().unwrap());
+    let listen_addr = listener.local_addr().unwrap();
+    let base = format!("http://{listen_addr}/pkarr");
     let (shutdown, stopped) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         gateway
@@ -98,6 +99,27 @@ async fn run() {
         );
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
+    // The per-key origin resolves the same record as the path route.
+    let encoded_key = z32::encode(key.verifying_key().as_bytes());
+    let origin_client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(&format!("{encoded_key}.pkarr.localhost"), listen_addr)
+        .build()
+        .unwrap();
+    let response = origin_client
+        .get(format!(
+            "http://{encoded_key}.pkarr.localhost:{}/a/b?x=1",
+            listen_addr.port()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        response.headers()["location"],
+        "https://example.com/a/b?x=1"
+    );
+
     // A content-addressed hostname is returned unchanged, just like any domain.
     let target = format!("{}.blake3.link", z32::encode(&[1; 32]));
     publish(&publisher, &key, &target).await;

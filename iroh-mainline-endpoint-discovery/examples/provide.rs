@@ -98,7 +98,9 @@ async fn main() -> Result<()> {
     }
     let collection = z32::encode(collection_hash.as_bytes());
     println!("{collection}  (collection)");
-    println!("http://127.0.0.1:8080/tree/{collection}");
+    // With the browser extension, the blake3.link URL redirects to the second.
+    println!("https://{collection}.blake3.link/");
+    println!("http://{collection}.localhost:8080/");
 
     let announced = async {
         publisher.wait_published().await;

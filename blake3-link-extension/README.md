@@ -6,20 +6,20 @@ It sends content links to a local HTTP gateway without contacting the domain's
 web server:
 
 ```text
-https://<z32>.blake3.link/
-    -> http://127.0.0.1:8080/blake3/<z32>
 https://<z32>.blake3.link/path/to/file
-    -> http://127.0.0.1:8080/blake3/<z32>/path/to/file
+    -> http://<z32>.blake3.localhost:8080/path/to/file
 https://<public-key>.pkarr.link/path/to/file?x=1
-    -> http://127.0.0.1:8080/pkarr/<public-key>/path/to/file?x=1
+    -> http://<public-key>.pkarr.localhost:8080/path/to/file?x=1
 ```
 
-The hash is a 52-character lowercase z-base-32 encoded BLAKE3 digest, matching
-the gateway route. A collection root shows an index at the bare URL. Query
-strings are retained. Paths within collections are
-rewritten too. The apex `https://blake3.link/` stays untouched so it
-can host instructions or an extension download page. The apex `https://pkarr.link/`
-also stays untouched. Other hosts, nested subdomains, and localhost requests are not matched.
+The hash is a 52-character lowercase z-base-32 encoded BLAKE3 digest, and the
+public key has the same shape. Browsers resolve `*.localhost` to the loopback
+address, so each hash and each key keeps its own origin, and root-relative
+links inside a collection resolve within it. A collection root shows an index
+at the bare URL. Query strings and paths are retained. The apexes
+`https://blake3.link/` and `https://pkarr.link/` stay untouched so they can
+host instructions or an extension download page. Other hosts, nested
+subdomains, and localhost requests are not matched.
 The extension captures a single alphanumeric label; the gateway validates its
 length, alphabet, and canonical encoding, returning 400 for invalid hashes.
 

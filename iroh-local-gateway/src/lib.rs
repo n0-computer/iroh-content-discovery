@@ -14,10 +14,11 @@ use std::{
 
 use anyhow::bail;
 use axum::{
-    Router,
+    Extension, Router,
     body::Body,
-    extract::{Path, RawQuery, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    extract::{Path, RawQuery, Request, State},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
+    middleware::map_request,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -112,18 +113,30 @@ impl Gateway {
 
     /// HTTP routes for blobs and paths inside collections, plus CORS preflight.
     ///
-    /// `/tree/{hash}` also browses collection directories, with optional `?sizes`.
+    /// `/blake3/{hash}` serves a blob, or lists the top level of a detected
+    /// collection. `/blake3/{hash}/{path}` serves a file of a collection or
+    /// lists a directory, where directories are the `/`-separated prefixes of
+    /// names. Listings show file sizes with `?sizes`.
+    ///
     /// `/pkarr/{key}` resolves a signed HTTPS target and temporarily redirects.
+    ///
+    /// Requests to `http://{z32}.blake3.localhost/{path}` and
+    /// `http://{z32}.pkarr.localhost/{path}` are handled like the matching
+    /// path, giving each hash and key its own browser origin.
     pub fn router(&self) -> Router {
-        Router::new()
+        let routes = Router::new()
             .route("/pkarr/{key}", get(pkarr_redirect::redirect))
             .route("/pkarr/{key}/", get(pkarr_redirect::redirect))
             .route("/pkarr/{key}/{*path}", get(pkarr_redirect::redirect))
             .route("/blake3/{hash}", get(blob))
+            .route("/blake3/{hash}/", get(collection_root))
             .route("/blake3/{hash}/{*path}", get(collection_path))
-            .route("/tree/{hash}", get(tree_root))
-            .route("/tree/{hash}/", get(tree_root))
-            .route("/tree/{hash}/{*path}", get(tree))
+            .with_state(self.clone());
+        // The rewrite has to happen before routing, so it wraps the routes as
+        // the fallback of an otherwise empty router.
+        Router::new()
+            .fallback_service(routes)
+            .layer(map_request(rewrite_subdomain))
             .layer(
                 CorsLayer::new()
                     .allow_origin(Any)
@@ -137,7 +150,6 @@ impl Gateway {
                     ]),
             )
             .layer(axum::middleware::from_fn(log_request))
-            .with_state(self.clone())
     }
 
     /// Serve plaintext HTTP on a loopback socket until the shutdown future resolves.
@@ -245,7 +257,7 @@ impl Gateway {
         let source = Source {
             connection,
             size,
-            mime,
+            mime: with_charset(mime, &prefix),
         };
         Ok(source)
     }
@@ -380,18 +392,154 @@ impl IntoResponse for HttpError {
     }
 }
 
+/// Marks a request that named its hash or key as a subdomain of `localhost`.
+#[derive(Debug, Clone, Copy)]
+struct Subdomain;
+
+/// Subdomain suffixes and the route each one is served by.
+const SUBDOMAIN_ROUTES: [(&str, &str); 2] = [
+    (".blake3.localhost", "blake3"),
+    (".pkarr.localhost", "pkarr"),
+];
+
+/// Rewrites `{z32}.blake3.localhost` and `{z32}.pkarr.localhost` requests to
+/// the equivalent `/blake3/{z32}` or `/pkarr/{z32}` path.
+async fn rewrite_subdomain(mut request: Request) -> Request {
+    let host = request.uri().host().map(str::to_owned).or_else(|| {
+        let host = request.headers().get(header::HOST)?.to_str().ok()?;
+        Some(
+            host.rsplit_once(':')
+                .map_or(host, |(host, _)| host)
+                .to_owned(),
+        )
+    });
+    let Some((label, route)) = host.as_deref().and_then(|host| {
+        SUBDOMAIN_ROUTES.iter().find_map(|(suffix, route)| {
+            let label = host.strip_suffix(suffix)?;
+            // Both hashes and keys are canonical 32-byte z-base-32 values.
+            parse_hash(label).ok().map(|_| (label, route))
+        })
+    }) else {
+        return request;
+    };
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map_or("/", |value| value.as_str());
+    // `/` maps to the bare route, which also detects collections.
+    let rest = path_and_query.strip_prefix('/').unwrap_or(path_and_query);
+    let rewritten = if rest.is_empty() || rest.starts_with('?') {
+        format!("/{route}/{label}{rest}")
+    } else {
+        format!("/{route}/{label}/{rest}")
+    };
+    if let Ok(uri) = rewritten.parse::<Uri>() {
+        // The outer router records the original URI before this runs, so
+        // handlers reading it see the path they were routed by.
+        request
+            .extensions_mut()
+            .insert(axum::extract::OriginalUri(uri.clone()));
+        *request.uri_mut() = uri;
+        request.extensions_mut().insert(Subdomain);
+    }
+    request
+}
+
+/// Adds a charset to textual content types that carry none.
+///
+/// Without it browsers decode text with a locale-dependent fallback, which
+/// renders UTF-8 wrongly. UTF-8 is assumed unless a byte order mark says the
+/// content is UTF-16.
+fn with_charset(mime: String, prefix: &[u8]) -> String {
+    if !mime.starts_with("text/") || mime.contains("charset=") {
+        return mime;
+    }
+    let charset = match prefix {
+        [0xff, 0xfe, ..] => "utf-16le",
+        [0xfe, 0xff, ..] => "utf-16be",
+        _ => "utf-8",
+    };
+    format!("{mime}; charset={charset}")
+}
+
+/// Returns whether the query string sets `name`, as `?name` or `?name=...`.
+fn has_flag(query: Option<&str>, name: &str) -> bool {
+    query.is_some_and(|query| {
+        query.split('&').any(|pair| {
+            pair.strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+        })
+    })
+}
+
+/// Returns a `Content-Disposition` value that saves the body as `filename`.
+///
+/// Sends both the plain and the RFC 6266 extended form, since the plain one
+/// cannot express non-ASCII names.
+fn attachment(filename: &str) -> String {
+    let ascii: String = filename
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | ' ' => c,
+            _ => '_',
+        })
+        .collect();
+    let encoded = utf8_percent_encode(filename, PATH_SEGMENT);
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
+/// The collection a listing belongs to, and the path its links start with.
+struct Root {
+    encoded: String,
+    /// `/blake3/{z32}`, or empty when the hash is the request's subdomain.
+    base: String,
+}
+
+impl Root {
+    fn new(encoded: String, subdomain: Option<Extension<Subdomain>>) -> Self {
+        let base = match subdomain {
+            Some(_) => String::new(),
+            None => format!("/blake3/{encoded}"),
+        };
+        Self { encoded, base }
+    }
+}
+
 async fn blob(
     State(gateway): State<Gateway>,
     Path(encoded): Path<String>,
+    RawQuery(query): RawQuery,
+    subdomain: Option<Extension<Subdomain>>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let hash = parse_hash(&encoded)
         .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let download = has_flag(query.as_deref(), "download");
+    // `?tree` states that the blob is a collection, which skips both the size
+    // probe and the detection limits. `?download` wins, and asks for the bytes.
+    if !download && has_flag(query.as_deref(), "tree") {
+        let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
+            .await
+            .map_err(HttpError::timeout)??;
+        let root = Root::new(encoded, subdomain);
+        return collection_entry(
+            &gateway,
+            &root,
+            collection,
+            String::new(),
+            query,
+            method,
+            headers,
+        )
+        .await;
+    }
     let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
         .map_err(HttpError::timeout)??;
-    if source.size >= 32
+    // `?download` saves a collection root as the hash sequence it is.
+    if !download
+        && source.size >= 32
         && source.size.is_multiple_of(32)
         && source.size <= MAX_AUTO_COLLECTION_ROOT_BYTES
         && let Ok(Ok(collection)) = tokio::time::timeout(
@@ -400,14 +548,46 @@ async fn blob(
         )
         .await
     {
-        return Ok(collection_index(&encoded, &collection.collection, method));
+        let root = Root::new(encoded, subdomain);
+        return collection_entry(
+            &gateway,
+            &root,
+            collection,
+            String::new(),
+            query,
+            method,
+            headers,
+        )
+        .await;
     }
-    serve_blob(source, hash, &encoded, method, headers).await
+    let download = download.then(|| encoded.clone());
+    serve_blob(source, hash, &encoded, download, method, headers).await
+}
+
+async fn collection_root(
+    state: State<Gateway>,
+    Path(encoded): Path<String>,
+    query: RawQuery,
+    subdomain: Option<Extension<Subdomain>>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    collection_path(
+        state,
+        Path((encoded, String::new())),
+        query,
+        subdomain,
+        method,
+        headers,
+    )
+    .await
 }
 
 async fn collection_path(
     State(gateway): State<Gateway>,
     Path((encoded, path)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+    subdomain: Option<Extension<Subdomain>>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -416,94 +596,25 @@ async fn collection_path(
     let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
         .await
         .map_err(HttpError::timeout)??;
-    let path = path.strip_prefix('/').unwrap_or(&path);
-    let hash = collection
-        .collection
-        .iter()
-        .find(|(name, _)| name == path)
-        .map(|(_, hash)| *hash)
-        .ok_or(HttpError(
-            StatusCode::NOT_FOUND,
-            "path not found in collection",
-        ))?;
-    let source = tokio::time::timeout(
-        LOOKUP_TIMEOUT,
-        gateway.source_on_connection(collection.connection, hash, Some(path)),
-    )
-    .await
-    .map_err(HttpError::timeout)??;
-    serve_blob(source, hash, &z32::encode(hash.as_bytes()), method, headers).await
+    let path = path.strip_prefix('/').map(str::to_owned).unwrap_or(path);
+    let root = Root::new(encoded, subdomain);
+    collection_entry(&gateway, &root, collection, path, query, method, headers).await
 }
 
-fn collection_index(encoded: &str, collection: &Collection, method: Method) -> Response {
-    let mut html = String::from("<!doctype html><meta charset=\"utf-8\"><ul>");
-    for (name, _) in collection.iter() {
-        let path = name
-            .split('/')
-            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
-            .collect::<Vec<_>>()
-            .join("/");
-        html.push_str("<li><a href=\"/blake3/");
-        html.push_str(encoded);
-        html.push('/');
-        html.push_str(&path);
-        html.push_str("\">");
-        html.push_str(&escape_html(name));
-        html.push_str("</a></li>");
-    }
-    html.push_str("</ul>");
-    let response = Response::builder()
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .header(header::CONTENT_LENGTH, html.len());
-    if method == Method::HEAD {
-        response.body(Body::empty()).unwrap()
-    } else {
-        response.body(Body::from(html)).unwrap()
-    }
-}
-
-fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-async fn tree_root(
-    state: State<Gateway>,
-    Path(encoded): Path<String>,
-    query: RawQuery,
+/// Serves the file at `path` in a collection, or lists it as a directory.
+async fn collection_entry(
+    gateway: &Gateway,
+    root: &Root,
+    source: CollectionSource,
+    path: String,
+    query: Option<String>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    tree(
-        state,
-        Path((encoded, String::new())),
-        query,
-        method,
-        headers,
-    )
-    .await
-}
-
-async fn tree(
-    State(gateway): State<Gateway>,
-    Path((encoded, path)): Path<(String, String)>,
-    RawQuery(query): RawQuery,
-    method: Method,
-    headers: HeaderMap,
-) -> Result<Response, HttpError> {
-    let root = parse_hash(&encoded)
-        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
     let CollectionSource {
         collection,
         connection,
-    } = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(root))
-        .await
-        .map_err(HttpError::timeout)??;
+    } = source;
     let file = collection
         .iter()
         .find(|(name, _)| *name == path)
@@ -515,7 +626,21 @@ async fn tree(
         )
         .await
         .map_err(HttpError::timeout)??;
-        return serve_blob(source, hash, &z32::encode(hash.as_bytes()), method, headers).await;
+        // Save under the file's own name, not the hash.
+        let download = has_flag(query.as_deref(), "download").then(|| {
+            path.rsplit_once('/')
+                .map_or(path.as_str(), |(_, file)| file)
+                .to_owned()
+        });
+        return serve_blob(
+            source,
+            hash,
+            &z32::encode(hash.as_bytes()),
+            download,
+            method,
+            headers,
+        )
+        .await;
     }
     let dir = if path.is_empty() || path.ends_with('/') {
         path
@@ -524,13 +649,9 @@ async fn tree(
     };
     let entries = Entries::new(&dir, &collection).ok_or(HttpError(
         StatusCode::NOT_FOUND,
-        "no such file or directory in collection",
+        "path not found in collection",
     ))?;
-    let with_sizes = query.is_some_and(|query| {
-        query
-            .split('&')
-            .any(|pair| pair == "sizes" || pair.starts_with("sizes="))
-    });
+    let with_sizes = has_flag(query.as_deref(), "sizes");
     let sizes = if with_sizes {
         let hashes = entries.files.iter().map(|(_, hash)| *hash).collect();
         Some(
@@ -545,12 +666,7 @@ async fn tree(
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .body(Body::from(listing(
-            &encoded,
-            &dir,
-            &entries,
-            sizes.as_ref(),
-        )))
+        .body(Body::from(listing(root, &dir, &entries, sizes.as_ref())))
         .unwrap())
 }
 
@@ -589,14 +705,23 @@ impl<'a> Entries<'a> {
 /// With `sizes`, file sizes are shown and directory links keep `?sizes`.
 /// Without, the page links to the same listing with sizes.
 fn listing(
-    root: &str,
+    root: &Root,
     dir: &str,
     entries: &Entries<'_>,
     sizes: Option<&HashMap<Hash, u64>>,
 ) -> String {
+    let base = &root.base;
+    let root = &root.encoded;
     let title = html_escape(&format!("{root}/{dir}"));
     let query = if sizes.is_some() { "?sizes" } else { "" };
-    let link = |path: &str| html_escape(&percent_encode_path(&format!("/tree/{root}/{path}")));
+    let link = |path: &str| {
+        let path = path
+            .split('/')
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        html_escape(&format!("{base}/{path}"))
+    };
     // Breadcrumbs: every ancestor links to its listing, the current directory
     // is plain text.
     let segments: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
@@ -640,13 +765,13 @@ fn listing(
             format!("{parent}/")
         };
         html.push_str(&format!(
-            "<tr><td><a href=\"{}{query}\">../</a></td><td class=\"size\"></td><td class=\"hash\"></td></tr>\n",
+            "<tr><td><a href=\"{}{query}\">../</a></td><td class=\"size\"></td><td class=\"hash\"></td><td class=\"download\"></td></tr>\n",
             link(&parent)
         ));
     }
     for sub in &entries.dirs {
         html.push_str(&format!(
-            "<tr><td><a href=\"{}{query}\">{}/</a></td><td class=\"size\"></td><td class=\"hash\"></td></tr>\n",
+            "<tr><td><a href=\"{}{query}\">{}/</a></td><td class=\"size\"></td><td class=\"hash\"></td><td class=\"download\"></td></tr>\n",
             link(&format!("{dir}{sub}/")),
             html_escape(sub),
         ));
@@ -659,10 +784,12 @@ fn listing(
             None => String::new(),
         };
         html.push_str(&format!(
-            "<tr><td><a href=\"{}\">{}</a></td><td class=\"size\">{size}</td><td class=\"hash\">{}</td></tr>\n",
+            "<tr><td><a href=\"{}\">{}</a></td><td class=\"size\">{size}</td><td class=\"hash\">{}</td>\
+             <td class=\"download\"><a href=\"{}?download\">Download</a></td></tr>\n",
             link(&format!("{dir}{file}")),
             html_escape(file),
             z32::encode(hash.as_bytes()),
+            link(&format!("{dir}{file}")),
         ));
     }
     html.push_str("</table>\n");
@@ -700,23 +827,11 @@ fn html_escape(value: &str) -> String {
     out
 }
 
-/// Percent-encodes everything except unreserved characters and `/`.
-fn percent_encode_path(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
 async fn serve_blob(
     source: Source,
     hash: Hash,
     encoded: &str,
+    download: Option<String>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -727,6 +842,10 @@ async fn serve_blob(
         .header(header::ETAG, &etag)
         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    let builder = match &download {
+        Some(filename) => builder.header(header::CONTENT_DISPOSITION, attachment(filename)),
+        None => builder,
+    };
     if headers
         .get_all(header::IF_NONE_MATCH)
         .iter()

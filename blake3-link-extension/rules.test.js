@@ -32,11 +32,11 @@ function redirect(input, port = 8080) {
   return null;
 }
 
-test("hash subdomains rewrite to the local blob route", () => {
+test("hash subdomains rewrite to a local per-hash origin", () => {
   const hash = "y".repeat(52);
-  assert.equal(redirect(`https://${hash}.blake3.link/?download=1#time`), `http://127.0.0.1:8080/blake3/${hash}?download=1#time`);
-  assert.equal(redirect(`http://${hash}.blake3.link:80/`, 12345), `http://127.0.0.1:12345/blake3/${hash}`);
-  assert.equal(redirect(`https://${hash}.blake3.link/site/index.html?x=1`), `http://127.0.0.1:8080/blake3/${hash}/site/index.html?x=1`);
+  assert.equal(redirect(`https://${hash}.blake3.link/?download=1#time`), `http://${hash}.blake3.localhost:8080/?download=1#time`);
+  assert.equal(redirect(`http://${hash}.blake3.link:80/`, 12345), `http://${hash}.blake3.localhost:12345/`);
+  assert.equal(redirect(`https://${hash}.blake3.link/site/index.html?x=1`), `http://${hash}.blake3.localhost:8080/site/index.html?x=1`);
 });
 
 test("apex, lookalikes, nested subdomains, and localhost are untouched", () => {
@@ -56,12 +56,12 @@ test("apex, lookalikes, nested subdomains, and localhost are untouched", () => {
   }
 });
 
-test("public-key subdomains rewrite to the local Pkarr route", () => {
+test("public-key subdomains rewrite to a local per-key origin", () => {
   const key = "y".repeat(52);
-  assert.equal(redirect(`https://${key}.pkarr.link/`), `http://127.0.0.1:8080/pkarr/${key}/`);
-  assert.equal(redirect(`http://${key}.pkarr.link:80/`, 12345), `http://127.0.0.1:12345/pkarr/${key}/`);
-  assert.equal(redirect(`https://${key}.pkarr.link/?q=%2F#section`), `http://127.0.0.1:8080/pkarr/${key}/?q=%2F#section`);
-  assert.equal(redirect(`https://${key}.pkarr.link/a%2Fb/file%20name?x=1#part`), `http://127.0.0.1:8080/pkarr/${key}/a%2Fb/file%20name?x=1#part`);
+  assert.equal(redirect(`https://${key}.pkarr.link/`), `http://${key}.pkarr.localhost:8080/`);
+  assert.equal(redirect(`http://${key}.pkarr.link:80/`, 12345), `http://${key}.pkarr.localhost:12345/`);
+  assert.equal(redirect(`https://${key}.pkarr.link/?q=%2F#section`), `http://${key}.pkarr.localhost:8080/?q=%2F#section`);
+  assert.equal(redirect(`https://${key}.pkarr.link/a%2Fb/file%20name?x=1#part`), `http://${key}.pkarr.localhost:8080/a%2Fb/file%20name?x=1#part`);
 });
 
 test("ports are bounded, settings are optional only through defaults, disable removes rules", () => {
@@ -69,6 +69,7 @@ test("ports are bounded, settings are optional only through defaults, disable re
     assert.throws(() => validateSettings({ port, enabled: true }));
   }
   assert.deepEqual(makeRules({ port: 8080, enabled: false }), []);
-  assert.deepEqual(makeRules(DEFAULT_SETTINGS).map(({ id }) => id), RULE_IDS);
-  assert.equal(RULE_IDS.length, 3);
+  // Rule 3 is retired, but stays in RULE_IDS so upgrades remove it.
+  assert.deepEqual(makeRules(DEFAULT_SETTINGS).map(({ id }) => id), [1, 2]);
+  assert.deepEqual(RULE_IDS, [1, 2, 3]);
 });
