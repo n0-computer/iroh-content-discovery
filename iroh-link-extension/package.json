@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test rules.test.js",
+    "package": "node package.mjs",
+    "package:chrome": "node package.mjs chrome",
+    "package:firefox": "node package.mjs firefox"
+  }
+}

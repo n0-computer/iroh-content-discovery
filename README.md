@@ -56,7 +56,7 @@ The repository contains four Rust workspace crates and a browser extension:
   `Resolver` APIs; the publisher takes an endpoint secret key and an externally
   managed Mainline DHT node
 - `iroh-local-gateway`: localhost HTTP streaming, MIME detection, and byte ranges
-- `blake3-link-extension`: Chrome/Brave redirects from hash subdomains to the gateway
+- `iroh-link-extension`: Chrome/Brave redirects from hash subdomains to the gateway
 
 ```sh
 cargo run -p udp-address-records -- --udp-port 11223 \
@@ -215,7 +215,7 @@ options. See its README for configuration and HTTP behavior.
 
 ## Browser extension
 
-The fifth project, [`blake3-link-extension`](blake3-link-extension/README.md),
+The fifth project, [`iroh-link-extension`](iroh-link-extension/README.md),
 rewrites `https://<z32>.blake3.link/<path>` to
 `http://<z32>.blake3.localhost:<port>/<path>`, and
 `https://<key>.pkarr.link/<path>` to `http://<key>.pkarr.localhost:<port>/<path>`,

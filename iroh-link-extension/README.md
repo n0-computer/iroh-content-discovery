@@ -1,4 +1,4 @@
-# blake3.link and pkarr.link Local Gateway extension
+# iroh link extension
 
 Workspace project five: a Manifest V3 extension for desktop Chrome, Brave, and
 Firefox.
@@ -33,7 +33,7 @@ The gateway validates public keys. Both domains use the same port and enable swi
 
 1. Open `chrome://extensions` in Chrome or `brave://extensions` in Brave.
 2. Enable **Developer mode**.
-3. Click **Load unpacked**, then choose this `blake3-link-extension` directory
+3. Click **Load unpacked**, then choose this `iroh-link-extension` directory
    (the directory containing `manifest.json`). No build step is required.
 4. Open the extension popup, set the gateway port (default **8080**), leave
    local redirects enabled, and click **Save**.
@@ -71,7 +71,44 @@ Edition and Nightly can instead install an unsigned package when
 `background.service_worker` is ignored is expected: Chrome uses the service
 worker and Firefox uses `background.scripts`, both pointing to the same file.
 
+## Packaging
+
+Requires Node.js 18 or later and the `zip` command (available by default on
+macOS; install it with your system package manager on Linux). No npm dependencies
+or store credentials are needed.
+
+From the repository root:
+
+```sh
+npm --prefix iroh-link-extension run package
+# Or build just one browser package:
+npm --prefix iroh-link-extension run package:chrome
+npm --prefix iroh-link-extension run package:firefox
+```
+
+Artifacts are written to `iroh-link-extension/dist/`:
+
+- `iroh-link-<version>-chrome.zip` for Chrome/Brave, with a service worker and
+  no Firefox-specific manifest fields.
+- `iroh-link-<version>-firefox.zip` for Firefox, with background scripts and
+  the existing Gecko extension ID.
+
+The version comes from `manifest.json`. Each ZIP contains the manifest at its
+root and only runtime files; tests, documentation, and packaging scripts are
+excluded. The shared source manifest remains usable for development in both
+browsers. Build commands work from any directory when invoked by absolute path.
+
+These packages are unsigned. Unzip the Chrome archive to load it unpacked, or
+upload it to the Chrome Web Store. Submit the Firefox ZIP to Mozilla for signing
+before permanent installation; signing produces an XPI. Packaging does not
+upload, sign, or publish anything. The gateway is distributed separately.
+
 ## Settings and behavior
+
+Open settings from the toolbar popup, or from **Extension options** on the
+extension's Details page in Chrome/Brave. In Firefox, use the extension's
+**Preferences/Options** in `about:addons`. Both entry points use the same
+settings page; the options entry opens it in a tab.
 
 The popup configures the localhost port and can disable all redirects. Saved
 settings and dynamic rules survive browser restarts. There is no always-running
@@ -89,7 +126,7 @@ websites. The local gateway must be running; the extension does not start it.
 ## Tests
 
 ```sh
-node --test blake3-link-extension/rules.test.js
+node --test iroh-link-extension/rules.test.js
 ```
 
 The tests check hash- and public-key-subdomain routing, path/query preservation, lookalike-host
