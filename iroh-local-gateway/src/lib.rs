@@ -50,6 +50,14 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
 const MAX_AUTO_COLLECTION_ROOT_BYTES: u64 = 8 * 1024 * 1024;
 const COLLECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a failed lookup is remembered.
+///
+/// Without this every request for a hash nobody serves costs a full lookup, so
+/// a page with a few hundred `fetch()`s to random hashes keeps the DHT node
+/// busy for a minute.
+const FAILURE_TTL: Duration = Duration::from_secs(5);
+/// Hashes with a lookup in flight or a remembered failure.
+const LOOKUP_SLOTS: usize = 256;
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'%')
@@ -78,6 +86,10 @@ struct Inner {
     resolver: Resolver,
     classifier: MimeClassifier,
     pkarr: Mutex<pkarr_redirect::Cache>,
+    /// One gate per hash, so concurrent requests for a cold hash do one
+    /// lookup between them instead of one each.
+    gates: Mutex<LruCache<Hash, Arc<tokio::sync::Mutex<()>>>>,
+    failures: Mutex<LruCache<Hash, (Instant, HttpError)>>,
     // Reuse one provider for repeated video seeks, with bounded metadata memory.
     cache: Mutex<LruCache<Hash, Source>>,
     collections: Mutex<LruCache<Hash, CollectionSource>>,
@@ -105,6 +117,8 @@ impl Gateway {
             resolver,
             classifier: MimeClassifier::new(),
             pkarr: Mutex::new(pkarr_redirect::Cache::default()),
+            gates: Mutex::new(LruCache::new(LOOKUP_SLOTS.try_into().unwrap())),
+            failures: Mutex::new(LruCache::new(LOOKUP_SLOTS.try_into().unwrap())),
             cache: Mutex::new(LruCache::new(128.try_into().unwrap())),
             collections: Mutex::new(LruCache::new(128.try_into().unwrap())),
             sizes: Mutex::new(LruCache::new(4096.try_into().unwrap())),
@@ -167,18 +181,71 @@ impl Gateway {
     }
 
     async fn source(&self, hash: Hash) -> Result<Source, HttpError> {
-        let cached = self.0.cache.lock().unwrap().get(&hash).cloned();
-        if let Some(source) = cached
-            && source.connection.close_reason().is_none()
-        {
-            tracing::debug!(%hash, size = source.size, "reusing cached blob source");
+        if let Some(source) = self.cached_source(hash) {
             return Ok(source);
         }
+        self.recent_failure(hash)?;
+        let gate = self.gate(hash);
+        let _first = gate.lock().await;
+        // Whoever held the gate may have finished the work already.
+        if let Some(source) = self.cached_source(hash) {
+            return Ok(source);
+        }
+        self.recent_failure(hash)?;
         tracing::debug!(%hash, "blob source cache miss or closed connection");
-        let connection = self.connection(hash).await?;
+        // Only the lookup is remembered on failure. A blob that turns out not
+        // to be a collection, say, must not poison later requests for it.
+        let connection = self
+            .connection(hash)
+            .await
+            .inspect_err(|error| self.remember_failure(hash, *error))?;
         let source = self.source_on_connection(connection, hash, None).await?;
         self.0.cache.lock().unwrap().put(hash, source.clone());
         Ok(source)
+    }
+
+    /// A cached source, if its connection is still open.
+    fn cached_source(&self, hash: Hash) -> Option<Source> {
+        let source = self.0.cache.lock().unwrap().get(&hash).cloned()?;
+        source.connection.close_reason().is_none().then(|| {
+            tracing::debug!(%hash, size = source.size, "reusing cached blob source");
+            source
+        })
+    }
+
+    /// The gate for `hash`, creating one if this is the first request for it.
+    fn gate(&self, hash: Hash) -> Arc<tokio::sync::Mutex<()>> {
+        self.0
+            .gates
+            .lock()
+            .unwrap()
+            .get_or_insert(hash, || Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Fail immediately while a recent failure for `hash` is remembered.
+    fn recent_failure(&self, hash: Hash) -> Result<(), HttpError> {
+        let mut failures = self.0.failures.lock().unwrap();
+        match failures.peek(&hash) {
+            Some((at, error)) if at.elapsed() < FAILURE_TTL => {
+                let error = *error;
+                tracing::debug!(%hash, "failing from remembered lookup failure");
+                Err(error)
+            }
+            Some(_) => {
+                failures.pop(&hash);
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn remember_failure(&self, hash: Hash, error: HttpError) {
+        self.0
+            .failures
+            .lock()
+            .unwrap()
+            .put(hash, (Instant::now(), error));
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(hash = %hash))]
@@ -300,15 +367,30 @@ impl Gateway {
     }
 
     async fn collection(&self, hash: Hash) -> Result<CollectionSource, HttpError> {
-        let cached = self.0.collections.lock().unwrap().get(&hash).cloned();
-        if let Some(source) = cached
-            && source.connection.close_reason().is_none()
-        {
-            tracing::debug!(%hash, "reusing cached collection");
+        if let Some(source) = self.cached_collection(hash) {
             return Ok(source);
         }
-        let connection = self.connection(hash).await?;
+        self.recent_failure(hash)?;
+        let gate = self.gate(hash);
+        let _first = gate.lock().await;
+        if let Some(source) = self.cached_collection(hash) {
+            return Ok(source);
+        }
+        self.recent_failure(hash)?;
+        let connection = self
+            .connection(hash)
+            .await
+            .inspect_err(|error| self.remember_failure(hash, *error))?;
         self.collection_on_connection(hash, connection).await
+    }
+
+    /// A cached collection, if its connection is still open.
+    fn cached_collection(&self, hash: Hash) -> Option<CollectionSource> {
+        let source = self.0.collections.lock().unwrap().get(&hash).cloned()?;
+        source.connection.close_reason().is_none().then(|| {
+            tracing::debug!(%hash, "reusing cached collection");
+            source
+        })
     }
 
     async fn collection_on_connection(
@@ -375,6 +457,7 @@ pub fn parse_z32_bytes(value: &str) -> anyhow::Result<[u8; 32]> {
     Ok(bytes)
 }
 
+#[derive(Debug, Clone, Copy)]
 struct HttpError(StatusCode, &'static str);
 
 impl HttpError {
