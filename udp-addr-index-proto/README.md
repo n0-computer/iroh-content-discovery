@@ -1,4 +1,4 @@
-# udp-address-records-proto
+# udp-addr-index-proto
 
 Wire types and encoding for a small UDP address index: `SocketAddrV4 → opaque
 bytes`. No iroh dependency; the application decides what the bytes mean.
@@ -13,11 +13,11 @@ which the reply echoes so concurrent requests can be matched up.
 
 To write, do a quick handshake:
 
-1. Send `Prepare { tx, padding }`, with 24 padding bytes. The replica replies
+1. Send `Prepare { tx, padding }`, with 24 padding bytes. The server replies
    with `Prepared { tx, addr, token }`: your public IPv4 socket as it sees it,
    plus a short-lived 16-byte token. The padding keeps this reply no larger
    than the request.
-2. Send `Put { tx, token, value }` from that same socket. The replica checks the
+2. Send `Put { tx, token, value }` from that same socket. The server checks the
    token, stores the bytes under your observed source address, and replies with
    `Stored { tx, addr }`. You don't choose the key: the packet's source does.
 
@@ -26,18 +26,18 @@ is `Value { tx, addr, value }`, with `Some(bytes)` for a live entry or `None` fo
 a miss. Reads are public.
 
 `Get` packets are padded with trailing zeros after the postcard payload to
-exactly 1200 bytes. The replica drops shorter requests, so a spoofed request
+exactly 1200 bytes. The server drops shorter requests, so a spoofed request
 can't trigger a larger reply. Receivers ignore the padding bytes.
 
 Tokens prove you can receive packets at the source IP and port; they don't
-identify you or validate your data. The replica treats values as opaque bytes
+identify you or validate your data. The server treats values as opaque bytes
 and controls their expiry. Unknown protocol versions and invalid requests are
 silently dropped, so callers need to handle timeouts.
 
-## Replica discovery
+## Server discovery
 
-Replicas announce on Mainline under `b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b`
-(SHA-1 of `iroh-addr-index replicas v1`), using their implied source port.
+Servers announce on Mainline under `b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b`
+(SHA-1 of `iroh-addr-index servers v1`), using their implied source port.
 Clients call `get_peers` on that hash to find candidate replicas. Mainline and
 index traffic share the same UDP socket, so the announced port serves both.
 An announcement is just a candidate, not a guarantee of availability or trust.

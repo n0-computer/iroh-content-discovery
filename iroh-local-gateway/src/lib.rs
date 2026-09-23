@@ -2,7 +2,7 @@
 //!
 //! Adapted from the streaming approach in `iroh-examples/iroh-gateway`.
 //! Each content lookup validates providers before choosing an endpoint. Data is streamed directly
-//! from that peer, without downloading a whole blob into memory or a store.
+//! from that provider, without downloading a whole blob into memory or a store.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -78,7 +78,7 @@ struct Inner {
     resolver: Resolver,
     classifier: MimeClassifier,
     pkarr: Mutex<pkarr_redirect::Cache>,
-    // Reuse one peer for repeated video seeks, with bounded metadata memory.
+    // Reuse one provider for repeated video seeks, with bounded metadata memory.
     cache: Mutex<LruCache<Hash, Source>>,
     collections: Mutex<LruCache<Hash, CollectionSource>>,
     sizes: Mutex<LruCache<Hash, u64>>,
@@ -199,24 +199,24 @@ impl Gateway {
                 );
                 HttpError::upstream(error)
             })?;
-        let peer = filter_verified_providers(self.0.endpoint.clone(), hash, providers)
+        let provider = filter_verified_providers(self.0.endpoint.clone(), hash, providers)
             .next()
             .await
             .ok_or(HttpError(
                 StatusCode::NOT_FOUND,
                 "no verified provider found for this hash",
             ))?;
-        tracing::debug!(%peer, elapsed_ms = started.elapsed().as_millis(), "provider lookup complete; connecting");
+        tracing::debug!(%provider, elapsed_ms = started.elapsed().as_millis(), "provider lookup complete; connecting");
         let started = Instant::now();
         let connection = self.0
             .endpoint
-            .connect(peer, iroh_blobs::ALPN)
+            .connect(provider, iroh_blobs::ALPN)
             .await
             .map_err(|error| {
-                tracing::debug!(%peer, ?error, elapsed_ms = started.elapsed().as_millis(), "provider connection failed");
+                tracing::debug!(%provider, ?error, elapsed_ms = started.elapsed().as_millis(), "provider connection failed");
                 HttpError::upstream(error)
             })?;
-        tracing::debug!(%peer, elapsed_ms = started.elapsed().as_millis(), "provider connected");
+        tracing::debug!(%provider, elapsed_ms = started.elapsed().as_millis(), "provider connected");
         Ok(connection)
     }
 
@@ -227,7 +227,7 @@ impl Gateway {
         name: Option<&str>,
     ) -> Result<Source, HttpError> {
         let started = Instant::now();
-        tracing::debug!(%hash, peer = %connection.remote_id(), "reading blob size and MIME prefix");
+        tracing::debug!(%hash, provider = %connection.remote_id(), "reading blob size and MIME prefix");
         let (size, prefix) = sniff(&connection, hash)
             .await
             .map_err(|error| {
@@ -381,14 +381,17 @@ impl HttpError {
     fn upstream(error: impl std::fmt::Display + std::fmt::Debug) -> Self {
         tracing::debug!(?error, "gateway upstream error details");
         tracing::warn!(%error, "gateway upstream failed");
-        Self(StatusCode::BAD_GATEWAY, "peer lookup or transfer failed")
+        Self(
+            StatusCode::BAD_GATEWAY,
+            "provider lookup or transfer failed",
+        )
     }
 
     fn timeout(_: tokio::time::error::Elapsed) -> Self {
         tracing::debug!("gateway operation deadline exceeded");
         Self(
             StatusCode::GATEWAY_TIMEOUT,
-            "peer lookup or transfer timed out",
+            "provider lookup or transfer timed out",
         )
     }
 }
@@ -1017,7 +1020,10 @@ async fn serve_blob(
                 .map_err(HttpError::timeout)?
                 .map_err(HttpError::upstream)?;
         if size != source.size {
-            return Err(HttpError(StatusCode::BAD_GATEWAY, "peer changed blob size"));
+            return Err(HttpError(
+                StatusCode::BAD_GATEWAY,
+                "provider changed blob size",
+            ));
         }
         Body::from_stream(stream_content(content, source.connection, range, hash))
     };
@@ -1057,7 +1063,7 @@ fn multipart_content(
             let chunks = ChunkRanges::from(ChunkNum::full_chunks(range.start)..ChunkNum::chunks(range.end));
             let (content, size) = tokio::time::timeout(READ_TIMEOUT, start(&source.connection, hash, chunks)).await
                 .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
-            if size != source.size { Err(std::io::Error::other("peer changed blob size"))?; }
+            if size != source.size { Err(std::io::Error::other("provider changed blob size"))?; }
             yield Bytes::from(part_header(&source, &range, &boundary));
             let mut data = Box::pin(stream_content(content, source.connection.clone(), range, hash));
             while let Some(bytes) = data.next().await { yield bytes?; }
@@ -1073,7 +1079,7 @@ async fn start(
     hash: Hash,
     ranges: ChunkRanges,
 ) -> anyhow::Result<(AtBlobContent, u64)> {
-    tracing::debug!(peer = %connection.remote_id(), ?ranges, "requesting blob ranges");
+    tracing::debug!(provider = %connection.remote_id(), ?ranges, "requesting blob ranges");
     let request = GetRequest::new(hash, ChunkRangesSeq::from_ranges([ranges]));
     let connected = fsm::start(connection.clone(), request, Default::default())
         .next()
@@ -1162,10 +1168,10 @@ fn stream_content(
     range: Range<u64>,
     hash: Hash,
 ) -> impl n0_future::Stream<Item = std::io::Result<Bytes>> + Send {
-    let peer = connection.remote_id();
+    let provider = connection.remote_id();
     let started = Instant::now();
     let stream = async_stream::try_stream! {
-        tracing::debug!(%hash, %peer, ?range, "streaming blob body");
+        tracing::debug!(%hash, %provider, ?range, "streaming blob body");
         // Keep the connection alive until the HTTP body is consumed or dropped.
         let _connection = connection;
         let mut offset = range.start;
@@ -1179,7 +1185,7 @@ fn stream_content(
                             if start != offset { Err(std::io::Error::other("noncontiguous blob data"))?; }
                             offset = end;
                             if offset == range.end {
-                                tracing::debug!(%hash, %peer, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body bytes ready");
+                                tracing::debug!(%hash, %provider, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body bytes ready");
                             }
                             yield leaf.data.slice((start - leaf.offset) as usize..(end - leaf.offset) as usize);
                         }
@@ -1196,11 +1202,11 @@ fn stream_content(
         };
         tokio::time::timeout(READ_TIMEOUT, closing.next()).await
             .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
-        tracing::debug!(%hash, %peer, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body complete");
+        tracing::debug!(%hash, %provider, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body complete");
     };
     stream.map(move |result: std::io::Result<Bytes>| {
         if let Err(error) = &result {
-            tracing::debug!(%hash, %peer, ?error, elapsed_ms = started.elapsed().as_millis(), "blob body failed");
+            tracing::debug!(%hash, %provider, ?error, elapsed_ms = started.elapsed().as_millis(), "blob body failed");
         }
         result
     })

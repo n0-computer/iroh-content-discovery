@@ -11,62 +11,62 @@ The address index itself is generic:
 SocketAddrV4 → opaque bytes
 ```
 
-A publisher first asks a replica for a short-lived token. The replica returns
-the packet's observed public IPv4 socket and a stateless MAC bound to that
-socket. A put carrying the token must arrive from the same socket; the replica
-then derives the map key from the packet source and stores the bytes using its
-own receipt time and TTL. Reads are direct and public; requests are padded to
-1200 bytes and shorter requests are dropped to prevent response amplification.
-Responses are bounded to one non-fragmented UDP datagram. The replica neither parses nor
-validates the value.
+A publisher first asks a server for a short-lived token. The server returns the
+packet's observed public IPv4 socket and a stateless MAC bound to that socket. A
+put carrying the token must arrive from the same socket; the server then derives
+the map key from the packet source and stores the bytes under its own receipt
+time and TTL. Reads are direct and public. Requests are padded to 1200 bytes and
+shorter ones are dropped, so a response can never be larger than the request
+that caused it, and every response fits one unfragmented datagram. The server
+neither parses nor validates the value it stores.
 
-The index exchange is sent and received through the same UDP socket owned by
-the caller's Mainline node. Mainline announcements use their implied source
-port, so the compact peer address and the address-index key describe the same
-UDP mapping. `iroh-mainline-endpoint-discovery` does not bind another socket or
-own another DHT node. In particular, a publisher sharing a CGNAT public IP
-cannot claim another publisher's port: neither the Mainline announcement nor
-the index write accepts a caller-supplied port.
+Index traffic shares the UDP socket of the caller's Mainline node. Mainline
+announcements use their implied source port, so the compact peer address and the
+index key describe the same UDP mapping. `iroh-mainline-endpoint-discovery` binds
+no socket of its own and owns no DHT node. A publisher behind a shared CGNAT
+address therefore cannot claim another publisher's port, because neither the
+announcement nor the index write accepts a caller-supplied one.
 
-Address-index datagrams start with `00 61 64 64 72 69 64 78`
-(`\0addridx`). The zero byte cannot begin a Mainline KRPC message, whose outer
-value must be a bencoded dictionary beginning with `d`.
+Index datagrams start with `00 61 64 64 72 69 64 78` (`\0addridx`). The leading
+zero byte cannot begin a Mainline KRPC message, whose outer value is a bencoded
+dictionary starting with `d`, so both protocols can share a socket.
 
 The iroh discovery layer stores a signed endpoint record in those opaque bytes.
-A resolver validates the signature, extracts the endpoint ID, and dials it
-normally using iroh's regular discovery mechanisms. The DHT/index `host:port`
-is only a rendezvous key and is never used as an iroh address.
-`Resolver::resolve_stream` yields endpoint IDs as peer batches and index
-lookups complete. It translates up to 16 peers concurrently, so a slow index
-lookup does not block another result. An iroh-blobs downloader can try providers while discovery
-continues. `Resolver::resolve_continuously` starts another lookup when the
-consumer asks for more. It can yield the same endpoint again. `Resolver::resolve` still
-collects a sorted list when needed.
+A resolver checks the signature, takes the endpoint ID, and dials it through
+iroh's normal discovery. The `host:port` in the DHT and the index is a
+rendezvous key, never an iroh address.
 
-This requires direct UDP access to the replica. Mainline has the same direct
-UDP requirement, so nodes that can use this discovery mechanism already meet
-that constraint.
+`Resolver::resolve_stream` yields endpoint IDs as peer batches and index lookups
+complete, translating up to 16 peers at a time so one slow lookup cannot hold up
+the rest. An iroh-blobs downloader can start on the first provider while
+discovery continues. `Resolver::resolve_continuously` begins a new lookup
+whenever the consumer asks for more, and may yield an endpoint it has yielded
+before. `Resolver::resolve` collects a sorted list when a caller wants one.
+
+All of this needs direct UDP access to a server. Mainline needs the same, so a
+node that can use Mainline at all already meets the requirement.
 
 The repository contains four Rust workspace crates and a browser extension:
 
-- `udp-address-records-proto`: versioned token, put, and get UDP messages; no iroh
+- `udp-addr-index-proto`: versioned token, put, and get UDP messages; no iroh
   dependency
-- `udp-address-records`: embeddable replica server and the `udp-address-records` binary
-- `iroh-mainline-endpoint-discovery`: reusable `Directory`, `Publisher`, and
-  `Resolver` APIs; the publisher takes an endpoint secret key and an externally
-  managed Mainline DHT node
+- `udp-addr-index`: an embeddable address index server, and the `udp-addr-index` binary
+- `iroh-mainline-endpoint-discovery`: the `AddrIndex`, `Publisher` and
+  `Resolver` APIs; the publisher takes an endpoint secret key and a Mainline
+  node that the caller owns
 - `iroh-local-gateway`: localhost HTTP streaming, MIME detection, and byte ranges
-- `iroh-link-extension`: Chrome/Brave redirects from hash subdomains to the gateway
+- `iroh-link-extension`: redirects hash and key subdomains to the gateway in
+  Chrome, Brave and Firefox
 
 ```sh
-cargo run -p udp-address-records -- --udp-port 11223 \
+cargo run -p udp-addr-index -- --dht-port 11223 \
   --rendezvous-hash b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b
 cargo run -p iroh-mainline-endpoint-discovery --example blobs
 cargo run -p iroh-mainline-endpoint-discovery --example spoof
 ```
 
 To expose index metrics for Prometheus, pass `--metrics-listen 127.0.0.1:9090`
-to the `udp-address-records` command and scrape `http://127.0.0.1:9090/metrics`.
+to the `udp-addr-index` command and scrape `http://127.0.0.1:9090/metrics`.
 The listener is disabled unless requested. Bind it to a trusted interface;
 the endpoint has no authentication.
 
@@ -74,113 +74,111 @@ MIT or Apache-2.0, at your option.
 
 [eid]: https://docs.rs/iroh/latest/iroh/struct.PublicKey.html
 
-## Finding replicas
+## Finding servers
 
-Replicas share a Mainline node's UDP socket and can announce under the rendezvous
-infohash `b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b` (SHA-1 of
-`iroh-addr-index replicas v1`). Announcements use the implied source port and
-renew every ten minutes; failures retry after thirty seconds.
+Servers share a Mainline node's UDP socket and can announce themselves under the
+rendezvous infohash `b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b`, which is the
+SHA-1 of `iroh-addr-index servers v1`. An announcement uses the implied source
+port, renews every ten minutes, and retries after thirty seconds on failure.
 
-`Server::attach(dht)` serves and announces until its returned handle is dropped.
-`Server::attach_with_rendezvous(dht, Some(hash))` selects a hash, while `None`
-serves without announcing. The CLI makes no announcement unless
-`--rendezvous-hash HEX` is supplied; pass the hash above for default rendezvous
-discovery, or omit the flag when using an explicit address or signed list.
-The CLI runs a Mainline server on all IPv4 interfaces at `--udp-port` (11223 by
-default). Allow inbound UDP on that port. Mainline currently only supports
-choosing the bind port, not a specific local interface address.
+`Server::attach(dht)` serves and announces until the returned handle is dropped.
+`Server::attach_with_rendezvous(dht, Some(hash))` picks a different hash, and
+`None` serves without announcing at all. The CLI announces only when you pass
+`--rendezvous-hash HEX`: use the hash above for default discovery, and omit the
+flag when clients reach you through an explicit address or a signed list. The
+CLI binds all IPv4 interfaces at `--dht-port`, 11223 by default, so allow
+inbound UDP there. Mainline can choose the port but not the interface.
 
-`Directory::discover(dht)` finds replicas with `get_peers` and uses that same DHT
-socket for index requests. It refreshes on use after ten minutes, caps the list
-at two candidates, and gives discovery thirty seconds. No replicas is an error;
-announcements are untrusted and can include unavailable or dishonest servers.
-Signed endpoint records are still validated by the discovery layer.
+`AddrIndex::discover(dht)` finds servers with `get_peers` and then uses the same
+DHT socket for index requests. It refreshes on use after ten minutes, keeps at
+most two candidates, and gives discovery thirty seconds. Finding none is an
+error. Announcements are untrusted, so the candidates may be unreachable or
+dishonest; the signed endpoint records they serve are validated either way.
 
-The examples discover replicas by default. Set `IROH_ADDR_INDEX=ip:port` to use
-an explicit replica instead, or use `Directory::udp(dht, replica)` in code.
-Mainline bootstrap nodes are still needed; tracker addresses are not hardcoded.
-The `udp-address-records` binary exits if its service or announcement task stops,
-and shuts down on Ctrl-C or SIGTERM.
+The examples discover servers by default. Set `IROH_ADDR_INDEX=ip:port` to pin
+one instead, or call `AddrIndex::udp(dht, server)` in code. Mainline bootstrap
+nodes are still required, since no server address is hardcoded. The
+`udp-addr-index` binary exits if its service or announcement task stops, and
+shuts down on Ctrl-C or SIGTERM.
 
 ### Signed bootstrap list (BEP44)
 
-Applications can configure an explicit tracker and both discovery sources independently. The trusted BEP44 key
-is tried first; the rendezvous hash is queried only when no signed addresses
-are available. Each lookup has a thirty-second deadline.
+An explicit server and the two discovery sources are configured independently.
+The trusted BEP44 key is tried first, and the rendezvous hash only when the
+signed list yields nothing. Each lookup has a thirty-second deadline.
 
 ```rust,ignore
-let directory = Directory::discover_with_config(dht, DiscoveryConfig {
-    tracker: None, // Some("203.0.113.1:6881".parse()?) bypasses discovery
+let index = AddrIndex::discover_with_config(dht, DiscoveryConfig {
+    server: None, // Some("203.0.113.1:6881".parse()?) bypasses discovery
     public_key: Some(public_key),
     rendezvous_hash: Some(rendezvous_hash),
 }).await?;
 ```
 
-Each field is optional. An explicit `tracker` takes precedence over the public
-key and hash and bypasses discovery. Either discovery field can be `None` to
-disable that source. `Directory::discover` uses
-the default rendezvous hash without a key. `Directory::discover_with_authority`
-uses the supplied key with the default hash as fallback. A replica can announce
-under a custom hash with `Server::attach_with_rendezvous(dht, Some(hash))`.
+Each field is optional. An explicit `server` takes precedence over the key and
+the hash, and skips discovery entirely. Either discovery field can be `None` to
+turn that source off. `AddrIndex::discover` uses the default rendezvous hash
+with no key, and `AddrIndex::discover_with_authority` uses a key with that hash
+as fallback. A server announces under a custom hash with
+`Server::attach_with_rendezvous(dht, Some(hash))`.
 
-Discovery selects at most **two trackers**, and a signed list can contain one
-or two addresses. A signed result is never padded with rendezvous candidates.
-Rendezvous candidates remain untrusted; a signed address does not guarantee
-availability. Fallback currently means no signed addresses were found, not
-that a listed tracker failed an application request.
+Discovery keeps at most two servers, and a signed list holds one or two
+addresses. A signed result is never topped up with rendezvous candidates.
+Rendezvous candidates stay untrusted, and even a signed address only means the
+authority vouches for that server, not that it answered. Falling back means no
+signed address was found, not that a listed server failed a request.
 
-The authority publishes a list using the library's `TrackerList` helper:
+The authority publishes a list with the `ServerList` helper:
 
 ```rust,ignore
-let list = TrackerList::new(vec!["203.0.113.1:6881".parse()?])?;
+let list = ServerList::new(vec!["203.0.113.1:6881".parse()?])?;
 let item = list.sign(&signing_key, sequence)?;
 dht.put_mutable(item, None).await?;
 ```
 
-Keep the signing key with the list operator; clients need only its public key.
-Increase the nonnegative sequence number whenever the list changes and
-periodically republish the signed item to keep it available in the DHT.
-The fixed legacy salt is `iroh-addr-index replicas v1` (preserved across the
-crate rename for compatibility). The value is version byte `1`
-followed by up to two compact IPv4 sockets (four IP bytes, two big-endian port
-bytes). An empty list withdraws all signed candidates and permits fallback.
+The signing key stays with the authority; clients need only the public key.
+Raise the nonnegative sequence number whenever the list changes, and republish
+the signed item periodically so the DHT keeps it. The salt is
+`iroh-addr-index servers v1`. The value is a version byte `1` followed by up to
+two compact IPv4 sockets, four address bytes and a big-endian port each. An
+empty list withdraws every signed candidate and allows the fallback.
 
-`n0-mainline` verifies BEP44 signatures. A directory retains the highest observed
-valid list across refreshes, including when a lookup times out, and rejects
-lower sequences for its lifetime. This cache is not persisted across restarts;
-a fresh client can still receive an older signed list. Lists have no additional
-wall-clock expiry.
+`n0-mainline` verifies BEP44 signatures. An `AddrIndex` keeps the highest valid
+list it has seen across refreshes, including when a lookup times out, and
+rejects lower sequences for its lifetime. That memory does not survive a
+restart, so a fresh client can still be handed an older signed list. Lists carry
+no wall-clock expiry.
 
 ### Running the BEP44 republisher
 
-Run the list publisher separately from the individual tracker servers:
+Run the list publisher separately from the servers it names:
 
 ```sh
-# Set IROH_TRACKER_LIST_SECRET to a 64-hex-digit Ed25519 secret seed.
-cargo run -p iroh-mainline-endpoint-discovery --bin iroh-tracker-list -- \
-  --sequence 1 --tracker 203.0.113.1:6881 203.0.113.2:6881
+# Set IROH_INDEX_LIST_SECRET to a 64-hex-digit Ed25519 secret seed.
+cargo run -p iroh-mainline-endpoint-discovery --bin iroh-index-list -- \
+  --sequence 1 --server 203.0.113.1:6881 203.0.113.2:6881
 ```
 
-The process consumes and removes `IROH_TRACKER_LIST_SECRET` before starting
-runtime threads, signs the list once, and zeroizes its owned secret buffers and
-signing key. It logs the public key for configuring clients. Only the signed
-record is retained by the renewal task. This does not remove the variable from
-the launching shell or service configuration.
+The process consumes and removes `IROH_INDEX_LIST_SECRET` before any runtime
+thread starts, signs the list once, and zeroizes the secret buffers and the
+signing key. It logs the public key so you can configure clients, and the
+renewal task keeps only the signed item. Removing the variable here does not
+remove it from the shell or service configuration that launched the process.
 
-Publication starts immediately and repeats every ten minutes. Transient errors
-retry after thirty seconds; publication attempts time out after thirty seconds.
-A sequence conflict or DHT shutdown stops the task. To change the list, restart
-with the new addresses and a higher sequence. Omit `--tracker` to publish an
-empty list. Ctrl-C stops renewal.
+Publication starts immediately and repeats every ten minutes. A transient error
+retries after thirty seconds, and each attempt times out after thirty. A
+sequence conflict or a DHT shutdown stops the task. To change the list, restart
+with new addresses and a higher sequence. Omit `--server` to publish an empty
+list. Ctrl-C stops renewal.
 
-Embedded applications can run `republish_tracker_list(dht, signed_item)` as a
-separate async task; dropping that future stops renewal without stopping the DHT.
+Embedded applications can run `republish_server_list(dht, signed_item)` as a
+task of their own; dropping that future stops renewal without stopping the DHT.
 
 ## Local HTTP content gateway
 
 The fourth workspace project, [`iroh-local-gateway`](iroh-local-gateway/README.md),
-serves `http://127.0.0.1:8080/blake3/<z32>`. It discovers one content peer through
-Mainline and the tracker, then streams Bao-verified bytes with MIME detection
+serves `http://127.0.0.1:8080/blake3/<z32>`. It finds a provider through Mainline
+and the address index, then streams Bao-verified bytes with MIME detection
 and HTTP range support for video seeking. Collection roots automatically show
 a directory listing at `/blake3/<z32>`, and `/blake3/<z32>/path/to/file`
 streams a file from the same provider. The same content is served on
@@ -196,7 +194,7 @@ Query flags:
 - `?sizes` adds file sizes to a listing.
 
 ```sh
-cargo run -p iroh-local-gateway -- --tracker 127.0.0.1:11223
+cargo run -p iroh-local-gateway -- --index-server 127.0.0.1:11223
 ```
 
 To serve content, the `provide` example adds a file or directory as blobs plus
@@ -216,10 +214,10 @@ options. See its README for configuration and HTTP behavior.
 ## Browser extension
 
 The fifth project, [`iroh-link-extension`](iroh-link-extension/README.md),
-rewrites `https://<z32>.blake3.link/<path>` to
+rewrites `https://<z32>.blake3.net/<path>` to
 `http://<z32>.blake3.localhost:<port>/<path>`, and
-`https://<key>.pkarr.link/<path>` to `http://<key>.pkarr.localhost:<port>/<path>`,
+`https://<key>.pkarr.net/<path>` to `http://<key>.pkarr.localhost:<port>/<path>`,
 in Chrome, Brave and Firefox. Load that directory
 unpacked from the browser's extensions page with Developer mode enabled. The
 popup configures the local gateway port (default 8080) and enables/disables
-rewrites. The apex `blake3.link` site is unaffected.
+rewrites. The apex `blake3.net` site is unaffected.

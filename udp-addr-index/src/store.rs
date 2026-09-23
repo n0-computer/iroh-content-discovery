@@ -11,9 +11,9 @@ use crate::Limits;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PutError {
-    /// The opaque value exceeds the replica's configured limit.
+    /// The opaque value exceeds the server's configured limit.
     TooLarge,
-    /// The replica reached its entry limit.
+    /// The server reached its entry limit.
     Full,
 }
 
@@ -57,7 +57,7 @@ impl Store {
         self.entries.is_empty()
     }
 
-    /// Insert or replace one value using replica receipt time for expiry.
+    /// Insert or replace one value using server receipt time for expiry.
     pub fn put(
         &mut self,
         addr: SocketAddrV4,
@@ -66,9 +66,7 @@ impl Store {
         limits: &Limits,
     ) -> Result<(), PutError> {
         self.gc(now);
-        if value.len() > limits.max_value_len
-            || value.len() > udp_address_records_proto::MAX_VALUE_LEN
-        {
+        if value.len() > limits.max_value_len || value.len() > udp_addr_index_proto::MAX_VALUE_LEN {
             return Err(PutError::TooLarge);
         }
         if !self.entries.contains_key(&addr) && self.entries.len() >= limits.max_entries {

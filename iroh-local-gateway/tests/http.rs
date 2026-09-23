@@ -1,4 +1,4 @@
-//! HTTP -> Mainline -> signed tracker -> real iroh-blobs integration tests.
+//! HTTP -> Mainline -> signed index server -> real iroh-blobs integration tests.
 
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
@@ -8,10 +8,10 @@ use std::{
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
 use iroh_blobs::{BlobsProtocol, Hash, format::collection::Collection, store::mem::MemStore};
 use iroh_local_gateway::Gateway;
-use iroh_mainline_endpoint_discovery::{Directory, Resolver, SignedRecord, infohash_from_blake3};
+use iroh_mainline_endpoint_discovery::{AddrIndex, Resolver, SignedRecord, infohash_from_blake3};
 use n0_mainline::Dht;
 use reqwest::{Client, StatusCode};
-use udp_address_records::{Limits, Server};
+use udp_addr_index::{Limits, Server};
 
 /// Path separator in listing headings.
 const SEP: &str = "&nbsp;/&nbsp;<wbr>";
@@ -32,9 +32,9 @@ async fn run() {
             .build()
             .unwrap()
     };
-    let tracker = Server::new(Limits::for_tests());
-    let tracker_handle = tracker.attach(node()).await.unwrap();
-    let tracker_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, tracker_handle.local_addr().port());
+    let server = Server::new(Limits::for_tests());
+    let server_handle = server.attach(node()).await.unwrap();
+    let server_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, server_handle.local_addr().port());
 
     // A blob larger than the Bao block size, with an MP4 ftyp header.
     let mut video: Vec<u8> = (0..512 * 1024 + 123).map(|n| (n % 251) as u8).collect();
@@ -59,7 +59,7 @@ async fn run() {
         ("notes/readme.md", markdown_tag.hash),
         ("notes/hello world.txt", text_tag.hash),
         ("notes/deep/more.txt", text_tag.hash),
-        // Both a file and a directory prefix.
+        // Both a file and a index prefix.
         ("dual", text_tag.hash),
         ("dual/inner.txt", markdown_tag.hash),
         ("video.mp4", video_tag.hash),
@@ -79,10 +79,10 @@ async fn run() {
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
     let publisher_dht = node();
-    let directory = Directory::udp(publisher_dht.clone(), tracker_addr)
+    let index = AddrIndex::udp(publisher_dht.clone(), server_addr)
         .await
         .unwrap();
-    directory
+    index
         .publish(&SignedRecord::sign(provider.secret_key()))
         .await
         .unwrap();
@@ -105,10 +105,10 @@ async fn run() {
         .await
         .unwrap();
     let gateway_dht = node();
-    let directory = Directory::udp(gateway_dht.clone(), tracker_addr)
+    let index = AddrIndex::udp(gateway_dht.clone(), server_addr)
         .await
         .unwrap();
-    let resolver = Resolver::bind(gateway_dht, directory).await.unwrap();
+    let resolver = Resolver::bind(gateway_dht, index).await.unwrap();
     let gateway = Gateway::new(client_endpoint.clone(), resolver);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listen_addr = listener.local_addr().unwrap();
@@ -208,7 +208,7 @@ async fn run() {
             z32::encode(video_tag.hash.as_bytes())
         )
     );
-    // A name that is also a directory prefix lists, with or without a slash.
+    // A name that is also a index prefix lists, with or without a slash.
     for suffix in ["/dual", "/dual/"] {
         let res = client
             .get(format!("{collection_url}{suffix}"))

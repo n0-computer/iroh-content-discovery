@@ -1,20 +1,20 @@
-//! Convenience wrapper around the UDP directory client.
+//! Convenience wrapper around the UDP index client.
 
 use n0_error::e;
 use n0_future::StreamExt;
 use std::{collections::HashSet, net::SocketAddrV4, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use udp_address_records_proto::RENDEZVOUS_INFOHASH;
+use udp_addr_index_proto::RENDEZVOUS_INFOHASH;
 
 use n0_mainline::Dht;
 
 use crate::{SignedRecord, UdpClient, UdpError};
 
-/// Initial tracker discovery sources, tried in priority order.
+/// Initial index server discovery sources, tried in priority order.
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
-    /// Explicit tracker socket, used directly instead of either discovery source.
-    pub tracker: Option<SocketAddrV4>,
+    /// Explicit index server socket, used directly instead of either discovery source.
+    pub server: Option<SocketAddrV4>,
     /// Trusted BEP44 signing key, tried first when set.
     pub public_key: Option<[u8; 32]>,
     /// Untrusted rendezvous fallback; `None` disables it.
@@ -24,16 +24,16 @@ pub struct DiscoveryConfig {
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
-            tracker: None,
+            server: None,
             public_key: None,
             rendezvous_hash: Some(RENDEZVOUS_INFOHASH),
         }
     }
 }
 
-/// UDP client for one or more directory replicas.
+/// UDP client for one or more index servers.
 #[derive(Debug, Clone)]
-pub struct Directory {
+pub struct AddrIndex {
     client: UdpClient,
     discovery: Option<Arc<Discovery>>,
 }
@@ -53,7 +53,7 @@ struct DiscoveryState {
 
 impl DiscoveryState {
     fn accept(&mut self, item: n0_mainline::MutableItem) {
-        if item.seq() < 0 || crate::TrackerList::decode(item.value()).is_none() {
+        if item.seq() < 0 || crate::ServerList::decode(item.value()).is_none() {
             return;
         }
         if self
@@ -66,15 +66,15 @@ impl DiscoveryState {
     }
 }
 
-impl Directory {
-    /// Attach to a Mainline node's UDP socket and add one replica.
-    pub async fn udp(dht: Dht, replica: SocketAddrV4) -> Result<Self, UdpError> {
+impl AddrIndex {
+    /// Attach to a Mainline node's UDP socket and add one server.
+    pub async fn udp(dht: Dht, server: SocketAddrV4) -> Result<Self, UdpError> {
         let client = UdpClient::attach(dht).await?;
-        client.add_replica(replica).await?;
+        client.add_server(server).await?;
         Ok(Self::from_udp(client))
     }
 
-    /// Discover replicas through Mainline using the same socket for index traffic.
+    /// Discover servers through Mainline using the same socket for index traffic.
     ///
     /// Refreshes on use after ten minutes. Discovery is limited to two candidates
     /// and thirty seconds; announcements are untrusted and do not prove availability.
@@ -82,7 +82,7 @@ impl Directory {
         Self::discover_with_config(dht, DiscoveryConfig::default()).await
     }
 
-    /// Discover with a trusted BEP44 tracker list in addition to rendezvous peers.
+    /// Discover with a trusted BEP44 server list in addition to rendezvous peers.
     ///
     /// Uses the default rendezvous hash only if no signed addresses are available.
     pub async fn discover_with_authority(dht: Dht, public_key: [u8; 32]) -> Result<Self, UdpError> {
@@ -96,18 +96,18 @@ impl Directory {
         .await
     }
 
-    /// Discover at most two trackers, trying BEP44 before the rendezvous fallback.
+    /// Discover at most two index servers, trying BEP44 before the rendezvous fallback.
     ///
     /// Each lookup has a thirty-second deadline. Refreshes on use after ten
-    /// minutes, retaining the highest signed sequence for this directory's lifetime.
+    /// minutes, retaining the highest signed sequence for this index's lifetime.
     /// Addresses are discovery candidates; they do not prove availability.
     pub async fn discover_with_config(dht: Dht, config: DiscoveryConfig) -> Result<Self, UdpError> {
-        tracing::debug!(?config, "configuring tracker discovery");
-        if let Some(tracker) = config.tracker {
-            return Self::udp(dht, tracker).await;
+        tracing::debug!(?config, "configuring index server discovery");
+        if let Some(server) = config.server {
+            return Self::udp(dht, server).await;
         }
         let client = UdpClient::attach(dht.clone()).await?;
-        let directory = Self {
+        let index = Self {
             client,
             discovery: Some(Arc::new(Discovery {
                 dht,
@@ -115,8 +115,8 @@ impl Directory {
                 state: Mutex::new(DiscoveryState::default()),
             })),
         };
-        directory.refresh_replicas().await?;
-        Ok(directory)
+        index.refresh_replicas().await?;
+        Ok(index)
     }
 
     async fn refresh_replicas(&self) -> Result<(), UdpError> {
@@ -136,7 +136,7 @@ impl Directory {
             };
             let mut stream = discovery
                 .dht
-                .get_mutable(&key, Some(crate::TRACKER_LIST_SALT), None)
+                .get_mutable(&key, Some(crate::SERVER_LIST_SALT), None)
                 .await?;
             while let Some(item) = stream.next().await {
                 state.accept(item);
@@ -144,16 +144,16 @@ impl Directory {
             Ok(())
         };
         let signed_result = tokio::time::timeout(Duration::from_secs(30), signed_lookup).await;
-        tracing::debug!(?signed_result, "signed tracker-list lookup completed");
+        tracing::debug!(?signed_result, "signed index-list lookup completed");
         let mut peers = state
             .signed
             .as_ref()
-            .and_then(|item| crate::TrackerList::decode(item.value()))
+            .and_then(|item| crate::ServerList::decode(item.value()))
             .map(|list| list.addresses().iter().copied().collect::<HashSet<_>>())
             .unwrap_or_default();
         if peers.is_empty() {
             if let Some(hash) = discovery.config.rendezvous_hash {
-                tracing::debug!(infohash = %crate::infohash_hex(&hash), "discovering trackers through Mainline rendezvous");
+                tracing::debug!(infohash = %crate::infohash_hex(&hash), "discovering index servers through Mainline rendezvous");
                 let lookup = async {
                     let mut stream = discovery.dht.get_peers(hash.into()).await?;
                     while let Some(batch) = stream.next().await {
@@ -182,11 +182,11 @@ impl Directory {
             }
         }
         if peers.is_empty() {
-            tracing::debug!("tracker discovery found no replicas");
-            return Err(e!(UdpError::NoReplicas));
+            tracing::debug!("index server discovery found no servers");
+            return Err(e!(UdpError::NoServers));
         }
-        tracing::debug!(?peers, "using discovered trackers");
-        self.client.replace_replicas(peers).await?;
+        tracing::debug!(?peers, "using discovered index servers");
+        self.client.replace_servers(peers).await?;
         state.refreshed = Some(tokio::time::Instant::now());
         Ok(())
     }
@@ -199,20 +199,20 @@ impl Directory {
         }
     }
 
-    /// Publish a signed endpoint record to all responsive replicas.
+    /// Publish a signed endpoint record to all responsive servers.
     ///
-    /// Returns the public UDP sockets under which replicas stored it.
+    /// Returns the public UDP sockets under which servers stored it.
     pub async fn publish(
         &self,
         record: &SignedRecord,
-    ) -> Result<Vec<SocketAddrV4>, DirectoryError> {
+    ) -> Result<Vec<SocketAddrV4>, AddrIndexError> {
         self.refresh_replicas().await?;
-        let value = record.encode().map_err(|_| e!(DirectoryError::Encoding))?;
+        let value = record.encode().map_err(|_| e!(AddrIndexError::Encoding))?;
         self.client.publish(value).await.map_err(Into::into)
     }
 
     /// Lookup the endpoint that listed `addr`.
-    pub async fn lookup(&self, addr: SocketAddrV4) -> Result<Vec<SignedRecord>, DirectoryError> {
+    pub async fn lookup(&self, addr: SocketAddrV4) -> Result<Vec<SignedRecord>, AddrIndexError> {
         self.refresh_replicas().await?;
         let result = self.client.resolve(addr).await?;
         let received = result.values.len();
@@ -221,20 +221,20 @@ impl Directory {
             .into_iter()
             .filter_map(|value| SignedRecord::decode(&value))
             .collect();
-        tracing::debug!(%addr, received, valid = records.len(), "validated tracker endpoint records");
+        tracing::debug!(%addr, received, valid = records.len(), "validated index server endpoint records");
         Ok(records)
     }
 }
 
-impl From<UdpClient> for Directory {
+impl From<UdpClient> for AddrIndex {
     fn from(value: UdpClient) -> Self {
         Self::from_udp(value)
     }
 }
 
-/// Error from [`Directory::publish`] or [`Directory::lookup`].
+/// Error from [`AddrIndex::publish`] or [`AddrIndex::lookup`].
 #[n0_error::stack_error(derive, add_meta)]
-pub enum DirectoryError {
+pub enum AddrIndexError {
     /// UDP transport failed.
     #[error(transparent)]
     Udp {
@@ -250,12 +250,12 @@ pub enum DirectoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TrackerList;
+    use crate::ServerList;
 
     #[test]
     fn signed_updates_reject_rollback_and_malformed_values() {
         let key = n0_mainline::SigningKey::from_bytes(&[42; 32]);
-        let list = TrackerList::new(vec!["203.0.113.1:1234".parse().unwrap()]).unwrap();
+        let list = ServerList::new(vec!["203.0.113.1:1234".parse().unwrap()]).unwrap();
         let mut state = DiscoveryState::default();
         state.accept(list.sign(&key, 2).unwrap());
         state.accept(list.sign(&key, 1).unwrap());
@@ -264,14 +264,14 @@ mod tests {
             &key,
             &[255],
             3,
-            Some(crate::TRACKER_LIST_SALT),
+            Some(crate::SERVER_LIST_SALT),
         ));
         assert_eq!(state.signed.as_ref().unwrap().seq(), 2);
         // A newer empty list explicitly withdraws the signed candidates.
-        state.accept(TrackerList::new(vec![]).unwrap().sign(&key, 4).unwrap());
+        state.accept(ServerList::new(vec![]).unwrap().sign(&key, 4).unwrap());
         assert_eq!(state.signed.as_ref().unwrap().seq(), 4);
         assert!(
-            TrackerList::decode(state.signed.as_ref().unwrap().value())
+            ServerList::decode(state.signed.as_ref().unwrap().value())
                 .unwrap()
                 .addresses()
                 .is_empty()

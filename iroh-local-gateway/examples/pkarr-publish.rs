@@ -8,13 +8,13 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use iroh_mainline_endpoint_discovery::{PkarrPublisher, pkarr_name};
+use iroh_mainline_endpoint_discovery::{PKARR_DOMAIN, PkarrPublisher, pkarr_name};
 use n0_mainline::{Dht, SigningKey};
 
 #[derive(Parser)]
 #[command(about = "Publish a Pkarr HTTPS target and republish every ten minutes until Ctrl-C")]
 struct Args {
-    /// Target hostname, e.g. example.com or <hash>.blake3.link (no scheme or path).
+    /// Target hostname, e.g. example.com or <hash>.blake3.net (no scheme or path).
     target: String,
     /// Read or create a 32-byte secret-key file to retain the same public-key URL.
     /// Without this option, generate a temporary identity for this run.
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         // The first publish reports failures; the publisher's own task then
         // keeps the name alive.
         publisher.publish_all().await.map_err(anyhow::Error::from)?;
-        println!("Published: https://{public_key}.pkarr.link/");
+        println!("Published: https://{public_key}.{PKARR_DOMAIN}/");
         println!("Local origin: http://{public_key}.pkarr.localhost:8080/");
         println!("Republishing every ten minutes. Press Ctrl-C to stop.");
         std::future::pending().await

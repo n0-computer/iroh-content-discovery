@@ -1,5 +1,5 @@
 [package]
-name = "udp-address-records-proto"
+name = "udp-addr-index-proto"
 description = "Wire protocol for opaque UDP address records"
 version.workspace = true
 edition.workspace = true

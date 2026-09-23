@@ -1,4 +1,4 @@
-//! Concurrent UDP client for opaque address-index replicas.
+//! Concurrent UDP client for opaque address-index servers.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -10,7 +10,7 @@ use n0_error::e;
 use n0_mainline::{ActorShutdown, DatagramHookGuard, Dht};
 use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 use tracing::debug;
-use udp_address_records_proto::{
+use udp_addr_index_proto::{
     MAGIC, MAX_DGRAM, MAX_VALUE_LEN, Request, RequestV1, Response, ResponseV1, TransactionId,
 };
 
@@ -32,18 +32,18 @@ pub enum UdpError {
     /// The opaque value exceeds [`MAX_VALUE_LEN`] or the UDP datagram limit.
     #[error("opaque value exceeds {MAX_VALUE_LEN} bytes")]
     TooLarge {},
-    /// No replica addresses are configured.
-    #[error("no UDP replicas configured")]
-    NoReplicas {},
+    /// No server addresses are configured.
+    #[error("no UDP servers configured")]
+    NoServers {},
     /// The client actor stopped.
     #[error("UDP client closed")]
     Closed {},
 }
 
 enum ActorMsg {
-    AddReplica(SocketAddrV4),
-    ReplaceReplicas(HashSet<SocketAddrV4>),
-    RemoveReplica(SocketAddrV4),
+    AddServer(SocketAddrV4),
+    ReplaceServers(HashSet<SocketAddrV4>),
+    RemoveServer(SocketAddrV4),
     Publish(
         Vec<u8>,
         oneshot::Sender<Result<Vec<SocketAddrV4>, UdpError>>,
@@ -85,35 +85,35 @@ impl UdpClient {
         Ok(Self { tx })
     }
 
-    /// Add a replica used by subsequent operations.
-    pub async fn add_replica(&self, replica: SocketAddrV4) -> Result<(), UdpError> {
+    /// Add a server used by subsequent operations.
+    pub async fn add_server(&self, server: SocketAddrV4) -> Result<(), UdpError> {
         self.tx
-            .send(ActorMsg::AddReplica(replica))
+            .send(ActorMsg::AddServer(server))
             .await
             .map_err(|_| e!(UdpError::Closed))
     }
 
-    pub(crate) async fn replace_replicas(
+    pub(crate) async fn replace_servers(
         &self,
-        replicas: HashSet<SocketAddrV4>,
+        servers: HashSet<SocketAddrV4>,
     ) -> Result<(), UdpError> {
         self.tx
-            .send(ActorMsg::ReplaceReplicas(replicas))
+            .send(ActorMsg::ReplaceServers(servers))
             .await
             .map_err(|_| e!(UdpError::Closed))
     }
 
-    /// Remove a configured replica.
-    pub async fn remove_replica(&self, replica: SocketAddrV4) -> Result<(), UdpError> {
+    /// Remove a configured server.
+    pub async fn remove_server(&self, server: SocketAddrV4) -> Result<(), UdpError> {
         self.tx
-            .send(ActorMsg::RemoveReplica(replica))
+            .send(ActorMsg::RemoveServer(server))
             .await
             .map_err(|_| e!(UdpError::Closed))
     }
 
-    /// Obtain tokens and publish `value` to every responsive replica.
+    /// Obtain tokens and publish `value` to every responsive server.
     ///
-    /// Returns the public IPv4 sockets under which replicas stored the value.
+    /// Returns the public IPv4 sockets under which servers stored the value.
     pub async fn publish(&self, value: Vec<u8>) -> Result<Vec<SocketAddrV4>, UdpError> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -123,17 +123,17 @@ impl UdpClient {
         rx.await.map_err(|_| e!(UdpError::Closed))?
     }
 
-    /// Publish to one replica, adding it to this client first.
+    /// Publish to one server, adding it to this client first.
     pub async fn publish_to(
         &self,
-        replica: SocketAddrV4,
+        server: SocketAddrV4,
         value: Vec<u8>,
     ) -> Result<Vec<SocketAddrV4>, UdpError> {
-        self.add_replica(replica).await?;
+        self.add_server(server).await?;
         self.publish(value).await
     }
 
-    /// Read and deduplicate opaque values from all configured replicas.
+    /// Read and deduplicate opaque values from all configured servers.
     pub async fn resolve(&self, addr: SocketAddrV4) -> Result<ResolveResult, UdpError> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -143,13 +143,13 @@ impl UdpClient {
         rx.await.map_err(|_| e!(UdpError::Closed))?
     }
 
-    /// Resolve through one replica, adding it to this client first.
+    /// Resolve through one server, adding it to this client first.
     pub async fn resolve_from(
         &self,
-        replica: SocketAddrV4,
+        server: SocketAddrV4,
         addr: SocketAddrV4,
     ) -> Result<ResolveResult, UdpError> {
-        self.add_replica(replica).await?;
+        self.add_server(server).await?;
         self.resolve(addr).await
     }
 }
@@ -157,7 +157,7 @@ impl UdpClient {
 /// Result of an opaque address lookup.
 #[derive(Debug, Clone, Default)]
 pub struct ResolveResult {
-    /// Deduplicated opaque values returned by replicas.
+    /// Deduplicated opaque values returned by servers.
     pub values: Vec<Vec<u8>>,
 }
 
@@ -183,7 +183,7 @@ struct Actor {
     _hook: DatagramHookGuard,
     incoming: mpsc::Receiver<(Box<[u8]>, SocketAddrV4)>,
     rx: mpsc::Receiver<ActorMsg>,
-    replicas: HashSet<SocketAddrV4>,
+    servers: HashSet<SocketAddrV4>,
     publishes: HashMap<TransactionId, PendingPublish>,
     resolves: HashMap<TransactionId, PendingResolve>,
     next_tx: TransactionId,
@@ -203,7 +203,7 @@ impl Actor {
             _hook: hook,
             incoming,
             rx,
-            replicas: HashSet::new(),
+            servers: HashSet::new(),
             publishes: HashMap::new(),
             resolves: HashMap::new(),
             next_tx: 0,
@@ -237,22 +237,22 @@ impl Actor {
 
     async fn handle_message(&mut self, message: ActorMsg, buf: &mut [u8; MAX_DGRAM]) {
         match message {
-            ActorMsg::ReplaceReplicas(replicas) => {
-                self.replicas = replicas;
+            ActorMsg::ReplaceServers(servers) => {
+                self.servers = servers;
             }
-            ActorMsg::AddReplica(addr) => {
-                self.replicas.insert(addr);
+            ActorMsg::AddServer(addr) => {
+                self.servers.insert(addr);
             }
-            ActorMsg::RemoveReplica(addr) => {
-                self.replicas.remove(&addr);
+            ActorMsg::RemoveServer(addr) => {
+                self.servers.remove(&addr);
             }
             ActorMsg::Publish(value, response) => {
                 if value.len() > MAX_VALUE_LEN {
                     let _ = response.send(Err(e!(UdpError::TooLarge)));
                     return;
                 }
-                if self.replicas.is_empty() {
-                    let _ = response.send(Err(e!(UdpError::NoReplicas)));
+                if self.servers.is_empty() {
+                    let _ = response.send(Err(e!(UdpError::NoServers)));
                     return;
                 }
                 let tx = self.next_id();
@@ -261,16 +261,16 @@ impl Actor {
                     padding: [0; 24],
                 });
                 if let Some(bytes) = encode(&request, buf) {
-                    for replica in &self.replicas {
-                        if let Err(err) = self.dht.send_datagram(bytes, *replica).await {
-                            debug!(%replica, %err, "send prepare");
+                    for server in &self.servers {
+                        if let Err(err) = self.dht.send_datagram(bytes, *server).await {
+                            debug!(%server, %err, "send prepare");
                         }
                     }
                     self.publishes.insert(
                         tx,
                         PendingPublish {
                             value,
-                            awaiting: self.replicas.clone(),
+                            awaiting: self.servers.clone(),
                             stored: HashSet::new(),
                             response,
                             deadline: tokio::time::Instant::now() + self.timeout,
@@ -281,23 +281,23 @@ impl Actor {
                 }
             }
             ActorMsg::Resolve(addr, response) => {
-                if self.replicas.is_empty() {
-                    let _ = response.send(Err(e!(UdpError::NoReplicas)));
+                if self.servers.is_empty() {
+                    let _ = response.send(Err(e!(UdpError::NoServers)));
                     return;
                 }
                 let tx = self.next_id();
                 let request = Request::V1(RequestV1::Get { tx, addr });
                 if let Some(bytes) = encode(&request, buf) {
-                    for replica in &self.replicas {
-                        if let Err(err) = self.dht.send_datagram(bytes, *replica).await {
-                            debug!(%replica, %err, "send get");
+                    for server in &self.servers {
+                        if let Err(err) = self.dht.send_datagram(bytes, *server).await {
+                            debug!(%server, %err, "send get");
                         }
                     }
                     self.resolves.insert(
                         tx,
                         PendingResolve {
                             addr,
-                            awaiting: self.replicas.clone(),
+                            awaiting: self.servers.clone(),
                             values: HashSet::new(),
                             responded: false,
                             response,

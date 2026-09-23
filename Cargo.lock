@@ -1863,8 +1863,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "udp-address-records",
- "udp-address-records-proto",
+ "udp-addr-index",
+ "udp-addr-index-proto",
  "z32",
 ]
 
@@ -1891,7 +1891,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "udp-address-records-proto",
+ "udp-addr-index-proto",
  "z32",
  "zeroize",
 ]
@@ -4281,7 +4281,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
-name = "udp-address-records"
+name = "udp-addr-index"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4298,11 +4298,11 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "udp-address-records-proto",
+ "udp-addr-index-proto",
 ]
 
 [[package]]
-name = "udp-address-records-proto"
+name = "udp-addr-index-proto"
 version = "0.1.0"
 dependencies = [
  "postcard",

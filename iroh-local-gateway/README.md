@@ -12,21 +12,21 @@ With the browser extension installed and enabled on port 8080:
 cargo run -p iroh-local-gateway --example demo -- /path/to/video.mp4
 ```
 
-Open the printed `https://<public-key>.pkarr.link/` URL and leave the command
+Open the printed `https://<public-key>.pkarr.net/` URL and leave the command
 running. By default this uses the **public Mainline DHT**, discovers public
-address-index trackers, and starts the file provider, Pkarr publisher, and HTTP
+address index servers, and starts the file provider, Pkarr publisher and HTTP
 gateway in one process. The provider and gateway use normal iroh discovery and
 relays. The full browser flow is:
 
 ```text
-https://<public-key>.pkarr.link/
+https://<public-key>.pkarr.net/
   -> http://<public-key>.pkarr.localhost:8080/   (serves the named content)
 ```
 
 The gateway resolves the signed HTTPS record on Mainline; when it names
 content, it serves it directly. The content then travels through real
-iroh connections and tracker discovery. Public mode needs working outbound UDP
-and an available address-index tracker. Pass `--tracker IP:PORT` (or set
+iroh connections and server discovery. Public mode needs working outbound UDP
+and a reachable address index server. Pass `--index-server IP:PORT` (or set
 `IROH_ADDR_INDEX`) to select one explicitly if discovery fails. Startup can
 take a minute. The Pkarr packet is republished every ten minutes, and the blob
 provider must stay running. Files are imported into a
@@ -36,7 +36,7 @@ additional disk space roughly equal to the file size.
 Omit the file argument for a quick text greeting. Use `--port 8081` if needed,
 and set the same port in the extension. The printed localhost blob URL also
 works without the extension; following the Pkarr route's redirect needs the
-extension to intercept `blake3.link`. Stop any other gateway on that port first.
+extension to intercept `blake3.net`. Stop any other gateway on that port first.
 Ctrl-C stops the demo.
 
 For an isolated run without public DHT or relay services, opt in explicitly:
@@ -45,13 +45,13 @@ For an isolated run without public DHT or relay services, opt in explicitly:
 cargo run -p iroh-local-gateway --example demo -- --local-testnet
 ```
 
-This starts a local DHT and tracker and uses in-memory iroh address discovery.
+This starts a local DHT and index server, and uses in-memory iroh address discovery.
 Links from this mode work only through this demo's gateway.
 
 ## Standalone gateway
 
 ```sh
-cargo run -p iroh-local-gateway -- --listen 127.0.0.1:8080 --tracker 127.0.0.1:11223
+cargo run -p iroh-local-gateway -- --listen 127.0.0.1:8080 --index-server 127.0.0.1:11223
 ```
 
 Open:
@@ -99,11 +99,11 @@ cargo run -p iroh-local-gateway --example pkarr-publish -- example.com
 ```
 
 Leave it running alongside your gateway. After publication succeeds, open the
-printed `https://<public-key>.pkarr.link/` URL with the extension enabled, or
+printed `https://<public-key>.pkarr.net/` URL with the extension enabled, or
 use the printed localhost URL directly. This publishes to the public Mainline
 DHT; the target is a hostname, without `https://` or a path. The example does
 not start the gateway. For a content-addressed target, replace `example.com`
-with `<hash>.blake3.link` and keep the content provider running too.
+with `<hash>.blake3.net` and keep the content provider running too.
 
 By default each run generates a temporary identity. To reuse a public key:
 
@@ -124,7 +124,7 @@ On a cache miss, the gateway uses the first verified BEP44 item returned by
 Mainline; it does not wait for the full lookup to finish. `n0-mainline` verifies
 the signature, and `simple-dns` decodes the value's apex `HTTPS` records; no
 `pkarr` client or additional DHT implementation is used. It selects the supported
-target with the lowest priority. A target of the form `<hash>.blake3.link`
+target with the lowest priority. A target of the form `<hash>.blake3.net`
 names content this gateway can serve, so it is served inline, under the key's
 own URL. Any other target redirects to `https://<target>/path?query`.
 Paths and queries retain their original percent encoding; the bare key uses `/`.
@@ -148,26 +148,26 @@ bytes stay verified against the hash, and collections list in place with the
 same query flags as `/blake3`. The key keeps one origin as its content
 changes, which a per-hash URL cannot. This route can be used directly on
 localhost; the extension also routes
-`https://<public-key>.pkarr.link/path?query` to
+`https://<public-key>.pkarr.net/path?query` to
 `http://<public-key>.pkarr.localhost:<port>/path?query`.
 
 ## Discovery
 
 The gateway computes `SHA-1(blake3_hash_bytes)`, queries Mainline for content
-providers, and resolves signed endpoint records through the tracker. The optional
+providers, and resolves signed endpoint records through the address index. The optional
 `filter_verified_providers(endpoint, hash, stream)` stage validates each distinct
 candidate with an iroh-blobs size request backed by a Bao proof. The gateway uses
 this filter with three concurrent probes and a ten-second deadline per probe,
 skipping failed candidates. It reconnects to the first validated endpoint to
 stream the blob. The provider must have
-published its signed tracker record and announced the content infohash, as in
+published its signed endpoint record and announced the content infohash, as in
 the workspace's `Publisher` and blobs example.
 
-Tracker configuration uses the existing priority order:
+Server configuration follows one priority order:
 
-1. `--tracker IP:PORT` (`IROH_ADDR_INDEX`) bypasses tracker discovery.
-2. `--tracker-pubkey HEX` (`IROH_TRACKER_PUBKEY`) selects the signed BEP44 list.
-3. `--rendezvous-hash HEX` (`IROH_TRACKER_INFOHASH`) selects the fallback hash;
+1. `--index-server IP:PORT` (`IROH_ADDR_INDEX`) skips discovery.
+2. `--index-list-key HEX` (`IROH_ADDR_INDEX_LIST_KEY`) selects the signed BEP44 list.
+3. `--rendezvous-hash HEX` (`IROH_ADDR_INDEX_RENDEZVOUS`) selects the fallback hash;
    if omitted, the protocol's default rendezvous hash is used.
 
 Use `--no-rendezvous` to disable the hash fallback. Public keys are 64 hex digits;
@@ -256,7 +256,7 @@ downloads.
 cargo test -p iroh-local-gateway
 ```
 
-The integration test uses a local Mainline testnet, a real tracker, an iroh-blobs
+The integration test uses a local Mainline testnet, a real index server, an iroh-blobs
 provider, and a TCP HTTP listener. It checks full streaming, video MIME detection,
 byte-exact unaligned ranges, suffixes, multipart responses, HEAD, conditional requests, empty blobs,
 invalid/missing content, and CORS without relying on public DHT or relay services.
@@ -274,7 +274,7 @@ RUST_LOG=info,iroh_local_gateway=debug,iroh_mainline_endpoint_discovery=debug,de
 Set the extension's port to the same value. Use the same `RUST_LOG` filter with
 `cargo run -p iroh-local-gateway -- ...` for a standalone gateway.
 Debug output includes request paths and response status/timing, Pkarr packet
-sequences and redirect destinations, tracker addresses and lookup results,
+sequences and redirect destinations, server addresses and lookup results,
 selected endpoint IDs, connection timing/errors, cache hits, blob metadata,
 and body transfer completion/errors. It does not log secret keys or blob data.
 Add `iroh=debug` to investigate address discovery and transport internals.

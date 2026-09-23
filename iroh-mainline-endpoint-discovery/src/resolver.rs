@@ -1,8 +1,8 @@
-//! Mainline infohash → [`EndpointId`]s via `get_peers` and an addr → eid directory.
+//! Mainline infohash → [`EndpointId`]s via `get_peers` and an addr → endpoint_id index.
 //!
 //! The infohash is opaque (`SHA-1`, 20 bytes). BLAKE3 content is hashed at
 //! the call site (`SHA-1(blake3)`). Each compact `ip:port` is then resolved
-//! through the directory.
+//! through the index.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -12,7 +12,7 @@ use n0_future::{FuturesUnordered, StreamExt, stream};
 use n0_mainline::{Dht, Id};
 use tokio::task::JoinSet;
 
-use crate::Directory;
+use crate::AddrIndex;
 
 const MAX_INDEX_LOOKUPS: usize = 16;
 const MAX_QUEUED_PEERS: usize = 64;
@@ -21,7 +21,7 @@ const MAX_QUEUED_PEERS: usize = 64;
 #[derive(Debug, Clone)]
 pub struct Resolver {
     dht: Dht,
-    dir: Directory,
+    index: AddrIndex,
 }
 
 impl Resolver {
@@ -30,9 +30,9 @@ impl Resolver {
         &self.dht
     }
 
-    /// Use the supplied shared Mainline node and address-index directory.
-    pub async fn bind(dht: Dht, dir: Directory) -> Result<Self> {
-        Ok(Self { dht, dir })
+    /// Use the supplied shared Mainline node and address index.
+    pub async fn bind(dht: Dht, index: AddrIndex) -> Result<Self> {
+        Ok(Self { dht, index })
     }
 
     /// Yield endpoint IDs as Mainline peers and index records arrive.
@@ -44,7 +44,7 @@ impl Resolver {
     pub async fn resolve_stream(&self, infohash: Id) -> Result<stream::Boxed<EndpointId>> {
         tracing::debug!(%infohash, "starting Mainline provider stream");
         let mut peers = self.dht.get_peers(infohash).await.context("get_peers")?;
-        let directory = self.dir.clone();
+        let index = self.index.clone();
         let stream = async_stream::stream! {
             let mut pending_peers = VecDeque::new();
             let mut lookups = FuturesUnordered::new();
@@ -52,8 +52,8 @@ impl Resolver {
             loop {
                 while lookups.len() < MAX_INDEX_LOOKUPS {
                     let Some(peer) = pending_peers.pop_front() else { break };
-                    let directory = directory.clone();
-                    lookups.push(async move { (peer, directory.lookup(peer).await) });
+                    let index = index.clone();
+                    lookups.push(async move { (peer, index.lookup(peer).await) });
                 }
                 if peers_done && pending_peers.is_empty() && lookups.is_empty() {
                     break;
@@ -72,10 +72,10 @@ impl Resolver {
                         if let Some((peer, result)) = result {
                             match result {
                                 Ok(records) => for record in records {
-                                    tracing::debug!(%infohash, %peer, endpoint = %record.eid, "discovered content provider");
-                                    yield record.eid;
+                                    tracing::debug!(%infohash, %peer, endpoint = %record.endpoint_id, "discovered content provider");
+                                    yield record.endpoint_id;
                                 },
-                                Err(err) => tracing::debug!(%peer, %err, "directory resolve"),
+                                Err(err) => tracing::debug!(%peer, %err, "index resolve"),
                             }
                         }
                     }
@@ -108,7 +108,7 @@ impl Resolver {
 
     /// Return the first signed endpoint found, without resolving every peer.
     ///
-    /// Directory lookups are sequential and duplicate sockets are skipped.
+    /// AddrIndex lookups are sequential and duplicate sockets are skipped.
     /// The caller should impose a deadline on this network operation.
     #[tracing::instrument(level = "debug", skip(self), fields(infohash = %infohash))]
     pub async fn resolve_one(&self, infohash: Id) -> Result<Option<EndpointId>> {
@@ -128,18 +128,18 @@ impl Resolver {
                 if !peers.insert(peer) {
                     continue;
                 }
-                tracing::debug!(%peer, "looking up signed endpoint in tracker");
-                match self.dir.lookup(peer).await {
+                tracing::debug!(%peer, "looking up signed endpoint in index server");
+                match self.index.lookup(peer).await {
                     Ok(records) => {
-                        tracing::debug!(%peer, count = records.len(), "tracker endpoint records received");
+                        tracing::debug!(%peer, count = records.len(), "index server endpoint records received");
                         any_ok = true;
                         if let Some(record) = records.into_iter().next() {
-                            tracing::debug!(%peer, endpoint = %record.eid, elapsed_ms = started.elapsed().as_millis(), "selected content provider");
-                            return Ok(Some(record.eid));
+                            tracing::debug!(%peer, endpoint = %record.endpoint_id, elapsed_ms = started.elapsed().as_millis(), "selected content provider");
+                            return Ok(Some(record.endpoint_id));
                         }
                     }
                     Err(error) => {
-                        tracing::debug!(%peer, ?error, "tracker endpoint lookup failed");
+                        tracing::debug!(%peer, ?error, "index server endpoint lookup failed");
                         last_error = Some(error);
                     }
                 }
@@ -156,10 +156,10 @@ impl Resolver {
         Ok(None)
     }
 
-    /// `get_peers` for `infohash`, then directory-resolve each compact peer.
+    /// `get_peers` for `infohash`, then index-resolve each compact peer.
     ///
-    /// Unique eids, sorted. Empty if the DHT has no peers or none of them are
-    /// in the directory. Returned endpoint IDs are dialed through normal iroh
+    /// Unique endpoint_ids, sorted. Empty if the DHT has no peers or none of them are
+    /// in the index. Returned endpoint IDs are dialed through normal iroh
     /// discovery, not through the DHT address.
     pub async fn resolve(&self, infohash: Id) -> Result<Vec<EndpointId>> {
         let mut stream = self.dht.get_peers(infohash).await.context("get_peers")?;
@@ -171,30 +171,30 @@ impl Resolver {
 
         let mut set = JoinSet::new();
         for peer in peers {
-            let dir = self.dir.clone();
-            set.spawn(async move { (peer, dir.lookup(peer).await) });
+            let index = self.index.clone();
+            set.spawn(async move { (peer, index.lookup(peer).await) });
         }
 
-        let mut eids = HashSet::new();
+        let mut endpoint_ids = HashSet::new();
         let mut any_ok = false;
         let mut last_err = None;
         while let Some(joined) = set.join_next().await {
             match joined {
                 Ok((_, Ok(records))) => {
                     any_ok = true;
-                    eids.extend(records.into_iter().map(|r| r.eid));
+                    endpoint_ids.extend(records.into_iter().map(|r| r.endpoint_id));
                 }
                 Ok((peer, Err(err))) => {
-                    tracing::debug!(%peer, %err, "directory resolve");
+                    tracing::debug!(%peer, %err, "index resolve");
                     last_err = Some(err);
                 }
-                Err(err) => tracing::debug!(%err, "directory resolve join"),
+                Err(err) => tracing::debug!(%err, "index resolve join"),
             }
         }
         if !any_ok && let Some(err) = last_err {
             return Err(err.into());
         }
-        let mut out: Vec<_> = eids.into_iter().collect();
+        let mut out: Vec<_> = endpoint_ids.into_iter().collect();
         out.sort();
         Ok(out)
     }

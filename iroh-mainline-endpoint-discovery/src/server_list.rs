@@ -1,27 +1,30 @@
-//! Signed BEP44 bootstrap lists for address-index replicas.
+//! Signed BEP44 bootstrap lists for address-index servers.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use n0_mainline::{MutableItem, SigningKey};
 
-/// BEP44 salt separating tracker lists from other records signed by the same key.
-pub const TRACKER_LIST_SALT: &[u8] = b"iroh-addr-index replicas v1";
+/// BEP44 salt separating server lists from other records signed by the same key.
+pub const SERVER_LIST_SALT: &[u8] = b"iroh-addr-index servers v1";
 
-/// A versioned list of at most two tracker sockets.
+/// A versioned list of at most two address index server sockets.
 ///
 /// The BEP44 byte-string value is one version byte (`1`) followed by six bytes
 /// per address: four IPv4 octets and a big-endian UDP port. An empty list is valid.
 /// At 13 bytes maximum, this fits comfortably within BEP44's value limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrackerList(Vec<SocketAddrV4>);
+pub struct ServerList(Vec<SocketAddrV4>);
 
-impl TrackerList {
+impl ServerList {
     /// Build a list, rejecting invalid sockets and more than two entries.
     pub fn new(addresses: Vec<SocketAddrV4>) -> n0_error::Result<Self> {
-        n0_error::ensure_any!(addresses.len() <= 2, "at most two trackers are allowed");
+        n0_error::ensure_any!(
+            addresses.len() <= 2,
+            "at most two index servers are allowed"
+        );
         n0_error::ensure_any!(
             addresses.iter().all(valid_address),
-            "invalid tracker socket"
+            "invalid index server socket"
         );
         let mut unique = Vec::new();
         for address in addresses {
@@ -32,7 +35,7 @@ impl TrackerList {
         Ok(Self(unique))
     }
 
-    /// Tracker sockets endorsed by the signer.
+    /// Server sockets endorsed by the signer.
     pub fn addresses(&self) -> &[SocketAddrV4] {
         &self.0
     }
@@ -77,7 +80,7 @@ impl TrackerList {
             key,
             &self.encode(),
             sequence,
-            Some(TRACKER_LIST_SALT),
+            Some(SERVER_LIST_SALT),
         ))
     }
 }
@@ -96,10 +99,10 @@ mod tests {
     #[test]
     fn encoding_is_bounded_and_strict() {
         let addr = "203.0.113.1:1234".parse().unwrap();
-        let list = TrackerList::new(vec![addr, addr]).unwrap();
+        let list = ServerList::new(vec![addr, addr]).unwrap();
         assert_eq!(list.encode(), [1, 203, 0, 113, 1, 4, 210]);
-        assert_eq!(TrackerList::decode(&list.encode()), Some(list));
-        assert!(TrackerList::decode(&[1]).is_some());
+        assert_eq!(ServerList::decode(&list.encode()), Some(list));
+        assert!(ServerList::decode(&[1]).is_some());
         for bytes in [
             vec![],
             vec![2],
@@ -107,9 +110,9 @@ mod tests {
             vec![1; 199],
             vec![1, 0, 0, 0, 0, 0, 1],
         ] {
-            assert!(TrackerList::decode(&bytes).is_none());
+            assert!(ServerList::decode(&bytes).is_none());
         }
-        assert!(TrackerList::new(vec![addr; 3]).is_err());
-        assert!(TrackerList::new(vec!["203.0.113.1:0".parse().unwrap()]).is_err());
+        assert!(ServerList::new(vec![addr; 3]).is_err());
+        assert!(ServerList::new(vec!["203.0.113.1:0".parse().unwrap()]).is_err());
     }
 }

@@ -2,16 +2,16 @@
   "manifest_version": 3,
   "name": "iroh link",
   "version": "0.2.0",
-  "description": "Open blake3.link content and resolve pkarr.link names through your local iroh HTTP gateway.",
+  "description": "Open blake3.net content and resolve pkarr.net names through your local iroh HTTP gateway.",
   "permissions": [
     "declarativeNetRequestWithHostAccess",
     "storage"
   ],
   "host_permissions": [
-    "http://*.blake3.link/*",
-    "https://*.blake3.link/*",
-    "http://*.pkarr.link/*",
-    "https://*.pkarr.link/*"
+    "http://*.blake3.net/*",
+    "https://*.blake3.net/*",
+    "http://*.pkarr.net/*",
+    "https://*.pkarr.net/*"
   ],
   "background": {
     "service_worker": "background.js",

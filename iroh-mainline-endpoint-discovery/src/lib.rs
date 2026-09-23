@@ -1,7 +1,7 @@
 //! Publish and resolve iroh endpoints through the Mainline DHT.
 //!
 //! Mainline maps an application-defined infohash to a compact IPv4 socket.
-//! An iroh address-index replica then maps that socket to a signed endpoint
+//! An iroh address-index server then maps that socket to a signed endpoint
 //! identity. The endpoint and DHT node are supplied by the caller and may be
 //! shared with other protocols.
 
@@ -9,23 +9,23 @@
 
 use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
 
-mod directory;
+mod addr_index;
 mod pkarr;
 mod publisher;
 mod record;
 mod republisher;
 mod resolver;
-mod tracker_list;
+mod server_list;
 mod udp;
 
+pub use addr_index::{AddrIndex, AddrIndexError, DiscoveryConfig};
 pub use blake3::Hash;
-pub use directory::{Directory, DirectoryError, DiscoveryConfig};
-pub use pkarr::{BLAKE3_LINK, PKARR_REFRESH, PkarrPublisher, pkarr_name};
+pub use pkarr::{BLAKE3_DOMAIN, PKARR_DOMAIN, PKARR_REFRESH, PkarrPublisher, pkarr_name};
 pub use publisher::{ANNOUNCE_SPACING, Publisher, REFRESH};
 pub use record::{RecordPayload, RecordPayloadV1, SignedRecord};
-pub use republisher::republish_tracker_list;
+pub use republisher::republish_server_list;
 pub use resolver::Resolver;
-pub use tracker_list::{TRACKER_LIST_SALT, TrackerList};
+pub use server_list::{SERVER_LIST_SALT, ServerList};
 pub use udp::{DEFAULT_TIMEOUT, ResolveResult, UdpClient, UdpError};
 
 /// Mainline infohash for a BLAKE3 hash: `SHA-1(blake3)`.

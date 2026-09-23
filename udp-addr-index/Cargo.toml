@@ -1,5 +1,5 @@
 [package]
-name = "udp-address-records"
+name = "udp-addr-index"
 description = "Small opaque records for verified UDP addresses"
 version.workspace = true
 edition.workspace = true
@@ -16,7 +16,7 @@ blake3.workspace = true
 clap.workspace = true
 data-encoding.workspace = true
 iroh-metrics = { version = "1.0.1", features = ["service"] }
-udp-address-records-proto = { version = "0.1.0", path = "../udp-address-records-proto" }
+udp-addr-index-proto = { version = "0.1.0", path = "../udp-addr-index-proto" }
 n0-mainline.workspace = true
 postcard.workspace = true
 rand.workspace = true
@@ -31,8 +31,8 @@ n0-future.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [[bin]]
-name = "udp-address-records"
-path = "src/bin/udp-address-records.rs"
+name = "udp-addr-index"
+path = "src/bin/udp-addr-index.rs"
 
 [lints]
 workspace = true
