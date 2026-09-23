@@ -71,6 +71,38 @@ Edition and Nightly can instead install an unsigned package when
 `background.service_worker` is ignored is expected: Chrome uses the service
 worker and Firefox uses `background.scripts`, both pointing to the same file.
 
+## Packaging
+
+Requires Node.js 18 or later and the `zip` command (available by default on
+macOS; install it with your system package manager on Linux). No npm dependencies
+or store credentials are needed.
+
+From the repository root:
+
+```sh
+npm --prefix blake3-link-extension run package
+# Or build just one browser package:
+npm --prefix blake3-link-extension run package:chrome
+npm --prefix blake3-link-extension run package:firefox
+```
+
+Artifacts are written to `blake3-link-extension/dist/`:
+
+- `iroh-link-<version>-chrome.zip` for Chrome/Brave, with a service worker and
+  no Firefox-specific manifest fields.
+- `iroh-link-<version>-firefox.zip` for Firefox, with background scripts and
+  the existing Gecko extension ID.
+
+The version comes from `manifest.json`. Each ZIP contains the manifest at its
+root and only runtime files; tests, documentation, and packaging scripts are
+excluded. The shared source manifest remains usable for development in both
+browsers. Build commands work from any directory when invoked by absolute path.
+
+These packages are unsigned. Unzip the Chrome archive to load it unpacked, or
+upload it to the Chrome Web Store. Submit the Firefox ZIP to Mozilla for signing
+before permanent installation; signing produces an XPI. Packaging does not
+upload, sign, or publish anything. The gateway is distributed separately.
+
 ## Settings and behavior
 
 The popup configures the localhost port and can disable all redirects. Saved
