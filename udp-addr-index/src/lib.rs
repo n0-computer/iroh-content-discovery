@@ -12,11 +12,10 @@ mod store;
 pub mod udp;
 
 use std::{
-    collections::HashMap,
-    hash::Hash,
+    hash::{Hash, Hasher},
     net::{IpAddr, SocketAddrV4},
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rand::Rng;
@@ -25,7 +24,11 @@ pub use metrics::Metrics;
 pub use store::{PutError, Store};
 pub use udp::UdpHandle;
 
-const MAX_RATE_LIMIT_BUCKETS: usize = 65_536;
+/// Rate-limit buckets, shared between addresses by hashing.
+///
+/// A fixed table cannot be filled, so a flood of forged source addresses costs
+/// genuine clients some quota through collisions but never locks them out.
+const RATE_LIMIT_BUCKETS: usize = 65_536;
 const TOKEN_DOMAIN: &[u8] = b"udp-addr-index-token-v1";
 
 /// Storage, token, and request limits for a server.
@@ -34,7 +37,15 @@ pub struct Limits {
     /// Maximum opaque value length.
     pub max_value_len: usize,
     /// Maximum number of live mappings.
+    ///
+    /// At the limit the mapping nearest to expiry is evicted, so a full store
+    /// keeps accepting new publishers instead of freezing for a whole TTL.
     pub max_entries: usize,
+    /// Maximum number of live mappings per publishing IPv4 address.
+    ///
+    /// The map key includes the port, so without this one host could claim a
+    /// mapping per source port.
+    pub max_entries_per_ip: usize,
     /// How long an accepted value remains live.
     pub value_ttl_secs: u64,
     /// Length of one token validity bucket.
@@ -52,6 +63,7 @@ impl Default for Limits {
         Self {
             max_value_len: udp_addr_index_proto::MAX_VALUE_LEN,
             max_entries: 2_000_000,
+            max_entries_per_ip: 16,
             value_ttl_secs: 60 * 60,
             token_bucket_secs: 30,
             requests_per_ip_per_sec: 50.0,
@@ -189,50 +201,47 @@ impl Bucket {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct RateLimiters {
-    by_ip: HashMap<IpAddr, Bucket>,
-    last_gc: Option<Instant>,
+    buckets: Box<[Bucket]>,
+}
+
+impl Default for RateLimiters {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            buckets: (0..RATE_LIMIT_BUCKETS)
+                .map(|_| Bucket {
+                    tokens: f64::NAN,
+                    last: now,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl RateLimiters {
     fn allow(&mut self, limits: &Limits, ip: IpAddr) -> bool {
-        let now = Instant::now();
-        if self
-            .last_gc
-            .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(60))
-        {
-            self.last_gc = Some(now);
-            self.by_ip.retain(|_, bucket| {
-                now.saturating_duration_since(bucket.last) <= Duration::from_secs(600)
-            });
+        let index = bucket_index(ip);
+        let bucket = &mut self.buckets[index];
+        // A fresh bucket starts full; `NAN` marks one that has never been used.
+        if bucket.tokens.is_nan() {
+            bucket.tokens = limits.request_burst;
+            bucket.last = Instant::now();
         }
-        take(
-            &mut self.by_ip,
-            ip,
-            now,
+        bucket.take(
+            Instant::now(),
             limits.requests_per_ip_per_sec,
             limits.request_burst,
         )
     }
 }
 
-fn take<K: Eq + Hash>(
-    map: &mut HashMap<K, Bucket>,
-    key: K,
-    now: Instant,
-    rate: f64,
-    burst: f64,
-) -> bool {
-    if !map.contains_key(&key) && map.len() >= MAX_RATE_LIMIT_BUCKETS {
-        return false;
-    }
-    map.entry(key)
-        .or_insert(Bucket {
-            tokens: burst,
-            last: now,
-        })
-        .take(now, rate, burst)
+/// Map an address to a bucket, mixing so neighbouring addresses spread out.
+fn bucket_index(ip: IpAddr) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ip.hash(&mut hasher);
+    hasher.finish() as usize % RATE_LIMIT_BUCKETS
 }
 
 fn token_eq(left: &[u8; 16], right: &[u8; 16]) -> bool {

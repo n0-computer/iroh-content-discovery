@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    net::SocketAddrV4,
+    net::{Ipv4Addr, SocketAddrV4},
 };
 
 use crate::Limits;
@@ -13,7 +13,7 @@ use crate::Limits;
 pub enum PutError {
     /// The opaque value exceeds the server's configured limit.
     TooLarge,
-    /// The server reached its entry limit.
+    /// The server reached its entry limit, or the address reached its own.
     Full,
 }
 
@@ -21,7 +21,7 @@ impl std::fmt::Display for PutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooLarge => write!(f, "value is too large"),
-            Self::Full => write!(f, "address index is full"),
+            Self::Full => write!(f, "address index is full or the quota is used up"),
         }
     }
 }
@@ -39,6 +39,9 @@ struct Entry {
 pub struct Store {
     entries: HashMap<SocketAddrV4, Entry>,
     expirations: BTreeSet<(u64, SocketAddrV4)>,
+    /// Entries held per address, so one host cannot claim the whole store by
+    /// publishing from many source ports.
+    per_ip: HashMap<Ipv4Addr, usize>,
 }
 
 impl Store {
@@ -69,12 +72,27 @@ impl Store {
         if value.len() > limits.max_value_len || value.len() > udp_addr_index_proto::MAX_VALUE_LEN {
             return Err(PutError::TooLarge);
         }
-        if !self.entries.contains_key(&addr) && self.entries.len() >= limits.max_entries {
-            return Err(PutError::Full);
+        let fresh = !self.entries.contains_key(&addr);
+        if fresh {
+            if self.per_ip.get(addr.ip()).copied().unwrap_or(0) >= limits.max_entries_per_ip {
+                return Err(PutError::Full);
+            }
+            // Evicting the entry nearest to expiry keeps the store useful under
+            // pressure, where refusing new publishers would freeze it for a TTL.
+            if self.entries.len() >= limits.max_entries {
+                let Some(&(expires_at, oldest)) = self.expirations.first() else {
+                    return Err(PutError::Full);
+                };
+                self.expirations.remove(&(expires_at, oldest));
+                self.remove_entry(oldest);
+            }
         }
         let expires_at = now.saturating_add(limits.value_ttl_secs);
-        if let Some(previous) = self.entries.insert(addr, Entry { value, expires_at }) {
-            self.expirations.remove(&(previous.expires_at, addr));
+        match self.entries.insert(addr, Entry { value, expires_at }) {
+            Some(previous) => {
+                self.expirations.remove(&(previous.expires_at, addr));
+            }
+            None => *self.per_ip.entry(*addr.ip()).or_default() += 1,
         }
         self.expirations.insert((expires_at, addr));
         Ok(())
@@ -93,7 +111,19 @@ impl Store {
                 break;
             }
             self.expirations.pop_first();
-            self.entries.remove(&addr);
+            self.remove_entry(addr);
+        }
+    }
+
+    /// Drop one entry and its per-address count.
+    fn remove_entry(&mut self, addr: SocketAddrV4) {
+        if self.entries.remove(&addr).is_some()
+            && let Some(count) = self.per_ip.get_mut(addr.ip())
+        {
+            *count -= 1;
+            if *count == 0 {
+                self.per_ip.remove(addr.ip());
+            }
         }
     }
 }
@@ -117,22 +147,58 @@ mod tests {
     }
 
     #[test]
-    fn caps_values_and_entries() {
+    fn caps_value_size() {
         let limits = Limits {
             max_value_len: 1,
+            ..Limits::for_tests()
+        };
+        let mut store = Store::new();
+        let addr = "203.0.113.9:1".parse().unwrap();
+        assert_eq!(
+            store.put(addr, vec![0, 1], 0, &limits),
+            Err(PutError::TooLarge)
+        );
+        store.put(addr, vec![0], 0, &limits).unwrap();
+    }
+
+    #[test]
+    fn a_full_store_evicts_the_nearest_expiry() {
+        let limits = Limits {
             max_entries: 1,
+            value_ttl_secs: 10,
             ..Limits::for_tests()
         };
         let mut store = Store::new();
         let a = "203.0.113.9:1".parse().unwrap();
         let b = "203.0.113.9:2".parse().unwrap();
-        assert_eq!(
-            store.put(a, vec![0, 1], 0, &limits),
-            Err(PutError::TooLarge)
-        );
         store.put(a, vec![0], 0, &limits).unwrap();
-        assert_eq!(store.put(b, vec![0], 0, &limits), Err(PutError::Full));
-        store.put(a, vec![1], 0, &limits).unwrap();
+        // Refusing here would freeze the store for a whole TTL.
+        store.put(b, vec![1], 1, &limits).unwrap();
+        assert_eq!(store.get(a, 1), None);
+        assert_eq!(store.get(b, 1), Some(vec![1]));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.expirations.len(), 1);
+    }
+
+    #[test]
+    fn caps_entries_per_address() {
+        let limits = Limits {
+            max_entries_per_ip: 1,
+            ..Limits::for_tests()
+        };
+        let mut store = Store::new();
+        let one = "203.0.113.9:1".parse().unwrap();
+        let two = "203.0.113.9:2".parse().unwrap();
+        let other_host = "203.0.113.10:1".parse().unwrap();
+        store.put(one, vec![0], 0, &limits).unwrap();
+        assert_eq!(store.put(two, vec![0], 0, &limits), Err(PutError::Full));
+        // Refreshing an address it already holds stays within the quota.
+        store.put(one, vec![1], 1, &limits).unwrap();
+        // Another host has its own quota.
+        store.put(other_host, vec![0], 1, &limits).unwrap();
+        // Expiry returns the quota.
+        store.gc(u64::MAX);
+        store.put(two, vec![0], 0, &limits).unwrap();
     }
 
     #[test]
