@@ -413,6 +413,22 @@ fn raw_mime(mime: &str) -> String {
     }
 }
 
+/// Returns a `Content-Disposition` value that saves the body as `filename`.
+///
+/// Sends both the plain and the RFC 6266 extended form, since the plain one
+/// cannot express non-ASCII names.
+fn attachment(filename: &str) -> String {
+    let ascii: String = filename
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | ' ' => c,
+            _ => '_',
+        })
+        .collect();
+    let encoded = utf8_percent_encode(filename, PATH_SEGMENT);
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
 /// The collection a listing belongs to, and the path its links start with.
 struct Root {
     encoded: String,
@@ -485,7 +501,8 @@ async fn blob(
         )
         .await;
     }
-    serve_blob(source, hash, &encoded, raw, method, headers).await
+    let download = has_flag(query.as_deref(), "download").then(|| encoded.clone());
+    serve_blob(source, hash, &encoded, raw, download, method, headers).await
 }
 
 async fn collection_root(
@@ -551,11 +568,18 @@ async fn collection_entry(
         .await
         .map_err(HttpError::timeout)??;
         let raw = has_flag(query.as_deref(), "raw");
+        // Save under the file's own name, not the hash.
+        let download = has_flag(query.as_deref(), "download").then(|| {
+            path.rsplit_once('/')
+                .map_or(path.as_str(), |(_, file)| file)
+                .to_owned()
+        });
         return serve_blob(
             source,
             hash,
             &z32::encode(hash.as_bytes()),
             raw,
+            download,
             method,
             headers,
         )
@@ -684,13 +708,13 @@ fn listing(
             format!("{parent}/")
         };
         html.push_str(&format!(
-            "<tr><td><a href=\"{}{query}\">../</a></td><td class=\"size\"></td><td class=\"hash\"></td></tr>\n",
+            "<tr><td><a href=\"{}{query}\">../</a></td><td class=\"size\"></td><td class=\"hash\"></td><td class=\"download\"></td></tr>\n",
             link(&parent)
         ));
     }
     for sub in &entries.dirs {
         html.push_str(&format!(
-            "<tr><td><a href=\"{}{query}\">{}/</a></td><td class=\"size\"></td><td class=\"hash\"></td></tr>\n",
+            "<tr><td><a href=\"{}{query}\">{}/</a></td><td class=\"size\"></td><td class=\"hash\"></td><td class=\"download\"></td></tr>\n",
             link(&format!("{dir}{sub}/")),
             html_escape(sub),
         ));
@@ -703,10 +727,12 @@ fn listing(
             None => String::new(),
         };
         html.push_str(&format!(
-            "<tr><td><a href=\"{}\">{}</a></td><td class=\"size\">{size}</td><td class=\"hash\">{}</td></tr>\n",
+            "<tr><td><a href=\"{}\">{}</a></td><td class=\"size\">{size}</td><td class=\"hash\">{}</td>\
+             <td class=\"download\"><a href=\"{}?download\">Download</a></td></tr>\n",
             link(&format!("{dir}{file}")),
             html_escape(file),
             z32::encode(hash.as_bytes()),
+            link(&format!("{dir}{file}")),
         ));
     }
     html.push_str("</table>\n");
@@ -749,6 +775,7 @@ async fn serve_blob(
     hash: Hash,
     encoded: &str,
     raw: bool,
+    download: Option<String>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -762,6 +789,10 @@ async fn serve_blob(
         .header(header::ETAG, &etag)
         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    let builder = match &download {
+        Some(filename) => builder.header(header::CONTENT_DISPOSITION, attachment(filename)),
+        None => builder,
+    };
     if headers
         .get_all(header::IF_NONE_MATCH)
         .iter()

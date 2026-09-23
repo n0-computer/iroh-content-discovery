@@ -135,6 +135,9 @@ Query flags:
   keeps its charset as `text/plain`, anything else becomes
   `application/octet-stream`. On a root URL it serves the underlying hash
   sequence instead of a listing, and takes precedence over `?tree`.
+- `?download` saves the response instead of showing it, under the file's name
+  in the collection, or under the hash for a bare blob. Listings link to it in
+  a `Download` column.
 - `?sizes` on a listing shows file sizes. The gateway fetches the last chunk
   of each listed file, which verifies its size, up to 16 at a time.
 

@@ -167,6 +167,30 @@ async fn run() {
         "text/markdown; charset=utf-8"
     );
     assert_eq!(res.bytes().await.unwrap().as_ref(), markdown);
+    // `?download` saves the file under its collection name.
+    let res = client
+        .get(format!("{collection_url}/notes/hello%20world.txt?download"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()["content-disposition"],
+        "attachment; filename=\"hello world.txt\"; filename*=UTF-8''hello%20world.txt"
+    );
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = client
+        .get(format!("{}?download", url(video_tag.hash)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.headers()["content-disposition"],
+        format!(
+            "attachment; filename=\"{0}\"; filename*=UTF-8''{0}",
+            z32::encode(video_tag.hash.as_bytes())
+        )
+    );
     // `?tree` states that the root is a collection, without detecting it.
     let res = client
         .get(format!("{collection_url}?tree"))
@@ -465,6 +489,9 @@ async fn run() {
     let html = res.text().await.unwrap();
     assert!(html.contains(&format!("href=\"{tree}/\">../")));
     assert!(html.contains(&format!("href=\"{tree}/notes/hello%20world.txt\"")));
+    assert!(html.contains(&format!(
+        "href=\"{tree}/notes/hello%20world.txt?download\">Download</a>"
+    )));
     assert!(!html.contains("video.mp4"));
     let res = client
         .get(format!("{collection_url}/notes/hello%20world.txt"))

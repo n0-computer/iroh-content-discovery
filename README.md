@@ -184,8 +184,9 @@ Mainline and the tracker, then streams Bao-verified bytes with MIME detection
 and HTTP range support for video seeking. Collection roots automatically show
 a directory listing at `/blake3/<z32>`, and `/blake3/<z32>/path/to/file`
 streams a file from the same provider. `?tree` serves a known collection
-without detecting it, `?raw` serves a file's source or a root's raw bytes, and
-`?sizes` adds file sizes to a listing. The same content is served on
+without detecting it, `?raw` serves a file's source or a root's raw bytes,
+`?download` saves a file under its collection name, and `?sizes` adds file
+sizes to a listing. The same content is served on
 `http://<z32>.localhost:8080/`, giving each hash its own browser origin.
 
 ```sh
