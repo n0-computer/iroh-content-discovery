@@ -87,28 +87,26 @@ impl Server {
         let local_addr = dht.info().await?.local_addr().into();
         let (tx, mut rx) = mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(256);
         let metrics = self.metrics();
-        let hook = dht
-            .add_datagram_hook(move |bytes, from| {
-                if !bytes.starts_with(MAGIC) {
-                    return false;
+        dht.set_datagram_hook(Some(n0_mainline::DatagramHook::new(move |bytes, from| {
+            if !bytes.starts_with(MAGIC) {
+                return false;
+            }
+            if bytes.len() > MAX_DGRAM {
+                return true;
+            }
+            match tx.try_send((bytes.into(), from)) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => {
+                    metrics.queue_drops.inc();
+                    true
                 }
-                if bytes.len() > MAX_DGRAM {
-                    return true;
-                }
-                match tx.try_send((bytes.into(), from)) {
-                    Ok(()) => true,
-                    Err(TrySendError::Full(_)) => {
-                        metrics.queue_drops.inc();
-                        true
-                    }
-                    Err(TrySendError::Closed(_)) => false,
-                }
-            })
-            .await?;
+                Err(TrySendError::Closed(_)) => false,
+            }
+        })))
+        .await?;
         let server = self.clone();
         let transport = dht.clone();
         let task = tokio::spawn(async move {
-            let _hook = hook;
             while let Some((bytes, from)) = rx.recv().await {
                 server.handle_packet(&bytes, &transport, from).await?;
             }
@@ -202,7 +200,7 @@ impl Server {
         if let Some(response) = response {
             let mut out = [0; MAX_DGRAM];
             let bytes = response.encode(&mut out).expect("bounded response");
-            dht.send_datagram(bytes, from).await?;
+            dht.send_datagram(bytes.to_vec(), from).await?;
         }
         Ok(())
     }

@@ -7,7 +7,7 @@ use std::{
 };
 
 use n0_error::e;
-use n0_mainline::{ActorShutdown, DatagramHookGuard, Dht};
+use n0_mainline::{ActorShutdown, DatagramHook, Dht};
 use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 use tracing::debug;
 use udp_addr_index_proto::{
@@ -69,19 +69,18 @@ impl UdpClient {
     /// Attach to `dht` and configure the operation timeout.
     pub async fn attach_with_timeout(dht: Dht, timeout: Duration) -> Result<Self, UdpError> {
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
-        let hook = dht
-            .add_datagram_hook(move |bytes, from| {
-                if !bytes.starts_with(MAGIC) {
-                    return false;
-                }
-                match incoming_tx.try_send((Box::from(bytes), from)) {
-                    Ok(()) | Err(TrySendError::Full(_)) => true,
-                    Err(TrySendError::Closed(_)) => false,
-                }
-            })
-            .await?;
+        dht.set_datagram_hook(Some(DatagramHook::new(move |bytes, from| {
+            if !bytes.starts_with(MAGIC) {
+                return false;
+            }
+            match incoming_tx.try_send((Box::from(bytes), from)) {
+                Ok(()) | Err(TrySendError::Full(_)) => true,
+                Err(TrySendError::Closed(_)) => false,
+            }
+        })))
+        .await?;
         let (tx, rx) = mpsc::channel(32);
-        tokio::spawn(Actor::new(dht, hook, incoming_rx, rx, timeout).run());
+        tokio::spawn(Actor::new(dht, incoming_rx, rx, timeout).run());
         Ok(Self { tx })
     }
 
@@ -180,7 +179,6 @@ struct PendingResolve {
 
 struct Actor {
     dht: Dht,
-    _hook: DatagramHookGuard,
     incoming: mpsc::Receiver<(Box<[u8]>, SocketAddrV4)>,
     rx: mpsc::Receiver<ActorMsg>,
     servers: HashSet<SocketAddrV4>,
@@ -193,14 +191,12 @@ struct Actor {
 impl Actor {
     fn new(
         dht: Dht,
-        hook: DatagramHookGuard,
         incoming: mpsc::Receiver<(Box<[u8]>, SocketAddrV4)>,
         rx: mpsc::Receiver<ActorMsg>,
         timeout: Duration,
     ) -> Self {
         Self {
             dht,
-            _hook: hook,
             incoming,
             rx,
             servers: HashSet::new(),
@@ -262,7 +258,7 @@ impl Actor {
                 });
                 if let Some(bytes) = encode(&request, buf) {
                     for server in &self.servers {
-                        if let Err(err) = self.dht.send_datagram(bytes, *server).await {
+                        if let Err(err) = self.dht.send_datagram(bytes.to_vec(), *server).await {
                             debug!(%server, %err, "send prepare");
                         }
                     }
@@ -289,7 +285,7 @@ impl Actor {
                 let request = Request::V1(RequestV1::Get { tx, addr });
                 if let Some(bytes) = encode(&request, buf) {
                     for server in &self.servers {
-                        if let Err(err) = self.dht.send_datagram(bytes, *server).await {
+                        if let Err(err) = self.dht.send_datagram(bytes.to_vec(), *server).await {
                             debug!(%server, %err, "send get");
                         }
                     }
@@ -329,7 +325,7 @@ impl Actor {
                     value: pending.value.clone(),
                 });
                 if let Some(bytes) = encode(&request, buf)
-                    && let Err(err) = self.dht.send_datagram(bytes, from).await
+                    && let Err(err) = self.dht.send_datagram(bytes.to_vec(), from).await
                 {
                     debug!(%from, %addr, %err, "send authorized request");
                 }
