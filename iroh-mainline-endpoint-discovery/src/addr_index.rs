@@ -1,7 +1,7 @@
 //! Convenience wrapper around the UDP index client.
 
 use n0_error::e;
-use n0_future::StreamExt;
+use n0_future::{BufferedStreamExt, Stream, StreamExt, stream};
 use std::{collections::HashSet, net::SocketAddrV4, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use udp_addr_index_proto::RENDEZVOUS_INFOHASH;
@@ -76,8 +76,8 @@ impl AddrIndex {
 
     /// Discover servers through Mainline using the same socket for index traffic.
     ///
-    /// Refreshes on use after ten minutes. Discovery is limited to two candidates
-    /// and thirty seconds; announcements are untrusted and do not prove availability.
+    /// Refreshes on use after ten minutes. Probes candidates concurrently and
+    /// takes the first two to reply, with a thirty-second discovery deadline.
     pub async fn discover(dht: Dht) -> Result<Self, UdpError> {
         Self::discover_with_config(dht, DiscoveryConfig::default()).await
     }
@@ -100,7 +100,7 @@ impl AddrIndex {
     ///
     /// Each lookup has a thirty-second deadline. Refreshes on use after ten
     /// minutes, retaining the highest signed sequence for this index's lifetime.
-    /// Addresses are discovery candidates; they do not prove availability.
+    /// Candidates must answer an address lookup before they are selected.
     pub async fn discover_with_config(dht: Dht, config: DiscoveryConfig) -> Result<Self, UdpError> {
         tracing::debug!(?config, "configuring index server discovery");
         if let Some(server) = config.server {
@@ -145,41 +145,38 @@ impl AddrIndex {
         };
         let signed_result = tokio::time::timeout(Duration::from_secs(30), signed_lookup).await;
         tracing::debug!(?signed_result, "signed index-list lookup completed");
-        let mut peers = state
+        let signed_peers = state
             .signed
             .as_ref()
             .and_then(|item| crate::ServerList::decode(item.value()))
-            .map(|list| list.addresses().iter().copied().collect::<HashSet<_>>())
+            .map(|list| list.addresses().to_vec())
             .unwrap_or_default();
-        if peers.is_empty() {
-            if let Some(hash) = discovery.config.rendezvous_hash {
+        let mut peers = HashSet::new();
+        let lookup = async {
+            let candidates = if !signed_peers.is_empty() {
+                stream::iter(signed_peers).boxed()
+            } else if let Some(hash) = discovery.config.rendezvous_hash {
                 tracing::debug!(infohash = %crate::infohash_hex(&hash), "discovering index servers through Mainline rendezvous");
-                let lookup = async {
-                    let mut stream = discovery.dht.get_peers(hash.into()).await?;
-                    while let Some(batch) = stream.next().await {
-                        for peer in batch {
-                            if peer.port() != 0
-                                && !peer.ip().is_unspecified()
-                                && !peer.ip().is_multicast()
-                                && !peer.ip().is_broadcast()
-                            {
-                                peers.insert(peer);
-                                if peers.len() == 2 {
-                                    return Ok::<_, UdpError>(());
-                                }
-                            }
-                        }
-                    }
-                    Ok(())
-                };
-                match tokio::time::timeout(Duration::from_secs(30), lookup).await {
-                    Ok(result) => result?,
-                    Err(_) if peers.is_empty() => return Err(e!(UdpError::Timeout)),
-                    Err(_) => {}
-                }
+                discovery
+                    .dht
+                    .get_peers(hash.into())
+                    .await?
+                    .flat_map(stream::iter)
+                    .boxed()
             } else {
                 signed_result.map_err(|_| e!(UdpError::Timeout))??;
+                return Err(e!(UdpError::NoServers));
+            };
+            let mut responsive = responsive_servers(self.client.clone(), candidates).take(2);
+            while let Some(server) = responsive.next().await {
+                peers.insert(server);
             }
+            Ok(())
+        };
+        match tokio::time::timeout(Duration::from_secs(30), lookup).await {
+            Ok(result) => result?,
+            Err(_) if peers.is_empty() => return Err(e!(UdpError::Timeout)),
+            Err(_) => {}
         }
         if peers.is_empty() {
             tracing::debug!("index server discovery found no servers");
@@ -226,6 +223,40 @@ impl AddrIndex {
     }
 }
 
+/// Yield distinct candidates that answer an address lookup, in completion order.
+fn responsive_servers(
+    client: UdpClient,
+    candidates: impl Stream<Item = SocketAddrV4> + Send + 'static,
+) -> stream::Boxed<SocketAddrV4> {
+    let mut seen = HashSet::new();
+    candidates
+        .filter(move |server| {
+            server.port() != 0
+                && !server.ip().is_unspecified()
+                && !server.ip().is_multicast()
+                && !server.ip().is_broadcast()
+                && seen.insert(*server)
+        })
+        .map(move |server| {
+            let client = client.clone();
+            async move {
+                match client.probe(server).await {
+                    Ok(()) => {
+                        tracing::debug!(%server, "index server responded to probe");
+                        Some(server)
+                    }
+                    Err(error) => {
+                        tracing::debug!(%server, %error, "index server probe failed; skipping");
+                        None
+                    }
+                }
+            }
+        })
+        .buffered_unordered(3)
+        .filter_map(|server| server)
+        .boxed()
+}
+
 impl From<UdpClient> for AddrIndex {
     fn from(value: UdpClient) -> Self {
         Self::from_udp(value)
@@ -251,6 +282,75 @@ pub enum AddrIndexError {
 mod tests {
     use super::*;
     use crate::ServerList;
+
+    #[tokio::test]
+    async fn selects_first_two_responders_without_changing_configured_servers() {
+        use tokio::net::UdpSocket;
+        use udp_addr_index_proto::{MAX_DGRAM, Request, RequestV1, Response, ResponseV1};
+
+        async fn responder() -> (SocketAddrV4, tokio::task::JoinHandle<()>) {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let std::net::SocketAddr::V4(addr) = socket.local_addr().unwrap() else {
+                unreachable!();
+            };
+            let task = tokio::spawn(async move {
+                let mut buf = [0; MAX_DGRAM];
+                loop {
+                    let (len, from) = socket.recv_from(&mut buf).await.unwrap();
+                    let Some(Request::V1(RequestV1::Get { tx, addr })) =
+                        Request::decode(&buf[..len])
+                    else {
+                        panic!("expected a lookup probe");
+                    };
+                    let reply = Response::V1(ResponseV1::Value {
+                        tx,
+                        addr,
+                        value: None,
+                    });
+                    let bytes = reply.encode(&mut buf).unwrap();
+                    socket.send_to(bytes, from).await.unwrap();
+                }
+            });
+            (addr, task)
+        }
+
+        let (first, first_task) = responder().await;
+        let (second, second_task) = responder().await;
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let std::net::SocketAddr::V4(silent_addr) = silent.local_addr().unwrap() else {
+            unreachable!();
+        };
+        let dht = Dht::builder().no_bootstrap().port(0).build().unwrap();
+        let client = UdpClient::attach(dht).await.unwrap();
+        client.add_server(first).await.unwrap();
+        let candidates = stream::iter([silent_addr, first, first, second]);
+        let selected = tokio::time::timeout(
+            Duration::from_secs(1),
+            responsive_servers(client.clone(), candidates)
+                .take(2)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("silent candidate must not delay responsive ones");
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([first, second])
+        );
+
+        // A configured healthy server cannot answer on behalf of the target.
+        assert!(matches!(
+            client.probe(silent_addr).await,
+            Err(UdpError::Timeout { .. })
+        ));
+        client.remove_server(first).await.unwrap();
+        assert!(matches!(
+            client.resolve(first).await,
+            Err(UdpError::NoServers { .. })
+        ));
+        first_task.abort();
+        second_task.abort();
+    }
 
     #[test]
     fn signed_updates_reject_rollback_and_malformed_values() {

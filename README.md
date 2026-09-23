@@ -91,9 +91,11 @@ inbound UDP there. Mainline can choose the port but not the interface.
 
 `AddrIndex::discover(dht)` finds servers with `get_peers` and then uses the same
 DHT socket for index requests. It refreshes on use after ten minutes, keeps at
-most two candidates, and gives discovery thirty seconds. Finding none is an
-error. Announcements are untrusted, so the candidates may be unreachable or
-dishonest; the signed endpoint records they serve are validated either way.
+most two responsive servers, and gives discovery thirty seconds. Candidates
+are probed with address lookups, three at a time, using the client's two-second
+timeout. Any matching reply, including an empty result, counts; discovery takes
+the first two responders. Finding none is an error. Announcements are untrusted;
+the signed endpoint records the selected servers serve are validated either way.
 
 The examples discover servers by default. Set `IROH_ADDR_INDEX=ip:port` to pin
 one instead, or call `AddrIndex::udp(dht, server)` in code. Mainline bootstrap
@@ -124,9 +126,9 @@ as fallback. A server announces under a custom hash with
 
 Discovery keeps at most two servers, and a signed list holds one or two
 addresses. A signed result is never topped up with rendezvous candidates.
-Rendezvous candidates stay untrusted, and even a signed address only means the
-authority vouches for that server, not that it answered. Falling back means no
-signed address was found, not that a listed server failed a request.
+Both sources pass through the responsiveness filter. A signed address means the
+authority vouches for that server; the probe checks that it answers. Falling
+back means no signed address was found, not that a listed server failed a request.
 
 The authority publishes a list with the `ServerList` helper:
 

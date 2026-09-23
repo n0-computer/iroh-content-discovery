@@ -352,13 +352,18 @@ async fn signed_bootstrap_works_without_rendezvous_announcements() {
             .build()
             .unwrap();
         let key = n0_mainline::SigningKey::from_bytes(&[42; 32]);
-        let list = ServerList::new(vec!["127.0.0.1:12345".parse().unwrap()]).unwrap();
+        let server = Server::new(Limits::for_tests());
+        let handle = server
+            .attach_with_rendezvous(test_dht(), None)
+            .await
+            .unwrap();
+        let list = ServerList::new(vec![v4(loopback(handle.local_addr()))]).unwrap();
         writer
             .put_mutable(list.sign(&key, 1).unwrap(), None)
             .await
             .unwrap();
         // No node has announced a rendezvous peer. Only the trusted record can
-        // supply a candidate (discovery does not require it to be responsive).
+        // supply the candidate, which must also answer the responsiveness probe.
         AddrIndex::discover_with_authority(reader.clone(), key.verifying_key().to_bytes())
             .await
             .unwrap();
