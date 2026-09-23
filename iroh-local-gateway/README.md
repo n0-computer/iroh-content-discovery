@@ -124,7 +124,9 @@ file name serves the file like a blob, with ranges, and a MIME type from the
 file extension where known. Any other path is listed as a directory: an HTML
 page with its subdirectories, its files, and a link to the parent. The bare
 `/blake3/<z32>` shows the top level if the blob is detected as a collection;
-`/blake3/<z32>/` always treats it as one. Add `?raw` to a file URL to see its
+`/blake3/<z32>/` always treats it as one. Add `?tree` to a root URL to state that
+the blob is a collection: this skips the size probe and the detection
+limits, and returns `422` if it is not one. Add `?raw` to a file URL to see its
 source rather than a rendered page: text keeps its charset as
 `text/plain`, anything else is served as `application/octet-stream`. On a
 collection root, `?raw` serves the underlying hash sequence instead of a

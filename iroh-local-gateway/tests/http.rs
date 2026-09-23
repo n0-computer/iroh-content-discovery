@@ -167,6 +167,24 @@ async fn run() {
         "text/markdown; charset=utf-8"
     );
     assert_eq!(res.bytes().await.unwrap().as_ref(), markdown);
+    // `?tree` states that the root is a collection, without detecting it.
+    let res = client
+        .get(format!("{collection_url}?tree"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!("href=\"/blake3/{collection_hash}/site/\"")));
+    let res = client
+        .get(format!(
+            "{base}/blake3/{}?tree",
+            z32::encode(text_tag.hash.as_bytes())
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     // `?raw` shows the source instead of rendering or downloading it.
     let res = client
         .get(format!("{collection_url}/site/index.html?raw"))

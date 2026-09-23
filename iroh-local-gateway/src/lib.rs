@@ -440,10 +440,28 @@ async fn blob(
 ) -> Result<Response, HttpError> {
     let hash = parse_hash(&encoded)
         .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))?;
+    let raw = has_flag(query.as_deref(), "raw");
+    // `?tree` states that the blob is a collection, which skips both the size
+    // probe and the detection limits. `?raw` wins, and asks for the bytes.
+    if !raw && has_flag(query.as_deref(), "tree") {
+        let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
+            .await
+            .map_err(HttpError::timeout)??;
+        let root = Root::new(encoded, subdomain);
+        return collection_entry(
+            &gateway,
+            &root,
+            collection,
+            String::new(),
+            query,
+            method,
+            headers,
+        )
+        .await;
+    }
     let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
         .map_err(HttpError::timeout)??;
-    let raw = has_flag(query.as_deref(), "raw");
     // `?raw` serves a collection root as the hash sequence it is.
     if !raw
         && source.size >= 32
