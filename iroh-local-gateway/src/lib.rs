@@ -758,7 +758,9 @@ async fn collection_entry(
     };
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, root.caching.header())
+        // The collection is immutable, but its HTML presentation and size
+        // availability can change between requests.
+        .header(header::CACHE_CONTROL, "public, no-cache")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::from(listing(root, &dir, &entries, sizes.as_ref())))
         .unwrap())
@@ -871,6 +873,7 @@ fn listing(
         ));
     }
     for (file, hash) in &entries.files {
+        let encoded_hash = z32::encode(hash.as_bytes());
         let size = match sizes {
             Some(sizes) => sizes
                 .get(hash)
@@ -878,11 +881,10 @@ fn listing(
             None => String::new(),
         };
         html.push_str(&format!(
-            "<tr><td><a href=\"{}\">{}</a></td><td class=\"size\">{size}</td><td class=\"hash\">{}</td>\
+            "<tr><td><a href=\"{}\">{}</a></td><td class=\"size\">{size}</td><td class=\"hash\"><span title=\"{encoded_hash}\">{encoded_hash}</span></td>\
              <td class=\"download\"><a href=\"{}?download\">Download</a></td></tr>\n",
             link(&format!("{dir}{file}")),
             html_escape(file),
-            z32::encode(hash.as_bytes()),
             link(&format!("{dir}{file}")),
         ));
     }
