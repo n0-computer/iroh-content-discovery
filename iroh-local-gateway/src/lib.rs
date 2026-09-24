@@ -27,8 +27,11 @@ use bytes::Bytes;
 use iroh::{Endpoint, endpoint::Connection};
 use iroh_blobs::{
     Hash,
-    format::collection::Collection,
-    get::fsm::{self, AtBlobContent, BlobContentNext, ConnectedNext, EndBlobNext},
+    format::collection::{Collection, CollectionMeta},
+    get::fsm::{
+        self, AtBlobContent, AtBlobHeader, AtEndBlob, BlobContentNext, ConnectedNext, EndBlobNext,
+    },
+    hashseq::HashSeq,
     protocol::{ChunkRangesExt, ChunkRangesSeq, GetRequest},
 };
 use iroh_mainline_endpoint_discovery::{Resolver, infohash_from_blake3};
@@ -48,7 +51,10 @@ use ranges::Selection;
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
-const MAX_AUTO_COLLECTION_ROOT_BYTES: u64 = 8 * 1024 * 1024;
+/// Maximum HashSeq size: one metadata hash and at most 32,767 file hashes.
+const MAX_COLLECTION_ROOT_BYTES: u64 = 1024 * 1024;
+/// Name-list budget per file, excluding serialization overhead.
+const MAX_COLLECTION_NAME_BYTES: usize = 256;
 const COLLECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Characters RFC 8187 allows unescaped in a `filename*` parameter.
 ///
@@ -599,8 +605,8 @@ pub(crate) async fn serve_root(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let download = has_flag(query.as_deref(), "download");
-    // `?tree` states that the blob is a collection, which skips both the size
-    // probe and the detection limits. `?download` wins, and asks for the bytes.
+    // `?tree` skips automatic detection, but still enforces collection limits.
+    // `?download` wins, and asks for the bytes.
     if !download && has_flag(query.as_deref(), "tree") {
         let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
             .await
@@ -623,7 +629,7 @@ pub(crate) async fn serve_root(
     if !download
         && source.size >= 32
         && source.size.is_multiple_of(32)
-        && source.size <= MAX_AUTO_COLLECTION_ROOT_BYTES
+        && source.size <= MAX_COLLECTION_ROOT_BYTES
         && let Ok(Ok(collection)) = tokio::time::timeout(
             COLLECTION_PROBE_TIMEOUT,
             gateway.collection_on_connection(hash, source.connection.clone()),
@@ -1122,12 +1128,72 @@ async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<
     let ConnectedNext::StartRoot(root) = connected.next().await? else {
         bail!("expected collection root");
     };
-    let (end, _, collection) = Collection::read_fsm(root).await?;
-    let EndBlobNext::Closing(closing) = end else {
+    let (end, links) = read_collection_blob(root.next(), MAX_COLLECTION_ROOT_BYTES).await?;
+    let mut links =
+        HashSeq::new(links.into()).ok_or_else(|| anyhow::anyhow!("invalid hash sequence"))?;
+    let meta_hash = links
+        .pop_front()
+        .ok_or_else(|| anyhow::anyhow!("missing metadata hash"))?;
+    let EndBlobNext::MoreChildren(meta) = end.next() else {
+        bail!("expected collection metadata");
+    };
+    // Allow ten bytes for each postcard length prefix (u64 varint), including
+    // the name count. The budget uses the actual file count, not the root cap.
+    let names_limit =
+        Collection::HEADER.len() + 10 + links.len() * (MAX_COLLECTION_NAME_BYTES + 10);
+    let (end, names) = read_collection_blob(meta.next(meta_hash), names_limit as u64).await?;
+    // Check the encoded count before deserializing the Vec<String>, so many
+    // empty names cannot turn a small byte buffer into a huge allocation.
+    let ((_, count), _) = postcard::take_from_bytes::<([u8; 13], usize)>(&names)?;
+    anyhow::ensure!(count == links.len(), "names and links length mismatch");
+    let mut names: CollectionMeta = postcard::from_bytes(&names)?;
+    anyhow::ensure!(names.check_header(), "invalid collection metadata header");
+    let collection = names.names_mut().drain(..).zip(links).collect();
+    let EndBlobNext::Closing(closing) = end.next() else {
         bail!("unexpected collection child");
     };
     closing.next().await?;
     Ok(collection)
+}
+
+/// Read a complete collection component without buffering more than its limit.
+async fn read_collection_blob(
+    header: AtBlobHeader,
+    limit: u64,
+) -> anyhow::Result<(AtEndBlob, Vec<u8>)> {
+    let (mut content, size) = header.next().await?;
+    // The size header is untrusted: use it only to reject oversized responses,
+    // and enforce the limit again while collecting Bao-verified bytes.
+    anyhow::ensure!(
+        size <= limit,
+        "collection component is {size} bytes, above its {limit} byte limit"
+    );
+    let mut bytes = Vec::new();
+    loop {
+        match content.next().await {
+            BlobContentNext::More((next, item)) => {
+                if let BaoContentItem::Leaf(leaf) = item? {
+                    anyhow::ensure!(
+                        leaf.offset == bytes.len() as u64,
+                        "noncontiguous collection component"
+                    );
+                    anyhow::ensure!(
+                        leaf.data.len() as u64 <= limit - bytes.len() as u64,
+                        "collection component exceeds its {limit} byte limit"
+                    );
+                    bytes.extend_from_slice(&leaf.data);
+                }
+                content = next;
+            }
+            BlobContentNext::Done(end) => {
+                anyhow::ensure!(
+                    bytes.len() as u64 == size,
+                    "incomplete collection component"
+                );
+                return Ok((end, bytes));
+            }
+        }
+    }
 }
 
 /// Returns the size of `hash`, authenticated by fetching only its last chunk.
@@ -1234,6 +1300,101 @@ fn stream_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collection_limits_cover_root_and_names() {
+        use iroh::{endpoint::presets, protocol::Router};
+        use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let store = MemStore::new();
+            let provider = Endpoint::builder(presets::Minimal)
+                .bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+                .unwrap()
+                .bind()
+                .await
+                .unwrap();
+            let router = Router::builder(provider.clone())
+                .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
+                .spawn();
+            let client = Endpoint::builder(presets::Minimal).bind().await.unwrap();
+            let connection = client
+                .connect(provider.addr(), iroh_blobs::ALPN)
+                .await
+                .unwrap();
+            let child = Hash::new(b"file content need not be downloaded");
+
+            // Empty collections and a name list exactly at its budget work.
+            let mut boundary =
+                Collection::from_iter([("x".repeat(MAX_COLLECTION_NAME_BYTES), child)]);
+            let encoded_size = boundary.to_blobs().next().unwrap().len();
+            let limit = Collection::HEADER.len() + 10 + MAX_COLLECTION_NAME_BYTES + 10;
+            boundary = Collection::from_iter([(
+                "x".repeat(MAX_COLLECTION_NAME_BYTES + limit - encoded_size),
+                child,
+            )]);
+            assert_eq!(boundary.to_blobs().next().unwrap().len(), limit);
+            for collection in [
+                Collection::default(),
+                boundary,
+                // The name budget scales with the file count, and is shared:
+                // one long path can use another file's unused allowance.
+                Collection::from_iter([
+                    ("x".repeat(2 * MAX_COLLECTION_NAME_BYTES), child),
+                    (String::new(), child),
+                ]),
+            ] {
+                let tag = collection.clone().store(&store).await.unwrap();
+                assert_eq!(
+                    read_collection(&connection, tag.hash()).await.unwrap(),
+                    collection
+                );
+            }
+
+            // A tiny, valid root must not permit an oversized name list.
+            let oversized_names =
+                Collection::from_iter([("x".repeat(2 * MAX_COLLECTION_NAME_BYTES), child)])
+                    .store(&store)
+                    .await
+                    .unwrap();
+            let error = read_collection(&connection, oversized_names.hash())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("byte limit"), "{error:#}");
+
+            // A forged name count is rejected before allocating its strings.
+            let meta = store
+                .blobs()
+                .add_bytes(postcard::to_stdvec(&(*Collection::HEADER, u64::MAX)).unwrap())
+                .await
+                .unwrap();
+            let root: HashSeq = [meta.hash, child].into_iter().collect();
+            let tag = store.blobs().add_bytes(root.into_inner()).await.unwrap();
+            let error = read_collection(&connection, tag.hash).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("names and links length mismatch"),
+                "{error:#}"
+            );
+
+            // Explicit collection reads must also enforce the root limit.
+            let oversized_root = store
+                .blobs()
+                .add_bytes(vec![0; MAX_COLLECTION_ROOT_BYTES as usize + 32])
+                .await
+                .unwrap();
+            let error = read_collection(&connection, oversized_root.hash)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("byte limit"), "{error:#}");
+
+            client.close().await;
+            router.shutdown().await.unwrap();
+        })
+        .await
+        .expect("collection limit test timed out");
+    }
 
     #[test]
     fn attachment_escapes_parameter_delimiters() {

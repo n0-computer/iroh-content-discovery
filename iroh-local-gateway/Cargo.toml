@@ -27,6 +27,7 @@ mime_guess = "2"
 n0-mainline.workspace = true
 n0-future.workspace = true
 percent-encoding = "2"
+postcard.workspace = true
 simple-dns = "0.12"
 rand.workspace = true
 tokio.workspace = true

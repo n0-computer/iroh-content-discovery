@@ -114,10 +114,11 @@ impl Publisher {
         removed
     }
 
-    /// Wait until the record is stored and every infohash is announced.
+    /// Wait until the first successful publication round completes.
     ///
-    /// Returning early would hand a caller a mapping that resolvers cannot
-    /// find yet, which looks exactly like missing content.
+    /// A round stores the address-index record and announces every infohash
+    /// captured at its start. Once a round succeeds, subsequent calls return
+    /// immediately, including after new infohashes are added.
     pub async fn wait_published(&self) {
         let mut receiver = self.state.published.subscribe();
         while receiver.borrow().is_none() && receiver.changed().await.is_ok() {}

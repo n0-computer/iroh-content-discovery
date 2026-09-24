@@ -1855,6 +1855,7 @@ dependencies = [
  "n0-future",
  "n0-mainline",
  "percent-encoding",
+ "postcard",
  "rand",
  "reqwest 0.12.28",
  "simple-dns",
