@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     };
     info!("finding index servers");
     let index = AddrIndex::discover_with_config(dht.clone(), config).await?;
-    let resolver = Resolver::bind(dht, index).await?;
+    let resolver = Resolver::new(dht, index);
     let endpoint = iroh::Endpoint::bind(presets::N0).await?;
     let gateway = Gateway::new(endpoint.clone(), resolver);
     let listener = tokio::net::TcpListener::bind(args.listen).await?;

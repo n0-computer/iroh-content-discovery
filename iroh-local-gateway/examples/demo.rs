@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
     let index = AddrIndex::discover_with_config(gateway_dht.clone(), config)
         .await
         .context("gateway index server discovery failed")?;
-    let gateway = Gateway::new(client.clone(), Resolver::bind(gateway_dht, index).await?);
+    let gateway = Gateway::new(client.clone(), Resolver::new(gateway_dht, index));
     let serve = async {
         tokio::time::timeout(Duration::from_secs(120), publisher.wait_published())
             .await

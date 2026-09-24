@@ -20,8 +20,10 @@ mod udp;
 
 pub use addr_index::{AddrIndex, AddrIndexError, DiscoveryConfig};
 pub use blake3::Hash;
-pub use pkarr::{BLAKE3_DOMAIN, PKARR_DOMAIN, PKARR_REFRESH, PkarrPublisher, pkarr_name};
-pub use publisher::{ANNOUNCE_SPACING, Publisher, REFRESH};
+pub use pkarr::{
+    BLAKE3_DOMAIN, PKARR_DOMAIN, PKARR_REFRESH, PkarrPublisher, is_hostname, pkarr_name,
+};
+pub use publisher::{ANNOUNCE_SPACING, Publisher, REFRESH, RETRY};
 pub use record::{RecordPayload, RecordPayloadV1, SignedRecord};
 pub use republisher::republish_server_list;
 pub use resolver::Resolver;

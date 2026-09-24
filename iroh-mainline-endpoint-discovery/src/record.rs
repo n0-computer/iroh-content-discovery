@@ -2,7 +2,6 @@
 
 use std::{
     net::SocketAddrV4,
-    ops::Deref,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -49,14 +48,6 @@ pub struct SignedRecord {
     pub payload: RecordPayload,
     /// Signature over the postcard-encoded payload.
     pub sig: Signature,
-}
-
-impl Deref for SignedRecord {
-    type Target = RecordPayloadV1;
-
-    fn deref(&self) -> &Self::Target {
-        self.payload.v1()
-    }
 }
 
 impl SignedRecord {

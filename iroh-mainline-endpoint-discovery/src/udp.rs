@@ -132,16 +132,6 @@ impl UdpClient {
         rx.await.map_err(|_| e!(UdpError::Closed))?
     }
 
-    /// Publish to one server, adding it to this client first.
-    pub async fn publish_to(
-        &self,
-        server: SocketAddrV4,
-        value: impl Fn(SocketAddrV4) -> Vec<u8> + Send + 'static,
-    ) -> Result<Vec<SocketAddrV4>, UdpError> {
-        self.add_server(server).await?;
-        self.publish(value).await
-    }
-
     /// Read and deduplicate opaque values from all configured servers.
     pub async fn resolve(&self, addr: SocketAddrV4) -> Result<ResolveResult, UdpError> {
         let (tx, rx) = oneshot::channel();
@@ -150,16 +140,6 @@ impl UdpClient {
             .await
             .map_err(|_| e!(UdpError::Closed))?;
         rx.await.map_err(|_| e!(UdpError::Closed))?
-    }
-
-    /// Resolve through one server, adding it to this client first.
-    pub async fn resolve_from(
-        &self,
-        server: SocketAddrV4,
-        addr: SocketAddrV4,
-    ) -> Result<ResolveResult, UdpError> {
-        self.add_server(server).await?;
-        self.resolve(addr).await
     }
 }
 

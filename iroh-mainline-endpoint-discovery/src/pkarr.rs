@@ -14,6 +14,8 @@ use simple_dns::{
     rdata::{HTTPS, RData, SVCB},
 };
 use tokio::sync::{Notify, watch};
+
+use crate::RETRY;
 use tracing::{debug, warn};
 
 /// How often each packet is republished.
@@ -27,9 +29,6 @@ pub const BLAKE3_DOMAIN: &str = "blake3.net";
 
 /// Domain under which a Pkarr public key names content.
 pub const PKARR_DOMAIN: &str = "pkarr.net";
-
-/// Time to wait before retrying after a failed publish.
-const RETRY: Duration = Duration::from_secs(30);
 
 /// Time to live of published records, in seconds.
 const TTL: u32 = 300;
@@ -288,7 +287,10 @@ impl State {
 }
 
 /// Returns whether `value` is a plain DNS hostname.
-fn is_hostname(value: &str) -> bool {
+///
+/// Publisher and gateway must agree on this, or a name a publisher accepts is
+/// one the gateway will not serve.
+pub fn is_hostname(value: &str) -> bool {
     let value = value.strip_suffix('.').unwrap_or(value);
     value.len() <= 253
         && value.contains('.')

@@ -8,11 +8,10 @@ use n0_mainline::{
     errors::{PutMutableError, PutQueryError},
 };
 
-use crate::{SERVER_LIST_SALT, ServerList};
+use crate::{RETRY, SERVER_LIST_SALT, ServerList};
 use tracing::{info, warn};
 
 const RENEW: Duration = Duration::from_secs(600);
-const RETRY: Duration = Duration::from_secs(30);
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Publish immediately and renew a signed server list every ten minutes.

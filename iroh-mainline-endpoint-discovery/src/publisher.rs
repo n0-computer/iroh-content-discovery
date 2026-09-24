@@ -21,7 +21,7 @@ pub const REFRESH: Duration = Duration::from_secs(10 * 60);
 /// Delay between announcements after the public mapping changes.
 pub const ANNOUNCE_SPACING: Duration = Duration::from_millis(250);
 /// Delay before retrying after a failed reconcile.
-const RETRY: Duration = Duration::from_secs(30);
+pub const RETRY: Duration = Duration::from_secs(30);
 
 /// Keeps Mainline announcements and one signed endpoint value current.
 ///

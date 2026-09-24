@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Targets under this domain name content this gateway can serve itself.
-use iroh_mainline_endpoint_discovery::BLAKE3_DOMAIN;
+use iroh_mainline_endpoint_discovery::{BLAKE3_DOMAIN, is_hostname};
 use tracing::{debug, warn};
 
 // Bound both memory use and how long changed names can remain stale.
@@ -274,19 +274,9 @@ fn authority(svcb: &SVCB<'_>) -> Option<String> {
     let name = svcb.target.to_string();
     let name = name.trim_end_matches('.');
     // Redirects require a conventional hostname. Root targets and bare Pkarr
-    // keys require endpoint resolution rather than an HTTP redirect.
-    if name.len() > 253
-        || !name.contains('.')
-        || !name.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-    {
+    // keys require endpoint resolution rather than an HTTP redirect. The
+    // publisher applies the same test, or it would accept names we refuse.
+    if !is_hostname(name) {
         return None;
     }
     let mut target = name.to_owned();

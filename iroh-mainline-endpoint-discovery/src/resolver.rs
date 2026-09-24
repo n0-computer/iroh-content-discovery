@@ -32,8 +32,8 @@ impl Resolver {
     }
 
     /// Use the supplied shared Mainline node and address index.
-    pub async fn bind(dht: Dht, index: AddrIndex) -> Result<Self> {
-        Ok(Self { dht, index })
+    pub fn new(dht: Dht, index: AddrIndex) -> Self {
+        Self { dht, index }
     }
 
     /// Yield endpoint IDs as Mainline peers and index records arrive.
@@ -112,56 +112,6 @@ impl Resolver {
             }
         };
         stream.boxed()
-    }
-
-    /// Return the first signed endpoint found, without resolving every peer.
-    ///
-    /// AddrIndex lookups are sequential and duplicate sockets are skipped.
-    /// The caller should impose a deadline on this network operation.
-    #[tracing::instrument(level = "debug", skip(self), fields(infohash = %infohash))]
-    pub async fn resolve_one(&self, infohash: Id) -> Result<Option<EndpointId>> {
-        let started = std::time::Instant::now();
-        debug!("starting Mainline get_peers");
-        let mut stream = self.dht.get_peers(infohash).await.context("get_peers")?;
-        let mut peers = HashSet::new();
-        let mut last_error = None;
-        let mut any_ok = false;
-        while let Some(batch) = stream.next().await {
-            debug!(
-                count = batch.len(),
-                elapsed_ms = started.elapsed().as_millis(),
-                "Mainline peers received"
-            );
-            for peer in batch {
-                if !peers.insert(peer) {
-                    continue;
-                }
-                debug!(%peer, "looking up signed endpoint in index server");
-                match self.index.lookup(peer).await {
-                    Ok(records) => {
-                        debug!(%peer, count = records.len(), "index server endpoint records received");
-                        any_ok = true;
-                        if let Some(record) = records.into_iter().next() {
-                            debug!(%peer, endpoint = %record.endpoint_id, elapsed_ms = started.elapsed().as_millis(), "selected content provider");
-                            return Ok(Some(record.endpoint_id));
-                        }
-                    }
-                    Err(error) => {
-                        debug!(%peer, ?error, "index server endpoint lookup failed");
-                        last_error = Some(error);
-                    }
-                }
-            }
-        }
-        debug!(
-            peers = peers.len(),
-            elapsed_ms = started.elapsed().as_millis(),
-            "Mainline lookup exhausted without a provider"
-        );
-        if !any_ok && let Some(error) = last_error {
-            return Err(error.into());
-        }
-        Ok(None)
     }
 
     /// `get_peers` for `infohash`, then index-resolve each compact peer.

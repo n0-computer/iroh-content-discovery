@@ -276,12 +276,10 @@ async fn resolver_stream_yields_all_announced_endpoints() {
             dht.announce_peer(infohash, None).await.unwrap();
         }
         let reader = node();
-        let resolver = Resolver::bind(
+        let resolver = Resolver::new(
             reader.clone(),
             AddrIndex::udp(reader, server_addr).await.unwrap(),
-        )
-        .await
-        .unwrap();
+        );
         let mut stream = resolver.resolve_stream(infohash).await.unwrap();
         let mut actual = Vec::new();
         while let Some(id) = stream.next().await {
@@ -332,12 +330,10 @@ async fn publisher_announces_endpoint_for_resolver() {
         publisher.add_infohash(infohash);
 
         let reader = node();
-        let resolver = Resolver::bind(
+        let resolver = Resolver::new(
             reader.clone(),
             AddrIndex::udp(reader, server_addr).await.unwrap(),
-        )
-        .await
-        .unwrap();
+        );
         // `wait_published` fires before the announcements, so keep looking
         // until the publisher's endpoint shows up.
         let mut found = resolver.resolve_continuously(infohash);

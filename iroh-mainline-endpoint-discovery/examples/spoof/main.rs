@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
         None => AddrIndex::discover(dht.clone()).await?,
     };
     let publisher = Publisher::new(secret, dht.clone(), index.clone());
-    let resolver = Resolver::bind(dht, index).await?;
+    let resolver = Resolver::new(dht, index);
     for infohash in infohashes {
         publisher.add_infohash(infohash);
     }
