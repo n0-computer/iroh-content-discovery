@@ -63,7 +63,7 @@ http://127.0.0.1:8080/blake3/<z32>
 For a sendme/swarmie collection root, `/blake3/<z32>` automatically shows a
 directory listing; see [Collections](#collections). Raw blobs continue to
 stream directly from the same bare URL. Automatic collection detection is
-limited to roots of at most 256 KiB; larger roots are served as raw blobs.
+limited to roots of at most 1 MiB; larger roots are served as raw blobs.
 
 The same content is also served on per-hash and per-key subdomains of
 `localhost`, which browsers and curl resolve to the loopback address:
@@ -220,7 +220,7 @@ page with its subdirectories, its files, and a link to the parent. The bare
 `/blake3/<z32>` shows the top level if the blob is detected as a collection;
 `/blake3/<z32>/` always treats it as one.
 
-All collection reads cap the root HashSeq at 256 KiB (at most 8,191 files).
+All collection reads cap the root HashSeq at 1 MiB (at most 32,767 files).
 The separate name-list limit allows 256 bytes per file in that HashSeq
 (excluding its metadata hash), plus serialization overhead. This is a total
 name-list budget, so individual paths

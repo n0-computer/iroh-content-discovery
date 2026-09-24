@@ -114,7 +114,11 @@ impl Publisher {
         removed
     }
 
-    /// Wait until a Mainline announce and address-index put have succeeded.
+    /// Wait until the first address-index publication succeeds.
+    ///
+    /// This returns before Mainline infohash announcements complete. Once an
+    /// address-index publication has succeeded, subsequent calls return
+    /// immediately, including after new infohashes are added.
     pub async fn wait_published(&self) {
         let mut receiver = self.state.published.subscribe();
         while receiver.borrow().is_none() && receiver.changed().await.is_ok() {}

@@ -51,8 +51,8 @@ use ranges::Selection;
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
-/// Maximum HashSeq size: one metadata hash and at most 8,191 file hashes.
-const MAX_COLLECTION_ROOT_BYTES: u64 = 256 * 1024;
+/// Maximum HashSeq size: one metadata hash and at most 32,767 file hashes.
+const MAX_COLLECTION_ROOT_BYTES: u64 = 1024 * 1024;
 /// Name-list budget per file, excluding serialization overhead.
 const MAX_COLLECTION_NAME_BYTES: usize = 256;
 const COLLECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
