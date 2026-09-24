@@ -12,7 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::bail;
 use axum::{
     Extension, Router,
     body::Body,
@@ -37,6 +36,7 @@ use iroh_blobs::{
 use iroh_mainline_endpoint_discovery::{Resolver, infohash_from_blake3};
 use lru::LruCache;
 use mime_classifier::MimeClassifier;
+use n0_error::{StdResultExt, anyerr, bail_any, e, ensure, ensure_any};
 use n0_future::{BufferedStreamExt, StreamExt};
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
@@ -177,12 +177,18 @@ impl Gateway {
             .layer(axum::middleware::from_fn(log_request))
     }
 
-    /// Serve plaintext HTTP on a loopback socket until the shutdown future resolves.
+    /// Serves plaintext HTTP on a loopback socket until the shutdown future resolves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServeError::ListenAddr`] if the listener is not bound to a
+    /// loopback address, and [`ServeError::Io`] if its address cannot be read
+    /// or the HTTP server stops with an IO failure.
     pub async fn serve(
         &self,
         listener: tokio::net::TcpListener,
         shutdown: impl Future<Output = ()> + Send + 'static,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ServeError> {
         validate_listen_addr(listener.local_addr()?)?;
         tracing::debug!(address = %listener.local_addr()?, endpoint = %self.0.endpoint.id(), "gateway listening");
         axum::serve(listener, self.router())
@@ -288,7 +294,7 @@ impl Gateway {
     }
 
     /// Returns the verified size of `hash`, fetched over `connection` if not cached.
-    async fn size(&self, hash: Hash, connection: &Connection) -> anyhow::Result<u64> {
+    async fn size(&self, hash: Hash, connection: &Connection) -> n0_error::Result<u64> {
         if let Some(source) = self.0.cache.lock().unwrap().peek(&hash) {
             return Ok(source.size);
         }
@@ -373,31 +379,91 @@ async fn log_request(request: axum::extract::Request, next: axum::middleware::Ne
     }.instrument(span).await
 }
 
-/// Reject non-loopback HTTP listeners.
-pub fn validate_listen_addr(addr: SocketAddr) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        addr.ip().is_loopback(),
-        "HTTP gateway must bind a loopback address"
-    );
+/// Rejects HTTP listeners that are not bound to a loopback address.
+///
+/// # Errors
+///
+/// Returns an error for any address outside `127.0.0.0/8` and `::1`. The
+/// gateway speaks plaintext HTTP and serves anything it can reach, so binding
+/// it to a routable address would expose it to the local network.
+pub fn validate_listen_addr(addr: SocketAddr) -> Result<(), ListenAddrError> {
+    ensure!(addr.ip().is_loopback(), ListenAddrError);
     Ok(())
 }
 
-/// Parse a canonical, lowercase z-base-32 encoded 32-byte BLAKE3 hash.
-pub fn parse_hash(value: &str) -> anyhow::Result<Hash> {
+/// Parses a canonical, lowercase z-base-32 encoded 32-byte BLAKE3 hash.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_z32_bytes`], which decides what a valid
+/// encoding is.
+pub fn parse_hash(value: &str) -> Result<Hash, Z32Error> {
     Ok(Hash::from_bytes(parse_z32_bytes(value)?))
 }
 
-/// Parse 32 bytes from canonical, lowercase z-base-32.
+/// Parses 32 bytes from canonical, lowercase z-base-32.
 ///
 /// Hashes and Pkarr public keys share this encoding, so a label alone does
 /// not say which one it is.
-pub fn parse_z32_bytes(value: &str) -> anyhow::Result<[u8; 32]> {
-    anyhow::ensure!(value.len() == 52, "expected 52 z-base-32 characters");
-    let bytes: [u8; 32] = z32::decode(value.as_bytes())?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("expected 32 bytes"))?;
-    anyhow::ensure!(z32::encode(&bytes) == value, "noncanonical z-base-32");
+///
+/// # Errors
+///
+/// Returns an error if `value` is not 52 characters of the z-base-32 alphabet,
+/// or if it is not the one encoding those 32 bytes have. Rejecting aliases
+/// keeps a hash or key to a single URL, and therefore to a single origin.
+pub fn parse_z32_bytes(value: &str) -> Result<[u8; 32], Z32Error> {
+    ensure!(value.len() == 52, Z32Error::Length);
+    let decoded = z32::decode(value.as_bytes()).map_err(|source| e!(Z32Error::Alphabet, source))?;
+    let bytes: [u8; 32] = decoded.try_into().map_err(|_| e!(Z32Error::ByteCount))?;
+    ensure!(z32::encode(&bytes) == value, Z32Error::Noncanonical);
     Ok(bytes)
+}
+
+/// Rejection of a listen address that is not on loopback.
+#[n0_error::stack_error(derive, add_meta)]
+#[error("HTTP gateway must bind a loopback address")]
+pub struct ListenAddrError {}
+
+/// Rejection of a string that is not canonical z-base-32 for 32 bytes.
+#[n0_error::stack_error(derive, add_meta)]
+#[non_exhaustive]
+pub enum Z32Error {
+    /// The input is not 52 characters long.
+    #[error("expected 52 z-base-32 characters")]
+    Length {},
+    /// The input contains a character outside the z-base-32 alphabet.
+    #[error("invalid z-base-32")]
+    Alphabet {
+        /// Why the decoder rejected the input.
+        #[error(std_err, source)]
+        source: z32::Z32Error,
+    },
+    /// The input decodes to something other than 32 bytes.
+    #[error("expected 32 bytes")]
+    ByteCount {},
+    /// The input is not the encoding those bytes are written as.
+    #[error("noncanonical z-base-32")]
+    Noncanonical {},
+}
+
+/// Failure of [`Gateway::serve`].
+#[n0_error::stack_error(derive, add_meta)]
+#[non_exhaustive]
+pub enum ServeError {
+    /// The listener is not bound to a loopback address.
+    #[error(transparent)]
+    ListenAddr {
+        /// Why the address was rejected.
+        #[error(from, source)]
+        source: ListenAddrError,
+    },
+    /// The listener could not be inspected, or the HTTP server stopped.
+    #[error(transparent)]
+    Io {
+        /// The underlying IO failure.
+        #[error(from, std_err, source)]
+        source: std::io::Error,
+    },
 }
 
 struct HttpError(StatusCode, &'static str);
@@ -1105,21 +1171,21 @@ async fn start(
     connection: &Connection,
     hash: Hash,
     ranges: ChunkRanges,
-) -> anyhow::Result<(AtBlobContent, u64)> {
+) -> n0_error::Result<(AtBlobContent, u64)> {
     tracing::debug!(provider = %connection.remote_id(), ?ranges, "requesting blob ranges");
     let request = GetRequest::new(hash, ChunkRangesSeq::from_ranges([ranges]));
     let connected = fsm::start(connection.clone(), request, Default::default())
         .next()
         .await?;
     let ConnectedNext::StartRoot(root) = connected.next().await? else {
-        bail!("expected blob root");
+        bail_any!("expected blob root");
     };
     let result = root.next().next().await?;
     tracing::debug!(size = result.1, "blob response started");
     Ok(result)
 }
 
-async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<Collection> {
+async fn read_collection(connection: &Connection, hash: Hash) -> n0_error::Result<Collection> {
     let request = GetRequest::new(
         hash,
         ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::all()]),
@@ -1128,16 +1194,15 @@ async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<
         .next()
         .await?;
     let ConnectedNext::StartRoot(root) = connected.next().await? else {
-        bail!("expected collection root");
+        bail_any!("expected collection root");
     };
     let (end, links) = read_collection_blob(root.next(), MAX_COLLECTION_ROOT_BYTES).await?;
-    let mut links =
-        HashSeq::new(links.into()).ok_or_else(|| anyhow::anyhow!("invalid hash sequence"))?;
+    let mut links = HashSeq::new(links.into()).ok_or_else(|| anyerr!("invalid hash sequence"))?;
     let meta_hash = links
         .pop_front()
-        .ok_or_else(|| anyhow::anyhow!("missing metadata hash"))?;
+        .ok_or_else(|| anyerr!("missing metadata hash"))?;
     let EndBlobNext::MoreChildren(meta) = end.next() else {
-        bail!("expected collection metadata");
+        bail_any!("expected collection metadata");
     };
     // Allow ten bytes for each postcard length prefix (u64 varint), including
     // the name count. The budget uses the actual file count, not the root cap.
@@ -1146,13 +1211,13 @@ async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<
     let (end, names) = read_collection_blob(meta.next(meta_hash), names_limit as u64).await?;
     // Check the encoded count before deserializing the Vec<String>, so many
     // empty names cannot turn a small byte buffer into a huge allocation.
-    let ((_, count), _) = postcard::take_from_bytes::<([u8; 13], usize)>(&names)?;
-    anyhow::ensure!(count == links.len(), "names and links length mismatch");
-    let mut names: CollectionMeta = postcard::from_bytes(&names)?;
-    anyhow::ensure!(names.check_header(), "invalid collection metadata header");
+    let ((_, count), _) = postcard::take_from_bytes::<([u8; 13], usize)>(&names).anyerr()?;
+    ensure_any!(count == links.len(), "names and links length mismatch");
+    let mut names: CollectionMeta = postcard::from_bytes(&names).anyerr()?;
+    ensure_any!(names.check_header(), "invalid collection metadata header");
     let collection = names.names_mut().drain(..).zip(links).collect();
     let EndBlobNext::Closing(closing) = end.next() else {
-        bail!("unexpected collection child");
+        bail_any!("unexpected collection child");
     };
     closing.next().await?;
     Ok(collection)
@@ -1162,11 +1227,11 @@ async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<
 async fn read_collection_blob(
     header: AtBlobHeader,
     limit: u64,
-) -> anyhow::Result<(AtEndBlob, Vec<u8>)> {
+) -> n0_error::Result<(AtEndBlob, Vec<u8>)> {
     let (mut content, size) = header.next().await?;
     // The size header is untrusted: use it only to reject oversized responses,
     // and enforce the limit again while collecting Bao-verified bytes.
-    anyhow::ensure!(
+    ensure_any!(
         size <= limit,
         "collection component is {size} bytes, above its {limit} byte limit"
     );
@@ -1175,11 +1240,11 @@ async fn read_collection_blob(
         match content.next().await {
             BlobContentNext::More((next, item)) => {
                 if let BaoContentItem::Leaf(leaf) = item? {
-                    anyhow::ensure!(
+                    ensure_any!(
                         leaf.offset == bytes.len() as u64,
                         "noncontiguous collection component"
                     );
-                    anyhow::ensure!(
+                    ensure_any!(
                         leaf.data.len() as u64 <= limit - bytes.len() as u64,
                         "collection component exceeds its {limit} byte limit"
                     );
@@ -1188,7 +1253,7 @@ async fn read_collection_blob(
                 content = next;
             }
             BlobContentNext::Done(end) => {
-                anyhow::ensure!(
+                ensure_any!(
                     bytes.len() as u64 == size,
                     "incomplete collection component"
                 );
@@ -1199,7 +1264,7 @@ async fn read_collection_blob(
 }
 
 /// Returns the size of `hash`, authenticated by fetching only its last chunk.
-async fn verified_size(connection: &Connection, hash: Hash) -> anyhow::Result<u64> {
+async fn verified_size(connection: &Connection, hash: Hash) -> n0_error::Result<u64> {
     let (mut content, size) = start(connection, hash, ChunkRanges::last_chunk()).await?;
     let end = loop {
         match content.next().await {
@@ -1211,13 +1276,13 @@ async fn verified_size(connection: &Connection, hash: Hash) -> anyhow::Result<u6
         }
     };
     let EndBlobNext::Closing(closing) = end.next() else {
-        bail!("unexpected child blob");
+        bail_any!("unexpected child blob");
     };
     closing.next().await?;
     Ok(size)
 }
 
-async fn sniff(connection: &Connection, hash: Hash) -> anyhow::Result<(u64, Vec<u8>)> {
+async fn sniff(connection: &Connection, hash: Hash) -> n0_error::Result<(u64, Vec<u8>)> {
     // Include the last chunk to authenticate the size as well as the prefix.
     let ranges = ChunkRanges::from(..ChunkNum::chunks(SNIFF_BYTES)) | ChunkRanges::last_chunk();
     let (mut content, size) = start(connection, hash, ranges).await?;
@@ -1229,7 +1294,7 @@ async fn sniff(connection: &Connection, hash: Hash) -> anyhow::Result<(u64, Vec<
                     let end =
                         (SNIFF_BYTES.saturating_sub(leaf.offset) as usize).min(leaf.data.len());
                     if end > 0 {
-                        anyhow::ensure!(leaf.offset == prefix.len() as u64, "noncontiguous prefix");
+                        ensure_any!(leaf.offset == prefix.len() as u64, "noncontiguous prefix");
                         prefix.extend_from_slice(&leaf.data[..end]);
                     }
                 }
@@ -1239,10 +1304,10 @@ async fn sniff(connection: &Connection, hash: Hash) -> anyhow::Result<(u64, Vec<
         }
     };
     let EndBlobNext::Closing(closing) = end.next() else {
-        bail!("unexpected child blob");
+        bail_any!("unexpected child blob");
     };
     closing.next().await?;
-    anyhow::ensure!(
+    ensure_any!(
         prefix.len() as u64 == size.min(SNIFF_BYTES),
         "incomplete prefix"
     );

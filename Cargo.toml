@@ -15,7 +15,6 @@ license = "MIT OR Apache-2.0"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 
 [workspace.dependencies]
-anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
