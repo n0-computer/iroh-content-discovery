@@ -40,13 +40,11 @@ const PKARR_SECRET: &str = "PKARR_SECRET";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+
+    let endpoint = Endpoint::bind(presets::N0).await?;
+
     // Read or make the Pkarr key first, so a generated secret is the first
     // thing printed and cannot scroll away behind the hashes.
     let pkarr_key = (!cli.no_pkarr).then(pkarr_key).transpose()?;
@@ -60,8 +58,6 @@ async fn main() -> Result<()> {
     let store_dir = tempfile::tempdir().std_context("store directory")?;
     let (store, entries, collection_hash) = import_path(store_dir.path(), files).await?;
 
-    let endpoint = Endpoint::bind(presets::N0).await?;
-    println!("Endpoint id: {}", endpoint.id());
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
@@ -81,14 +77,16 @@ async fn main() -> Result<()> {
     publisher.add_infohash(infohash(&collection_hash));
 
     // Hashes are printed in z-base-32, the encoding used by the gateway.
+    println!("Serving {} blobs:", entries.len());
     for (name, hash) in &entries {
-        println!("{}  {name}", z32::encode(hash.as_bytes()));
+        println!("    {}  {name}", z32::encode(hash.as_bytes()));
     }
     let collection = z32::encode(collection_hash.as_bytes());
-    println!("{collection}  (collection)");
+    println!("    {collection}  (collection)");
     // With the browser extension, the link URLs reach the local gateway.
-    println!("https://{collection}.{BLAKE3_DOMAIN}/");
-    println!("http://{collection}.blake3.localhost:8080/");
+    println!("\nBlake3 gateway URLs:");
+    println!("    https://{collection}.{BLAKE3_DOMAIN}/");
+    println!("    http://{collection}.blake3.localhost:8080/");
 
     // The name outlives this run; the hash it points at does not. The
     // publisher keeps republishing in its own task until it is dropped.
@@ -97,8 +95,9 @@ async fn main() -> Result<()> {
             let publisher = PkarrPublisher::new(dht.clone());
             publisher.set_blake3(&key, collection_hash.as_bytes())?;
             let name = pkarr_name(&key.verifying_key().to_bytes());
-            println!("https://{name}.{PKARR_DOMAIN}/");
-            println!("http://{name}.pkarr.localhost:8080/");
+            println!("\nPkarr gateway URLs:");
+            println!("    https://{name}.{PKARR_DOMAIN}/");
+            println!("    http://{name}.pkarr.localhost:8080/");
             n0_error::Ok(publisher)
         })
         .transpose()?;
@@ -154,8 +153,8 @@ async fn import_path(
 fn pkarr_key() -> Result<SigningKey> {
     let Some(hex) = std::env::var_os(PKARR_SECRET) else {
         let secret: [u8; 32] = rand::random();
-        let printable = HEXLOWER.encode(&secret);
-        println!("{PKARR_SECRET}={printable}  (generated, export it to reuse this name)");
+        println!("Generated a new Pkarr secret key. To reuse, set this environment variable:");
+        println!("{PKARR_SECRET}={}\n", HEXLOWER.encode(&secret));
         return Ok(SigningKey::from_bytes(&secret));
     };
     let hex = hex.to_str().std_context("secret must be hex digits")?;
