@@ -13,6 +13,7 @@ use n0_mainline::{Dht, Id};
 use tokio::task::JoinSet;
 
 use crate::AddrIndex;
+use tracing::debug;
 
 const MAX_INDEX_LOOKUPS: usize = 16;
 const MAX_QUEUED_PEERS: usize = 64;
@@ -42,7 +43,7 @@ impl Resolver {
     /// Dropping the stream cancels its pending lookups. The caller should
     /// impose a deadline.
     pub async fn resolve_stream(&self, infohash: Id) -> Result<stream::Boxed<EndpointId>> {
-        tracing::debug!(%infohash, "starting Mainline provider stream");
+        debug!(%infohash, "starting Mainline provider stream");
         let mut peers = self.dht.get_peers(infohash).await.context("get_peers")?;
         let index = self.index.clone();
         let stream = async_stream::stream! {
@@ -63,7 +64,7 @@ impl Resolver {
                 tokio::select! {
                     batch = peers.next(), if poll_peers => match batch {
                         Some(batch) => {
-                            tracing::debug!(%infohash, count = batch.len(), "Mainline peers received");
+                            debug!(%infohash, count = batch.len(), "Mainline peers received");
                             pending_peers.extend(batch);
                         },
                         None => peers_done = true,
@@ -72,10 +73,10 @@ impl Resolver {
                         if let Some((peer, result)) = result {
                             match result {
                                 Ok(records) => for record in records {
-                                    tracing::debug!(%infohash, %peer, endpoint = %record.endpoint_id, "discovered content provider");
+                                    debug!(%infohash, %peer, endpoint = %record.endpoint_id, "discovered content provider");
                                     yield record.endpoint_id;
                                 },
-                                Err(err) => tracing::debug!(%peer, %err, "index resolve"),
+                                Err(err) => debug!(%peer, %err, "index resolve"),
                             }
                         }
                     }
@@ -100,7 +101,7 @@ impl Resolver {
                 // and it does not come back, so retrying would spin this loop
                 // at full speed forever.
                 let Ok(mut found) = resolver.resolve_stream(infohash).await.inspect_err(|err| {
-                    tracing::debug!(%infohash, %err, "Mainline node is gone, ending provider stream");
+                    debug!(%infohash, %err, "Mainline node is gone, ending provider stream");
                 }) else {
                     break;
                 };
@@ -120,13 +121,13 @@ impl Resolver {
     #[tracing::instrument(level = "debug", skip(self), fields(infohash = %infohash))]
     pub async fn resolve_one(&self, infohash: Id) -> Result<Option<EndpointId>> {
         let started = std::time::Instant::now();
-        tracing::debug!("starting Mainline get_peers");
+        debug!("starting Mainline get_peers");
         let mut stream = self.dht.get_peers(infohash).await.context("get_peers")?;
         let mut peers = HashSet::new();
         let mut last_error = None;
         let mut any_ok = false;
         while let Some(batch) = stream.next().await {
-            tracing::debug!(
+            debug!(
                 count = batch.len(),
                 elapsed_ms = started.elapsed().as_millis(),
                 "Mainline peers received"
@@ -135,24 +136,24 @@ impl Resolver {
                 if !peers.insert(peer) {
                     continue;
                 }
-                tracing::debug!(%peer, "looking up signed endpoint in index server");
+                debug!(%peer, "looking up signed endpoint in index server");
                 match self.index.lookup(peer).await {
                     Ok(records) => {
-                        tracing::debug!(%peer, count = records.len(), "index server endpoint records received");
+                        debug!(%peer, count = records.len(), "index server endpoint records received");
                         any_ok = true;
                         if let Some(record) = records.into_iter().next() {
-                            tracing::debug!(%peer, endpoint = %record.endpoint_id, elapsed_ms = started.elapsed().as_millis(), "selected content provider");
+                            debug!(%peer, endpoint = %record.endpoint_id, elapsed_ms = started.elapsed().as_millis(), "selected content provider");
                             return Ok(Some(record.endpoint_id));
                         }
                     }
                     Err(error) => {
-                        tracing::debug!(%peer, ?error, "index server endpoint lookup failed");
+                        debug!(%peer, ?error, "index server endpoint lookup failed");
                         last_error = Some(error);
                     }
                 }
             }
         }
-        tracing::debug!(
+        debug!(
             peers = peers.len(),
             elapsed_ms = started.elapsed().as_millis(),
             "Mainline lookup exhausted without a provider"
@@ -174,7 +175,7 @@ impl Resolver {
         while let Some(batch) = stream.next().await {
             peers.extend(batch);
         }
-        tracing::debug!(n_peers = peers.len(), "get_peers");
+        debug!(n_peers = peers.len(), "get_peers");
 
         let mut set = JoinSet::new();
         for peer in peers {
@@ -192,10 +193,10 @@ impl Resolver {
                     endpoint_ids.extend(records.into_iter().map(|r| r.endpoint_id));
                 }
                 Ok((peer, Err(err))) => {
-                    tracing::debug!(%peer, %err, "index resolve");
+                    debug!(%peer, %err, "index resolve");
                     last_err = Some(err);
                 }
-                Err(err) => tracing::debug!(%err, "index resolve join"),
+                Err(err) => debug!(%err, "index resolve join"),
             }
         }
         if !any_ok && let Some(err) = last_err {

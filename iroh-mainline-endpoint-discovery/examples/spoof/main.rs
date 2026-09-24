@@ -11,6 +11,7 @@ use iroh_mainline_endpoint_discovery::{
 };
 use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id};
+use tracing::{debug, warn};
 
 const RESOLVE_DELAY: Duration = Duration::from_secs(5);
 const RESOLVE_BUDGET: Duration = Duration::from_secs(60);
@@ -108,8 +109,8 @@ async fn resolve_publisher(
                 println!("resolved {infohash} to {expected}");
                 return Ok(());
             }
-            Ok(ids) => tracing::debug!(?ids, "publisher not returned yet"),
-            Err(err) => tracing::warn!(%err, "resolve"),
+            Ok(ids) => debug!(?ids, "publisher not returned yet"),
+            Err(err) => warn!(%err, "resolve"),
         }
         if Instant::now() >= deadline {
             bail_any!("timed out resolving {infohash} to {expected}");

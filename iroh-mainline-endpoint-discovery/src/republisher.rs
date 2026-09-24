@@ -9,6 +9,7 @@ use n0_mainline::{
 };
 
 use crate::{SERVER_LIST_SALT, ServerList};
+use tracing::{info, warn};
 
 const RENEW: Duration = Duration::from_secs(600);
 const RETRY: Duration = Duration::from_secs(30);
@@ -41,7 +42,7 @@ where
     loop {
         let delay = match tokio::time::timeout(TIMEOUT, publish()).await {
             Ok(Ok(())) => {
-                tracing::info!("published signed server list");
+                info!("published signed server list");
                 RENEW
             }
             Ok(Err(err @ PutMutableError::Concurrency(_)))
@@ -49,11 +50,11 @@ where
                 return Err(err.into());
             }
             Ok(Err(err)) => {
-                tracing::warn!(%err, "index-list publication failed; retrying in thirty seconds");
+                warn!(%err, "index-list publication failed; retrying in thirty seconds");
                 RETRY
             }
             Err(_) => {
-                tracing::warn!("index-list publication timed out; retrying in thirty seconds");
+                warn!("index-list publication timed out; retrying in thirty seconds");
                 RETRY
             }
         };

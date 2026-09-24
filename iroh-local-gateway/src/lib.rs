@@ -40,7 +40,7 @@ use mime_classifier::MimeClassifier;
 use n0_future::{BufferedStreamExt, StreamExt};
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::Instrument;
+use tracing::{Instrument, debug, debug_span, warn};
 
 mod pkarr_redirect;
 mod providers;
@@ -184,7 +184,7 @@ impl Gateway {
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> anyhow::Result<()> {
         validate_listen_addr(listener.local_addr()?)?;
-        tracing::debug!(address = %listener.local_addr()?, endpoint = %self.0.endpoint.id(), "gateway listening");
+        debug!(address = %listener.local_addr()?, endpoint = %self.0.endpoint.id(), "gateway listening");
         axum::serve(listener, self.router())
             .with_graceful_shutdown(shutdown)
             .await?;
@@ -192,17 +192,21 @@ impl Gateway {
     }
 
     async fn source(&self, hash: Hash) -> Result<Source, HttpError> {
-        let cached = self.0.cache.lock().unwrap().get(&hash).cloned();
+        let cached = self.0.cache.lock().expect("poisoned").get(&hash).cloned();
         if let Some(source) = cached
             && source.connection.close_reason().is_none()
         {
-            tracing::debug!(%hash, size = source.size, "reusing cached blob source");
+            debug!(%hash, size = source.size, "reusing cached blob source");
             return Ok(source);
         }
-        tracing::debug!(%hash, "blob source cache miss or closed connection");
+        debug!(%hash, "blob source cache miss or closed connection");
         let connection = self.connection(hash).await?;
         let source = self.source_on_connection(connection, hash, None).await?;
-        self.0.cache.lock().unwrap().put(hash, source.clone());
+        self.0
+            .cache
+            .lock()
+            .expect("poisoned")
+            .put(hash, source.clone());
         Ok(source)
     }
 
@@ -210,14 +214,14 @@ impl Gateway {
     async fn connection(&self, hash: Hash) -> Result<Connection, HttpError> {
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
         let started = Instant::now();
-        tracing::debug!(infohash = %iroh_mainline_endpoint_discovery::infohash_hex(&infohash), "looking up content provider");
+        debug!(infohash = %iroh_mainline_endpoint_discovery::infohash_hex(&infohash), "looking up content provider");
         let providers = self
             .0
             .resolver
             .resolve_stream(infohash.into())
             .await
             .map_err(|error| {
-                tracing::debug!(
+                debug!(
                     ?error,
                     elapsed_ms = started.elapsed().as_millis(),
                     "provider lookup failed"
@@ -231,17 +235,17 @@ impl Gateway {
                 StatusCode::NOT_FOUND,
                 "no verified provider found for this hash",
             ))?;
-        tracing::debug!(%provider, elapsed_ms = started.elapsed().as_millis(), "provider lookup complete; connecting");
+        debug!(%provider, elapsed_ms = started.elapsed().as_millis(), "provider lookup complete; connecting");
         let started = Instant::now();
         let connection = self.0
             .endpoint
             .connect(provider, iroh_blobs::ALPN)
             .await
             .map_err(|error| {
-                tracing::debug!(%provider, ?error, elapsed_ms = started.elapsed().as_millis(), "provider connection failed");
+                debug!(%provider, ?error, elapsed_ms = started.elapsed().as_millis(), "provider connection failed");
                 HttpError::upstream(error)
             })?;
-        tracing::debug!(%provider, elapsed_ms = started.elapsed().as_millis(), "provider connected");
+        debug!(%provider, elapsed_ms = started.elapsed().as_millis(), "provider connected");
         Ok(connection)
     }
 
@@ -252,11 +256,11 @@ impl Gateway {
         name: Option<&str>,
     ) -> Result<Source, HttpError> {
         let started = Instant::now();
-        tracing::debug!(%hash, provider = %connection.remote_id(), "reading blob size and MIME prefix");
+        debug!(%hash, provider = %connection.remote_id(), "reading blob size and MIME prefix");
         let (size, prefix) = sniff(&connection, hash)
             .await
             .map_err(|error| {
-                tracing::debug!(%hash, ?error, elapsed_ms = started.elapsed().as_millis(), "blob metadata read failed");
+                debug!(%hash, ?error, elapsed_ms = started.elapsed().as_millis(), "blob metadata read failed");
                 HttpError::upstream(error)
             })?;
         let supplied_type = name
@@ -278,7 +282,7 @@ impl Gateway {
                 &prefix,
             )
             .to_string();
-        tracing::debug!(%hash, size, %mime, elapsed_ms = started.elapsed().as_millis(), "blob metadata ready");
+        debug!(%hash, size, %mime, elapsed_ms = started.elapsed().as_millis(), "blob metadata ready");
         let source = Source {
             connection,
             size,
@@ -289,14 +293,14 @@ impl Gateway {
 
     /// Returns the verified size of `hash`, fetched over `connection` if not cached.
     async fn size(&self, hash: Hash, connection: &Connection) -> anyhow::Result<u64> {
-        if let Some(source) = self.0.cache.lock().unwrap().peek(&hash) {
+        if let Some(source) = self.0.cache.lock().expect("poisoned").peek(&hash) {
             return Ok(source.size);
         }
-        if let Some(size) = self.0.sizes.lock().unwrap().get(&hash) {
+        if let Some(size) = self.0.sizes.lock().expect("poisoned").get(&hash) {
             return Ok(*size);
         }
         let size = verified_size(connection, hash).await?;
-        self.0.sizes.lock().unwrap().put(hash, size);
+        self.0.sizes.lock().expect("poisoned").put(hash, size);
         Ok(size)
     }
 
@@ -312,7 +316,7 @@ impl Gateway {
                     match gateway.size(hash, &connection).await {
                         Ok(size) => Some((hash, size)),
                         Err(error) => {
-                            tracing::debug!(%error, %hash, "fetch size");
+                            debug!(%error, %hash, "fetch size");
                             None
                         }
                     }
@@ -325,11 +329,17 @@ impl Gateway {
     }
 
     async fn collection(&self, hash: Hash) -> Result<CollectionSource, HttpError> {
-        let cached = self.0.collections.lock().unwrap().get(&hash).cloned();
+        let cached = self
+            .0
+            .collections
+            .lock()
+            .expect("poisoned")
+            .get(&hash)
+            .cloned();
         if let Some(source) = cached
             && source.connection.close_reason().is_none()
         {
-            tracing::debug!(%hash, "reusing cached collection");
+            debug!(%hash, "reusing cached collection");
             return Ok(source);
         }
         let connection = self.connection(hash).await?;
@@ -341,34 +351,44 @@ impl Gateway {
         hash: Hash,
         connection: Connection,
     ) -> Result<CollectionSource, HttpError> {
-        let cached = self.0.collections.lock().unwrap().get(&hash).cloned();
+        let cached = self
+            .0
+            .collections
+            .lock()
+            .expect("poisoned")
+            .get(&hash)
+            .cloned();
         if let Some(source) = cached
             && source.connection.close_reason().is_none()
         {
             return Ok(source);
         }
-        tracing::debug!(%hash, "reading collection");
+        debug!(%hash, "reading collection");
         let collection = read_collection(&connection, hash).await.map_err(|error| {
-            tracing::debug!(%hash, ?error, "read collection failed");
+            debug!(%hash, ?error, "read collection failed");
             HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
         })?;
-        tracing::debug!(%hash, entries = collection.iter().count(), "collection ready");
+        debug!(%hash, entries = collection.iter().count(), "collection ready");
         let source = CollectionSource {
             connection,
             collection,
         };
-        self.0.collections.lock().unwrap().put(hash, source.clone());
+        self.0
+            .collections
+            .lock()
+            .expect("poisoned")
+            .put(hash, source.clone());
         Ok(source)
     }
 }
 
 async fn log_request(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    let span = tracing::debug_span!("http_request", method = %request.method(), path = request.uri().path());
+    let span = debug_span!("http_request", method = %request.method(), path = request.uri().path());
     async move {
         let started = Instant::now();
-        tracing::debug!(range = ?request.headers().get(header::RANGE), "request received");
+        debug!(range = ?request.headers().get(header::RANGE), "request received");
         let response = next.run(request).await;
-        tracing::debug!(status = %response.status(), elapsed_ms = started.elapsed().as_millis(), "response headers ready");
+        debug!(status = %response.status(), elapsed_ms = started.elapsed().as_millis(), "response headers ready");
         response
     }.instrument(span).await
 }
@@ -404,8 +424,8 @@ struct HttpError(StatusCode, &'static str);
 
 impl HttpError {
     fn upstream(error: impl std::fmt::Display + std::fmt::Debug) -> Self {
-        tracing::debug!(?error, "gateway upstream error details");
-        tracing::warn!(%error, "gateway upstream failed");
+        debug!(?error, "gateway upstream error details");
+        warn!(%error, "gateway upstream failed");
         Self(
             StatusCode::BAD_GATEWAY,
             "provider lookup or transfer failed",
@@ -413,7 +433,7 @@ impl HttpError {
     }
 
     fn timeout(_: tokio::time::error::Elapsed) -> Self {
-        tracing::debug!("gateway operation deadline exceeded");
+        debug!("gateway operation deadline exceeded");
         Self(
             StatusCode::GATEWAY_TIMEOUT,
             "provider lookup or transfer timed out",
@@ -423,7 +443,7 @@ impl HttpError {
 
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
-        tracing::debug!(status = %self.0, reason = self.1, "returning gateway error");
+        debug!(status = %self.0, reason = self.1, "returning gateway error");
         (self.0, [(header::CACHE_CONTROL, "no-store")], self.1).into_response()
     }
 }
@@ -1106,7 +1126,7 @@ async fn start(
     hash: Hash,
     ranges: ChunkRanges,
 ) -> anyhow::Result<(AtBlobContent, u64)> {
-    tracing::debug!(provider = %connection.remote_id(), ?ranges, "requesting blob ranges");
+    debug!(provider = %connection.remote_id(), ?ranges, "requesting blob ranges");
     let request = GetRequest::new(hash, ChunkRangesSeq::from_ranges([ranges]));
     let connected = fsm::start(connection.clone(), request, Default::default())
         .next()
@@ -1115,7 +1135,7 @@ async fn start(
         bail!("expected blob root");
     };
     let result = root.next().next().await?;
-    tracing::debug!(size = result.1, "blob response started");
+    debug!(size = result.1, "blob response started");
     Ok(result)
 }
 
@@ -1258,7 +1278,7 @@ fn stream_content(
     let provider = connection.remote_id();
     let started = Instant::now();
     let stream = async_stream::try_stream! {
-        tracing::debug!(%hash, %provider, ?range, "streaming blob body");
+        debug!(%hash, %provider, ?range, "streaming blob body");
         // Keep the connection alive until the HTTP body is consumed or dropped.
         let _connection = connection;
         let mut offset = range.start;
@@ -1272,7 +1292,7 @@ fn stream_content(
                             if start != offset { Err(std::io::Error::other("noncontiguous blob data"))?; }
                             offset = end;
                             if offset == range.end {
-                                tracing::debug!(%hash, %provider, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body bytes ready");
+                                debug!(%hash, %provider, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body bytes ready");
                             }
                             yield leaf.data.slice((start - leaf.offset) as usize..(end - leaf.offset) as usize);
                         }
@@ -1289,11 +1309,11 @@ fn stream_content(
         };
         tokio::time::timeout(READ_TIMEOUT, closing.next()).await
             .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
-        tracing::debug!(%hash, %provider, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body complete");
+        debug!(%hash, %provider, bytes = range.end - range.start, elapsed_ms = started.elapsed().as_millis(), "blob body complete");
     };
     stream.map(move |result: std::io::Result<Bytes>| {
         if let Err(error) = &result {
-            tracing::debug!(%hash, %provider, ?error, elapsed_ms = started.elapsed().as_millis(), "blob body failed");
+            debug!(%hash, %provider, ?error, elapsed_ms = started.elapsed().as_millis(), "blob body failed");
         }
         result
     })

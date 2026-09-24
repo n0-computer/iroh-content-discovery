@@ -16,6 +16,7 @@ use iroh_mainline_endpoint_discovery::{
     infohash_from_blake3, pkarr_name,
 };
 use n0_mainline::{Dht, SigningKey, Testnet};
+use tracing::debug;
 use udp_addr_index::{Limits, Server};
 
 #[derive(Parser)]
@@ -110,7 +111,7 @@ async fn main() -> Result<()> {
     let router = Router::builder(provider.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
-    tracing::debug!(endpoint = %provider.id(), %hash, "demo blob provider started");
+    debug!(endpoint = %provider.id(), %hash, "demo blob provider started");
     let publisher = Publisher::new(provider.secret_key().clone(), provider_dht.clone(), index);
     publisher.add_infohash(infohash);
     let key = SigningKey::from_bytes(&rand::random());
@@ -136,7 +137,7 @@ async fn main() -> Result<()> {
             .await
             .context("content publication timed out")?;
         tokio::time::timeout(Duration::from_secs(60), pkarr.publish_all()).await??;
-        tracing::debug!(%public_key, %target, "demo Pkarr record published");
+        debug!(%public_key, %target, "demo Pkarr record published");
         println!("\nExtension port: {}", http_addr.port());
         println!("Open:         https://{public_key}.{PKARR_DOMAIN}/");
         println!("Serves:       https://{encoded}.{BLAKE3_DOMAIN}/");

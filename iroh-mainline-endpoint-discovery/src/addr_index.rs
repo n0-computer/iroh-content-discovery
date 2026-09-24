@@ -11,6 +11,7 @@ use n0_mainline::Dht;
 use iroh_base::SecretKey;
 
 use crate::{SignedRecord, UdpClient, UdpError};
+use tracing::debug;
 
 /// Initial index server discovery sources, tried in priority order.
 #[derive(Debug, Clone)]
@@ -104,7 +105,7 @@ impl AddrIndex {
     /// minutes, retaining the highest signed sequence for this index's lifetime.
     /// Addresses are discovery candidates; they do not prove availability.
     pub async fn discover_with_config(dht: Dht, config: DiscoveryConfig) -> Result<Self, UdpError> {
-        tracing::debug!(?config, "configuring index server discovery");
+        debug!(?config, "configuring index server discovery");
         if let Some(server) = config.server {
             return Self::udp(dht, server).await;
         }
@@ -146,7 +147,7 @@ impl AddrIndex {
             Ok(())
         };
         let signed_result = tokio::time::timeout(Duration::from_secs(30), signed_lookup).await;
-        tracing::debug!(?signed_result, "signed index-list lookup completed");
+        debug!(?signed_result, "signed index-list lookup completed");
         let mut peers = state
             .signed
             .as_ref()
@@ -155,7 +156,7 @@ impl AddrIndex {
             .unwrap_or_default();
         if peers.is_empty() {
             if let Some(hash) = discovery.config.rendezvous_hash {
-                tracing::debug!(infohash = %crate::infohash_hex(&hash), "discovering index servers through Mainline rendezvous");
+                debug!(infohash = %crate::infohash_hex(&hash), "discovering index servers through Mainline rendezvous");
                 let lookup = async {
                     let mut stream = discovery.dht.get_peers(hash.into()).await?;
                     while let Some(batch) = stream.next().await {
@@ -184,10 +185,10 @@ impl AddrIndex {
             }
         }
         if peers.is_empty() {
-            tracing::debug!("index server discovery found no servers");
+            debug!("index server discovery found no servers");
             return Err(e!(UdpError::NoServers));
         }
-        tracing::debug!(?peers, "using discovered index servers");
+        debug!(?peers, "using discovered index servers");
         self.client.replace_servers(peers).await?;
         state.refreshed = Some(tokio::time::Instant::now());
         Ok(())
@@ -230,7 +231,7 @@ impl AddrIndex {
             .into_iter()
             .filter_map(|value| SignedRecord::decode(&value, addr))
             .collect();
-        tracing::debug!(%addr, received, valid = records.len(), "validated index server endpoint records");
+        debug!(%addr, received, valid = records.len(), "validated index server endpoint records");
         Ok(records)
     }
 }

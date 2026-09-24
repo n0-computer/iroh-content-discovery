@@ -6,6 +6,7 @@ use iroh_mainline_endpoint_discovery::{ServerList, republish_server_list};
 use n0_error::{Result, StdResultExt};
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use std::net::SocketAddrV4;
+use tracing::info;
 use zeroize::Zeroizing;
 
 const SECRET_ENV: &str = "IROH_INDEX_LIST_SECRET";
@@ -47,7 +48,7 @@ fn main() -> Result<()> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    tracing::info!(%public_key, sequence = item.seq(), "starting index-list republisher");
+    info!(%public_key, sequence = item.seq(), "starting index-list republisher");
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

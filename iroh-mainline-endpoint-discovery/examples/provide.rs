@@ -21,6 +21,7 @@ use iroh_mainline_endpoint_discovery::{
 };
 use n0_error::{Result, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id, SigningKey};
+use tracing::info;
 
 /// Provide files and announce their hashes on Mainline.
 #[derive(Debug, Parser)]
@@ -108,7 +109,7 @@ async fn main() -> Result<()> {
     if let Some(pkarr) = &pkarr {
         pkarr.wait_published().await;
     }
-    tracing::info!("published, press Ctrl-C to stop");
+    info!("published, press Ctrl-C to stop");
     let result = tokio::signal::ctrl_c().await.anyerr();
     // Router shutdown also shuts down the store before the directory is removed.
     router.shutdown().await.anyerr()?;

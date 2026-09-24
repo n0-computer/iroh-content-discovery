@@ -3,7 +3,7 @@
 use std::{
     collections::HashSet,
     net::SocketAddrV4,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -14,6 +14,7 @@ use n0_mainline::{Dht, Id};
 use tokio::sync::{Notify, watch};
 
 use crate::AddrIndex;
+use tracing::{info, warn};
 
 /// How often to renew Mainline announcements and address-index values.
 pub const REFRESH: Duration = Duration::from_secs(10 * 60);
@@ -92,7 +93,7 @@ impl Publisher {
             .state
             .entries
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .expect("poisoned")
             .insert(infohash);
         if inserted {
             self.state.notify.notify_one();
@@ -106,7 +107,7 @@ impl Publisher {
             .state
             .entries
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .expect("poisoned")
             .remove(infohash);
         if removed {
             self.state.notify.notify_one();
@@ -136,7 +137,7 @@ impl State {
         let mut mapping = None;
         loop {
             if let Err(err) = self.reconcile(&mut mapping).await {
-                tracing::warn!(%err, "publishing failed");
+                warn!(%err, "publishing failed");
                 tokio::time::sleep(RETRY).await;
                 continue;
             }
@@ -152,7 +153,7 @@ impl State {
         let mut entries: Vec<_> = self
             .entries
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .expect("poisoned")
             .iter()
             .copied()
             .collect();
@@ -175,7 +176,7 @@ impl State {
 
         if accelerated {
             *mapping = Some(next_mapping);
-            tracing::info!(mapping = %next_mapping, "public UDP mapping changed");
+            info!(mapping = %next_mapping, "public UDP mapping changed");
         }
 
         let regular_spacing = REFRESH / entries.len() as u32;
@@ -204,7 +205,7 @@ impl State {
         // Report the mapping only once every infohash is announced, so a
         // waiter that starts resolving does not race the announcements.
         self.published.send_replace(Some(next_mapping));
-        tracing::info!(
+        info!(
             n_infohashes = entries.len(),
             "renewed Mainline announcements"
         );

@@ -24,6 +24,7 @@ use crate::{
 
 /// Targets under this domain name content this gateway can serve itself.
 use iroh_mainline_endpoint_discovery::BLAKE3_DOMAIN;
+use tracing::{debug, warn};
 
 // Bound both memory use and how long changed names can remain stale.
 const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -92,17 +93,22 @@ pub(crate) async fn redirect(
         });
     let key = parse_key(encoded)?;
     let started = std::time::Instant::now();
-    tracing::debug!(key = encoded, "resolving Pkarr record");
-    let cached = gateway.0.pkarr.lock().unwrap().get(&key, Instant::now());
+    debug!(key = encoded, "resolving Pkarr record");
+    let cached = gateway
+        .0
+        .pkarr
+        .lock()
+        .expect("poisoned")
+        .get(&key, Instant::now());
     let cache_hit = cached.is_some();
     let item = if let Some(item) = cached {
-        tracing::debug!(key = encoded, "Pkarr cache hit");
+        debug!(key = encoded, "Pkarr cache hit");
         item
     } else {
         tokio::time::timeout(LOOKUP_TIMEOUT, resolve(gateway.0.resolver.dht(), &key))
             .await
             .map_err(|_| {
-                tracing::debug!(
+                debug!(
                     key = encoded,
                     elapsed_ms = started.elapsed().as_millis(),
                     "Pkarr lookup timed out"
@@ -111,10 +117,10 @@ pub(crate) async fn redirect(
             })??
     };
     let packet = Packet::parse(item.value()).map_err(|error| {
-        tracing::warn!(%error, "invalid Pkarr DNS packet");
+        warn!(%error, "invalid Pkarr DNS packet");
         HttpError(StatusCode::BAD_GATEWAY, "invalid Pkarr DNS packet")
     })?;
-    tracing::debug!(
+    debug!(
         key = encoded,
         sequence = item.seq(),
         answers = packet.answers.len(),
@@ -122,12 +128,12 @@ pub(crate) async fn redirect(
         "Pkarr DNS packet decoded"
     );
     if !cache_hit {
-        gateway
-            .0
-            .pkarr
-            .lock()
-            .unwrap()
-            .insert(key, item.clone(), &packet, Instant::now());
+        gateway.0.pkarr.lock().expect("poisoned").insert(
+            key,
+            item.clone(),
+            &packet,
+            Instant::now(),
+        );
     }
     let authority = target(&packet, encoded).ok_or(HttpError(
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -159,7 +165,7 @@ pub(crate) async fn redirect(
         location.push('?');
         location.push_str(query);
     }
-    tracing::debug!(key = encoded, %location, "redirecting Pkarr request");
+    debug!(key = encoded, %location, "redirecting Pkarr request");
     Ok((
         StatusCode::TEMPORARY_REDIRECT,
         [
@@ -190,7 +196,7 @@ async fn resolve(
     key: &[u8; 32],
 ) -> Result<n0_mainline::MutableItem, HttpError> {
     let mut items = dht.get_mutable(key, None, None).await.map_err(|error| {
-        tracing::warn!(%error, "Pkarr lookup failed");
+        warn!(%error, "Pkarr lookup failed");
         HttpError(StatusCode::BAD_GATEWAY, "Pkarr lookup failed")
     })?;
     newest_verified(&mut items, key).await
@@ -223,7 +229,7 @@ async fn newest_verified(
             }
         }
     }
-    tracing::debug!(
+    debug!(
         sequence = newest.seq(),
         bytes = newest.value().len(),
         "using newest verified Pkarr item"

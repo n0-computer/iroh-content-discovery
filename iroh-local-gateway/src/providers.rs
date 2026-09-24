@@ -8,6 +8,7 @@ use std::{
 use iroh::{Endpoint, EndpointId};
 use iroh_blobs::Hash;
 use n0_future::{BufferedStreamExt, Stream, StreamExt, stream};
+use tracing::debug;
 
 const CONCURRENT_PROBES: usize = 3;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,22 +37,22 @@ pub fn filter_verified_providers(
             let endpoint = endpoint.clone();
             async move {
                 let started = Instant::now();
-                tracing::debug!(%hash, %provider, "probing provider with verified size request");
+                debug!(%hash, %provider, "probing provider with verified size request");
                 let probe = async {
                     let connection = endpoint.connect(provider, iroh_blobs::ALPN).await?;
                     crate::verified_size(&connection, hash).await
                 };
                 match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
                     Ok(Ok(size)) => {
-                        tracing::debug!(%hash, %provider, size, elapsed_ms = started.elapsed().as_millis(), "provider size validated");
+                        debug!(%hash, %provider, size, elapsed_ms = started.elapsed().as_millis(), "provider size validated");
                         Some(provider)
                     }
                     Ok(Err(error)) => {
-                        tracing::debug!(%hash, %provider, ?error, elapsed_ms = started.elapsed().as_millis(), "provider probe failed; skipping");
+                        debug!(%hash, %provider, ?error, elapsed_ms = started.elapsed().as_millis(), "provider probe failed; skipping");
                         None
                     }
                     Err(_) => {
-                        tracing::debug!(%hash, %provider, elapsed_ms = started.elapsed().as_millis(), "provider probe timed out; skipping");
+                        debug!(%hash, %provider, elapsed_ms = started.elapsed().as_millis(), "provider probe timed out; skipping");
                         None
                     }
                 }

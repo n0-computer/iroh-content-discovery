@@ -14,6 +14,7 @@ use simple_dns::{
     rdata::{HTTPS, RData, SVCB},
 };
 use tokio::sync::{Notify, watch};
+use tracing::{debug, warn};
 
 /// How often each packet is republished.
 ///
@@ -223,7 +224,7 @@ impl State {
             let delay = match self.publish_round().await {
                 Ok(()) => PKARR_REFRESH,
                 Err(err) => {
-                    tracing::warn!(%err, "Pkarr publish failed");
+                    warn!(%err, "Pkarr publish failed");
                     RETRY
                 }
             };
@@ -251,7 +252,7 @@ impl State {
         let mut result = Ok(());
         for item in self.sign_all(&mut previous)? {
             match self.dht.put_mutable(item.clone(), None).await {
-                Ok(_) => tracing::debug!(
+                Ok(_) => debug!(
                     name = %pkarr_name(item.key()),
                     sequence = item.seq(),
                     "published Pkarr name"
