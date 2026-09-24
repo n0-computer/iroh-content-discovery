@@ -42,11 +42,13 @@ z32 = "1.3"
 zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
+bytes = "1"
 # The examples are command line programs, and dev-dependencies keep them
 # buildable without turning the `cli` feature on.
 clap.workspace = true
 iroh.workspace = true
 iroh-blobs.workspace = true
+iroh-gossip = "0.101"
 tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true

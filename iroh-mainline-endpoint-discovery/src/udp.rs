@@ -279,8 +279,9 @@ impl Actor {
                 let request = Request::V1(RequestV1::Get { tx, addr });
                 if let Some(bytes) = encode(request, buf) {
                     for server in &self.servers {
+                        debug!(indexer = %server, peer = %addr, "querying indexer");
                         if let Err(err) = self.dht.send_datagram(bytes.to_vec(), *server).await {
-                            debug!(%server, %err, "send get");
+                            debug!(indexer = %server, peer = %addr, %err, "send get");
                         }
                     }
                     self.resolves.insert(
@@ -350,6 +351,7 @@ impl Actor {
                 if pending.addr != addr || !pending.awaiting.remove(&from) {
                     return;
                 }
+                debug!(indexer = %from, peer = %addr, found = value.is_some(), "indexer responded");
                 pending.responded = true;
                 if let Some(value) = value
                     && value.len() <= MAX_VALUE_LEN
@@ -413,6 +415,9 @@ impl Actor {
         let Some(pending) = self.resolves.remove(&tx) else {
             return;
         };
+        for server in &pending.awaiting {
+            debug!(indexer = %server, peer = %pending.addr, "index lookup timed out");
+        }
         let result = if !pending.responded {
             Err(e!(UdpError::Timeout))
         } else {

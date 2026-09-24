@@ -39,15 +39,14 @@ test("hash subdomains rewrite to a local per-hash origin", () => {
   assert.equal(redirect(`https://${hash}.blake3.net/site/index.html?x=1`), `http://${hash}.blake3.localhost:8080/site/index.html?x=1`);
 });
 
-test("labels that are not 52 characters are left alone", () => {
-  // Every other subdomain of the link domains stays usable, and a short label
-  // cannot be a hash or a key.
-  for (const url of [
-    "https://www.blake3.net/", "https://docs.blake3.net/style.css",
-    "https://www.pkarr.net/", `https://${"y".repeat(51)}.blake3.net/`,
-    `https://${"y".repeat(53)}.pkarr.net/`,
-  ]) {
-    assert.equal(redirect(url), null, url);
+test("single labels are forwarded for gateway validation", () => {
+  for (const domain of ["blake3", "pkarr"]) {
+    for (const label of ["www", "docs", "not-z32", "invalid_label", "y".repeat(51), "y".repeat(53)]) {
+      assert.equal(
+        redirect(`https://${label}.${domain}.net/path?x=1`),
+        `http://${label}.${domain}.localhost:8080/path?x=1`,
+      );
+    }
   }
 });
 

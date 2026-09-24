@@ -69,7 +69,13 @@ cargo run -p udp-addr-index --features cli -- --dht-port 11223 \
   --rendezvous-hash b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b
 cargo run -p iroh-mainline-endpoint-discovery --example blobs
 cargo run -p iroh-mainline-endpoint-discovery --example spoof
+cargo run -p iroh-mainline-endpoint-discovery --example gossip -- my-topic
 ```
+
+The `gossip` example is a swarm without a ticket: the topic string is hashed
+into a gossip topic id and a Mainline infohash, every member announces itself
+under that infohash, and members that resolve each other join the same
+iroh-gossip topic. Anyone who knows the string can join.
 
 `udp-addr-index` and `iroh-mainline-endpoint-discovery` are libraries first,
 so their commands sit behind a `cli` feature that is off by default: a

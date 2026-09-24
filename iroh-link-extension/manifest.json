@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "iroh link",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Open blake3.net content and resolve pkarr.net names through your local iroh HTTP gateway.",
   "permissions": [
     "declarativeNetRequestWithHostAccess",
