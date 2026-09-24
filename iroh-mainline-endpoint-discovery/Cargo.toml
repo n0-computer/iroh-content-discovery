@@ -10,10 +10,20 @@ readme = "../README.md"
 keywords = ["iroh", "p2p", "dht", "mainline", "discovery"]
 categories = ["network-programming"]
 
+[features]
+# The `iroh-index-list` command. This crate is a library first, so the command
+# is opt-in: `cargo build -p iroh-mainline-endpoint-discovery --features cli`.
+cli = ["dep:clap", "dep:tracing-subscriber", "dep:zeroize"]
+
+[[bin]]
+name = "iroh-index-list"
+path = "src/bin/iroh-index-list.rs"
+required-features = ["cli"]
+
 [dependencies]
 async-stream = "0.3"
 blake3.workspace = true
-clap.workspace = true
+clap = { workspace = true, optional = true }
 data-encoding.workspace = true
 iroh-base.workspace = true
 udp-addr-index-proto = { version = "0.1.0", path = "../udp-addr-index-proto" }
@@ -27,15 +37,19 @@ serde.workspace = true
 sha1_smol.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
 z32 = "1.3"
-zeroize = "1"
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
+# The examples are command line programs, and dev-dependencies keep them
+# buildable without turning the `cli` feature on.
+clap.workspace = true
 iroh.workspace = true
 iroh-blobs.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

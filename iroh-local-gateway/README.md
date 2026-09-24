@@ -4,6 +4,10 @@ A localhost HTTP gateway for content-addressed files, including video. This is
 workspace project four, adapted from the streaming approach in
 [`iroh-examples/iroh-gateway`](https://github.com/n0-computer/iroh-examples/tree/main/iroh-gateway).
 
+The gateway is a command as much as a library, so its `cli` feature is on by
+default. Depend on it with `default-features = false` to embed `Gateway` in
+another program without pulling in `clap` and `tracing-subscriber`.
+
 ## Try the full workflow
 
 With the browser extension installed and enabled on port 8080:
