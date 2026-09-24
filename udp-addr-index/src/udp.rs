@@ -16,7 +16,9 @@ use udp_addr_index_proto::{
     MAGIC, MAX_DGRAM, Proto, RENDEZVOUS_INFOHASH, Request, RequestV1, Response, ResponseV1,
 };
 
-/// Running address-index service. Drop to detach from the shared DHT socket.
+/// A running address-index service.
+///
+/// Drop it to detach from the shared DHT socket.
 #[derive(Debug)]
 pub struct UdpHandle {
     local_addr: SocketAddr,
@@ -25,12 +27,12 @@ pub struct UdpHandle {
 }
 
 impl UdpHandle {
-    /// Local DHT socket address (the bind IP may be unspecified).
+    /// Returns the local DHT socket address, whose bind IP may be unspecified.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
-    /// Stop serving and renewing server announcements.
+    /// Stops serving and renewing server announcements.
     pub fn abort(&self) {
         self.task.abort();
         if let Some(announcement) = &self.announcement {
@@ -38,7 +40,7 @@ impl UdpHandle {
         }
     }
 
-    /// Wait for either owned task to stop, reporting an unexpected exit.
+    /// Waits for either owned task to stop, reporting an unexpected exit.
     pub async fn terminated(&mut self) -> Result<()> {
         tokio::select! {
             result = &mut self.task => {
@@ -66,7 +68,7 @@ impl Drop for UdpHandle {
 }
 
 impl Server {
-    /// Serve on an existing Mainline socket and announce as a server.
+    /// Serves on an existing Mainline socket and announces as a server.
     ///
     /// Announcements use the observed source port and are renewed every ten
     /// minutes. Failed announcements retry after thirty seconds. Dropping the
@@ -76,7 +78,7 @@ impl Server {
             .await
     }
 
-    /// Serve and optionally announce under an application-configured rendezvous hash.
+    /// Serves and optionally announces under a configured rendezvous hash.
     ///
     /// `None` serves index requests without publishing a Mainline announcement.
     pub async fn attach_with_rendezvous(

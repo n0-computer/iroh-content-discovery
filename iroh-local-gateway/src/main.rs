@@ -16,6 +16,7 @@ use iroh::endpoint::presets;
 use iroh_local_gateway::{Gateway, validate_listen_addr};
 use iroh_mainline_endpoint_discovery::{AddrIndex, DiscoveryConfig, Resolver};
 use n0_mainline::Dht;
+use tracing::info;
 use udp_addr_index_proto::RENDEZVOUS_INFOHASH;
 
 #[derive(Parser)]
@@ -113,7 +114,7 @@ async fn serve(
             Some(args.rendezvous_hash.unwrap_or(RENDEZVOUS_INFOHASH))
         },
     };
-    tracing::info!("finding index servers");
+    info!("finding index servers");
     let index = loop {
         match AddrIndex::discover_with_config(dht.clone(), config.clone()).await {
             Ok(index) => break index,
@@ -124,9 +125,9 @@ async fn serve(
             Err(error) => return Err(error.into()),
         }
     };
-    let resolver = Resolver::bind(dht, index).await?;
+    let resolver = Resolver::new(dht, index);
     let gateway = Gateway::new(endpoint, resolver);
-    tracing::info!(listen = %listener.local_addr()?, "gateway ready");
+    info!(listen = %listener.local_addr()?, "gateway ready");
     gateway.serve(listener, std::future::pending()).await
 }
 

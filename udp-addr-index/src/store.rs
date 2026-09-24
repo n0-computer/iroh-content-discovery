@@ -1,4 +1,4 @@
-//! In-memory `SocketAddrV4 → opaque bytes` store.
+//! In-memory store mapping a `SocketAddrV4` to opaque bytes.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -39,28 +39,30 @@ struct Entry {
 pub struct Store {
     entries: HashMap<SocketAddrV4, Entry>,
     expirations: BTreeSet<(u64, SocketAddrV4)>,
-    /// Entries held per address, so one host cannot claim the whole store by
-    /// publishing from many source ports.
+    /// Entries held per address.
+    ///
+    /// Counting them stops one host from claiming the whole store by publishing
+    /// from many source ports.
     per_ip: HashMap<Ipv4Addr, usize>,
 }
 
 impl Store {
-    /// Create an empty store.
+    /// Creates an empty store.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Number of retained entries, including entries pending lazy collection.
+    /// Returns the number of retained entries, including entries pending collection.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether the store contains no retained entries.
+    /// Returns whether the store contains no retained entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Insert or replace one value using server receipt time for expiry.
+    /// Inserts or replaces one value, using server receipt time for expiry.
     pub fn put(
         &mut self,
         addr: SocketAddrV4,
@@ -98,13 +100,13 @@ impl Store {
         Ok(())
     }
 
-    /// Clone the live value stored under `addr`.
+    /// Clones the live value stored under `addr`.
     pub fn get(&mut self, addr: SocketAddrV4, now: u64) -> Option<Vec<u8>> {
         self.gc(now);
         self.entries.get(&addr).map(|entry| entry.value.clone())
     }
 
-    /// Remove expired entries in expiry order without scanning live entries.
+    /// Removes expired entries in expiry order without scanning live entries.
     pub fn gc(&mut self, now: u64) {
         while let Some(&(expires_at, addr)) = self.expirations.first() {
             if expires_at > now {
@@ -115,7 +117,7 @@ impl Store {
         }
     }
 
-    /// Drop one entry and its per-address count.
+    /// Drops one entry and its per-address count.
     fn remove_entry(&mut self, addr: SocketAddrV4) {
         if self.entries.remove(&addr).is_some()
             && let Some(count) = self.per_ip.get_mut(addr.ip())

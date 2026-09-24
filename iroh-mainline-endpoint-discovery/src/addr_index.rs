@@ -11,6 +11,7 @@ use n0_mainline::Dht;
 use iroh_base::SecretKey;
 
 use crate::{SignedRecord, UdpClient, UdpError};
+use tracing::debug;
 
 /// Initial index server discovery sources, tried in priority order.
 #[derive(Debug, Clone)]
@@ -69,14 +70,14 @@ impl DiscoveryState {
 }
 
 impl AddrIndex {
-    /// Attach to a Mainline node's UDP socket and add one server.
+    /// Attaches to a Mainline node's UDP socket and adds one server.
     pub async fn udp(dht: Dht, server: SocketAddrV4) -> Result<Self, UdpError> {
         let client = UdpClient::attach(dht).await?;
         client.add_server(server).await?;
         Ok(Self::from_udp(client))
     }
 
-    /// Discover servers through Mainline using the same socket for index traffic.
+    /// Discovers servers through Mainline, using the same socket for index traffic.
     ///
     /// Refreshes on use after ten minutes. Discovery is limited to two candidates
     /// and thirty seconds; announcements are untrusted and do not prove availability.
@@ -84,7 +85,7 @@ impl AddrIndex {
         Self::discover_with_config(dht, DiscoveryConfig::default()).await
     }
 
-    /// Discover with a trusted BEP44 server list in addition to rendezvous peers.
+    /// Discovers with a trusted BEP44 server list in addition to rendezvous peers.
     ///
     /// Uses the default rendezvous hash only if no signed addresses are available.
     pub async fn discover_with_authority(dht: Dht, public_key: [u8; 32]) -> Result<Self, UdpError> {
@@ -98,13 +99,13 @@ impl AddrIndex {
         .await
     }
 
-    /// Discover at most two index servers, trying BEP44 before the rendezvous fallback.
+    /// Discovers at most two index servers, trying BEP44 before the rendezvous fallback.
     ///
     /// Each lookup has a thirty-second deadline. Refreshes on use after ten
     /// minutes, retaining the highest signed sequence for this index's lifetime.
     /// Addresses are discovery candidates; they do not prove availability.
     pub async fn discover_with_config(dht: Dht, config: DiscoveryConfig) -> Result<Self, UdpError> {
-        tracing::debug!(?config, "configuring index server discovery");
+        debug!(?config, "configuring index server discovery");
         if let Some(server) = config.server {
             return Self::udp(dht, server).await;
         }
@@ -117,11 +118,11 @@ impl AddrIndex {
                 state: Mutex::new(DiscoveryState::default()),
             })),
         };
-        index.refresh_replicas().await?;
+        index.refresh_servers().await?;
         Ok(index)
     }
 
-    async fn refresh_replicas(&self) -> Result<(), UdpError> {
+    async fn refresh_servers(&self) -> Result<(), UdpError> {
         let Some(discovery) = &self.discovery else {
             return Ok(());
         };
@@ -146,7 +147,7 @@ impl AddrIndex {
             Ok(())
         };
         let signed_result = tokio::time::timeout(Duration::from_secs(30), signed_lookup).await;
-        tracing::debug!(?signed_result, "signed index-list lookup completed");
+        debug!(?signed_result, "signed index-list lookup completed");
         let mut peers = state
             .signed
             .as_ref()
@@ -155,7 +156,7 @@ impl AddrIndex {
             .unwrap_or_default();
         if peers.is_empty() {
             if let Some(hash) = discovery.config.rendezvous_hash {
-                tracing::debug!(infohash = %crate::infohash_hex(&hash), "discovering index servers through Mainline rendezvous");
+                debug!(infohash = %crate::infohash_hex(&hash), "discovering index servers through Mainline rendezvous");
                 let lookup = async {
                     let mut stream = discovery.dht.get_peers(hash.into()).await?;
                     while let Some(batch) = stream.next().await {
@@ -184,16 +185,16 @@ impl AddrIndex {
             }
         }
         if peers.is_empty() {
-            tracing::debug!("index server discovery found no servers");
+            debug!("index server discovery found no servers");
             return Err(e!(UdpError::NoServers));
         }
-        tracing::debug!(?peers, "using discovered index servers");
+        debug!(?peers, "using discovered index servers");
         self.client.replace_servers(peers).await?;
         state.refreshed = Some(tokio::time::Instant::now());
         Ok(())
     }
 
-    /// Wrap an existing UDP client.
+    /// Wraps an existing UDP client.
     pub fn from_udp(client: UdpClient) -> Self {
         Self {
             client,
@@ -201,7 +202,7 @@ impl AddrIndex {
         }
     }
 
-    /// Publish a record for `secret`'s endpoint to all responsive servers.
+    /// Publishes a record for `secret`'s endpoint to all responsive servers.
     ///
     /// Each server gets a record signed for the socket it observed, so a
     /// reader can tell a record published here from one copied out of another
@@ -209,7 +210,7 @@ impl AddrIndex {
     ///
     /// Returns the public UDP sockets under which servers stored it.
     pub async fn publish(&self, secret: &SecretKey) -> Result<Vec<SocketAddrV4>, AddrIndexError> {
-        self.refresh_replicas().await?;
+        self.refresh_servers().await?;
         let secret = secret.clone();
         self.client
             .publish(move |addr| SignedRecord::sign(&secret, addr).encode())
@@ -217,12 +218,12 @@ impl AddrIndex {
             .map_err(Into::into)
     }
 
-    /// Lookup the endpoints that listed `addr`.
+    /// Looks up the endpoints that listed `addr`.
     ///
     /// Records that were not signed for `addr` are discarded, so a record
     /// republished under another socket is not returned.
     pub async fn lookup(&self, addr: SocketAddrV4) -> Result<Vec<SignedRecord>, AddrIndexError> {
-        self.refresh_replicas().await?;
+        self.refresh_servers().await?;
         let result = self.client.resolve(addr).await?;
         let received = result.values.len();
         let records: Vec<_> = result
@@ -230,7 +231,7 @@ impl AddrIndex {
             .into_iter()
             .filter_map(|value| SignedRecord::decode(&value, addr))
             .collect();
-        tracing::debug!(%addr, received, valid = records.len(), "validated index server endpoint records");
+        debug!(%addr, received, valid = records.len(), "validated index server endpoint records");
         Ok(records)
     }
 }

@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 /// `b'd'`.
 pub const MAGIC: &[u8; 8] = b"\0addridx";
 
-/// Server rendezvous infohash: SHA-1 of `iroh-addr-index servers v1`.
-/// Servers announce their implied source port; clients discover them with get_peers.
+/// Server rendezvous infohash, the SHA-1 of `iroh-addr-index servers v1`.
+///
+/// Servers announce their implied source port; clients discover them with
+/// `get_peers`.
 pub const RENDEZVOUS_INFOHASH: [u8; 20] = [
     184, 108, 61, 145, 14, 26, 103, 236, 155, 168, 166, 154, 149, 189, 127, 139, 8, 190, 146, 59,
 ];
@@ -51,7 +53,8 @@ pub enum Proto {
 }
 
 impl Proto {
-    /// Encode [`MAGIC`] and the postcard body into a datagram buffer.
+    /// Encodes [`MAGIC`] and the postcard body into a datagram buffer.
+    ///
     /// Get requests are padded with trailing zeros to exactly [`MAX_DGRAM`]
     /// bytes, so no response can be larger than the request that caused it.
     pub fn encode<'a>(&self, buf: &'a mut [u8; MAX_DGRAM]) -> Result<&'a [u8], postcard::Error> {
@@ -65,7 +68,8 @@ impl Proto {
         }
     }
 
-    /// Decode a framed datagram, rejecting packets without the discriminator.
+    /// Decodes a framed datagram, rejecting packets without the discriminator.
+    ///
     /// Rejects oversized packets and get requests that are not padded.
     pub fn decode(data: &[u8]) -> Option<Self> {
         if data.len() > MAX_DGRAM {
@@ -76,13 +80,15 @@ impl Proto {
         (!value.is_padded() || data.len() == MAX_DGRAM).then_some(value)
     }
 
-    /// Whether this datagram is padded to a full [`MAX_DGRAM`] buffer.
+    /// Returns whether this datagram is padded to a full [`MAX_DGRAM`] buffer.
     fn is_padded(&self) -> bool {
         matches!(self, Self::Request(Request::V1(RequestV1::Get { .. })))
     }
 }
 
-/// Versioned postcard request. Unknown versions are dropped by receivers.
+/// Versioned postcard request.
+///
+/// Unknown versions are dropped by receivers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
     /// Current request body.
@@ -92,14 +98,14 @@ pub enum Request {
 /// Version-one request body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestV1 {
-    /// Ask the server to observe this packet's public IPv4 socket and issue a write token.
+    /// Asks the server to observe this packet's socket and issue a write token.
     Prepare {
         /// Identifier echoed in the response.
         tx: TransactionId,
         /// Makes the challenge at least as large as its response.
         padding: [u8; 24],
     },
-    /// Store opaque bytes under this packet's observed source socket.
+    /// Stores opaque bytes under this packet's observed source socket.
     Put {
         /// Identifier echoed in the response.
         tx: TransactionId,
@@ -108,7 +114,8 @@ pub enum RequestV1 {
         /// Application-defined bytes.
         value: Vec<u8>,
     },
-    /// Read the value stored for an exact public IPv4 socket.
+    /// Reads the value stored for an exact public IPv4 socket.
+    ///
     /// The framed datagram must be padded to [`MAX_DGRAM`] bytes; receivers
     /// ignore the padding after the postcard payload.
     Get {
@@ -119,7 +126,9 @@ pub enum RequestV1 {
     },
 }
 
-/// Versioned postcard response. Unknown versions are dropped by clients.
+/// Versioned postcard response.
+///
+/// Unknown versions are dropped by clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
     /// Current response body.
