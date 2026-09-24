@@ -20,8 +20,9 @@ at the bare URL. Query strings and paths are retained. The apexes
 `https://blake3.net/` and `https://pkarr.net/` stay untouched so they can
 host instructions or an extension download page. Other hosts, nested
 subdomains, and localhost requests are not matched.
-The extension captures a single alphanumeric label; the gateway validates its
-length, alphabet, and canonical encoding, returning 400 for invalid hashes.
+The extension forwards every single-label subdomain, including malformed hashes
+and keys. The gateway validates the label's length, alphabet, and canonical
+encoding, returning 400 for invalid hashes.
 
 Pkarr links use a z-base-32 public key in the subdomain. The gateway verifies
 the signed DNS packet and redirects to its HTTPS target, preserving the path
