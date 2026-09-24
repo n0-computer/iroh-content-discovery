@@ -7,6 +7,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     net::SocketAddr,
+    num::NonZeroUsize,
     ops::Range,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -87,6 +88,11 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'\'')
     .add(b'&');
 
+/// Providers kept for repeated seeks, and collections kept for repeated paths.
+const SOURCE_SLOTS: NonZeroUsize = NonZeroUsize::new(128).expect("nonzero");
+/// Verified sizes kept for listings, which are cheap to hold and slow to fetch.
+const SIZE_SLOTS: NonZeroUsize = NonZeroUsize::new(4096).expect("nonzero");
+
 /// Concurrent size requests per collection listing.
 const SIZE_REQUESTS: usize = 16;
 const REPO_URL: &str = "https://github.com/n0-computer/iroh-content-discovery";
@@ -132,9 +138,9 @@ impl Gateway {
             resolver,
             classifier: MimeClassifier::new(),
             pkarr: Mutex::new(pkarr_redirect::Cache::default()),
-            cache: Mutex::new(LruCache::new(128.try_into().unwrap())),
-            collections: Mutex::new(LruCache::new(128.try_into().unwrap())),
-            sizes: Mutex::new(LruCache::new(4096.try_into().unwrap())),
+            cache: Mutex::new(LruCache::new(SOURCE_SLOTS)),
+            collections: Mutex::new(LruCache::new(SOURCE_SLOTS)),
+            sizes: Mutex::new(LruCache::new(SIZE_SLOTS)),
         }))
     }
 
@@ -812,7 +818,7 @@ async fn collection_entry(
         .header(header::CACHE_CONTROL, "public, no-cache")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::from(listing(root, &dir, &entries, sizes.as_ref())))
-        .unwrap())
+        .expect("valid response"))
 }
 
 /// The subdirectories and files directly inside one directory of a collection.
@@ -1004,7 +1010,7 @@ async fn serve_blob(
         return Ok(builder
             .status(StatusCode::NOT_MODIFIED)
             .body(Body::empty())
-            .unwrap());
+            .expect("valid response"));
     }
     let selection = if method == Method::HEAD
         || headers
@@ -1029,12 +1035,15 @@ async fn serve_blob(
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::CACHE_CONTROL, "no-store")
                 .body(Body::empty())
-                .unwrap());
+                .expect("valid response"));
         }
         Selection::Full => (0..source.size, builder.status(StatusCode::OK)),
         Selection::Partial(ranges) if ranges.len() > 1 => {
             let mut builder = builder;
-            builder.headers_mut().unwrap().remove(header::CONTENT_TYPE);
+            builder
+                .headers_mut()
+                .expect("valid response")
+                .remove(header::CONTENT_TYPE);
             let boundary = format!("iroh-{:032x}", rand::random::<u128>());
             let length = multipart_length(&source, &ranges, &boundary).ok_or(HttpError(
                 StatusCode::BAD_REQUEST,
@@ -1050,7 +1059,7 @@ async fn serve_blob(
                 .body(Body::from_stream(multipart_content(
                     source, hash, ranges, boundary,
                 )))
-                .unwrap());
+                .expect("valid response"));
         }
         Selection::Partial(mut ranges) => {
             let range = ranges.pop().expect("nonempty selection");
@@ -1080,7 +1089,7 @@ async fn serve_blob(
         }
         Body::from_stream(stream_content(content, source.connection, range, hash))
     };
-    Ok(builder.body(body).unwrap())
+    Ok(builder.body(body).expect("valid response"))
 }
 
 fn part_header(source: &Source, range: &Range<u64>, boundary: &str) -> String {

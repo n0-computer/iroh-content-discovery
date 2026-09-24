@@ -1,7 +1,10 @@
 //! Resolves and caches signed Pkarr records through the gateway's shared DHT.
 
 use lru::LruCache;
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Extension,
@@ -36,11 +39,14 @@ const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
 /// lookup would cost seconds, so we take the newest answer within this window.
 const NEWEST_GRACE: Duration = Duration::from_millis(300);
 
+/// Verified packets kept between requests for the same key.
+const PACKET_SLOTS: NonZeroUsize = NonZeroUsize::new(1024).expect("nonzero");
+
 pub(crate) struct Cache(LruCache<[u8; 32], (Instant, n0_mainline::MutableItem)>);
 
 impl Default for Cache {
     fn default() -> Self {
-        Self(LruCache::new(1024.try_into().unwrap()))
+        Self(LruCache::new(PACKET_SLOTS))
     }
 }
 
@@ -85,7 +91,10 @@ pub(crate) async fn redirect(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     // Keep the original escaping, including encoded slashes and query values.
-    let rest = uri.path().strip_prefix("/pkarr/").unwrap();
+    let rest = uri
+        .path()
+        .strip_prefix("/pkarr/")
+        .expect("routed under /pkarr/");
     let (encoded, path) = rest
         .split_once('/')
         .map_or((rest, "/".to_owned()), |(key, path)| {
