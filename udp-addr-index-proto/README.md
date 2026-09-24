@@ -38,7 +38,7 @@ silently dropped, so callers need to handle timeouts.
 
 Servers announce on Mainline under `b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b`
 (SHA-1 of `iroh-addr-index servers v1`), using their implied source port.
-Clients call `get_peers` on that hash to find candidate replicas. Mainline and
+Clients call `get_peers` on that hash to find candidate servers. Mainline and
 index traffic share the same UDP socket, so the announced port serves both.
 An announcement is just a candidate, not a guarantee of availability or trust.
 

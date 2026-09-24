@@ -118,11 +118,11 @@ impl AddrIndex {
                 state: Mutex::new(DiscoveryState::default()),
             })),
         };
-        index.refresh_replicas().await?;
+        index.refresh_servers().await?;
         Ok(index)
     }
 
-    async fn refresh_replicas(&self) -> Result<(), UdpError> {
+    async fn refresh_servers(&self) -> Result<(), UdpError> {
         let Some(discovery) = &self.discovery else {
             return Ok(());
         };
@@ -210,7 +210,7 @@ impl AddrIndex {
     ///
     /// Returns the public UDP sockets under which servers stored it.
     pub async fn publish(&self, secret: &SecretKey) -> Result<Vec<SocketAddrV4>, AddrIndexError> {
-        self.refresh_replicas().await?;
+        self.refresh_servers().await?;
         let secret = secret.clone();
         self.client
             .publish(move |addr| SignedRecord::sign(&secret, addr).encode())
@@ -223,7 +223,7 @@ impl AddrIndex {
     /// Records that were not signed for `addr` are discarded, so a record
     /// republished under another socket is not returned.
     pub async fn lookup(&self, addr: SocketAddrV4) -> Result<Vec<SignedRecord>, AddrIndexError> {
-        self.refresh_replicas().await?;
+        self.refresh_servers().await?;
         let result = self.client.resolve(addr).await?;
         let received = result.values.len();
         let records: Vec<_> = result

@@ -11,7 +11,7 @@ use udp_addr_index::{Limits, Server};
 use udp_addr_index_proto::{MAX_DGRAM, Proto, Request, RequestV1, Response, ResponseV1};
 
 #[tokio::test]
-async fn unannounced_replica_publishes_and_resolves_opaque_bytes() {
+async fn an_unannounced_server_stores_and_returns_opaque_bytes() {
     let server = Server::new(Limits::for_tests());
     let handle = server
         .attach_with_rendezvous(test_dht(), None)
