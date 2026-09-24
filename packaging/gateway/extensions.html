@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Iroh Gateway — browser extensions</title>
+<style>body{font:17px system-ui;max-width:48em;margin:3em auto;padding:0 1em;line-height:1.6}code{background:#eee;padding:.15em .3em}</style>
+<h1>Connect your browser to Iroh Gateway</h1>
+<p>The gateway runs in the background on port <strong>8080</strong>. The extension
+redirects blake3.net and pkarr.net links to it. Install the extension manually;
+the installer does not change browser settings.</p>
+<h2>Chrome or Brave</h2>
+<ol>
+<li>Open <code>chrome://extensions</code> or <code>brave://extensions</code>.</li>
+<li>Enable <strong>Developer mode</strong>, then choose <strong>Load unpacked</strong>.</li>
+<li>Select the <strong>chrome</strong> folder beside this instructions file.</li>
+<li>Open the extension popup and save port <strong>8080</strong> with redirects enabled.</li>
+</ol>
+<h2>Firefox</h2>
+<p>Firefox 140 or later is required. In regular Firefox, open
+<code>about:debugging#/runtime/this-firefox</code>, choose <strong>Load Temporary
+Add-on</strong>, and select <strong>firefox/manifest.json</strong> beside this file.
+This installation lasts until Firefox restarts.</p>
+<p>For a permanent unsigned installation, use Firefox Developer Edition, Nightly,
+or ESR. Set <code>xpinstall.signatures.required</code> to <code>false</code> in
+<code>about:config</code>, then open <code>about:addons</code>, choose the gear menu's
+<strong>Install Add-on From File</strong>, and select
+<strong>iroh-link-firefox-unsigned.xpi</strong> beside this file.</p>
+<p>In the extension popup, click <strong>Save</strong> and grant access to
+blake3.net and pkarr.net. Regular Firefox requires a Mozilla-signed package for
+permanent installation. See <a href="https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/">Mozilla's signing documentation</a>.</p>
+<h2>Where are these files?</h2>
+<p>Windows: <code>%LOCALAPPDATA%\Programs\Iroh Gateway\extensions</code>.<br>
+macOS: <code>~/Applications/Iroh Gateway Extensions</code>.</p>
+<p>Keep the Chrome folder in place while the unpacked extension is installed.
+After upgrading the gateway, reload the extension on the browser's extensions
+page. Remove the extension manually when uninstalling the gateway.</p>
+<h2>If links do not work</h2>
+<p>Make sure the gateway is running and the extension port matches. Only one
+application can listen on port 8080; a running Blobtorrent gateway uses the same
+port. Stop that gateway or configure a different port before starting this one.</p>
+<p>Gateway settings and logs are in <code>%LOCALAPPDATA%\iroh-local-gateway</code>
+on Windows or <code>~/Library/Application Support/iroh-local-gateway</code> on macOS.
+<code>gateway.log</code> records discovery and HTTP activity; <code>launcher.log</code>
+records startup errors. To change the port, stop the gateway and put
+<code>["--listen", "127.0.0.1:8081"]</code> in <code>arguments.json</code>.
+Restart it and set the same port in the extension. On macOS, run the app's
+<code>iroh-gateway-background install-agent</code> helper to update login arguments.</p>

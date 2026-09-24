@@ -1,0 +1,98 @@
+name: Gateway installers
+on:
+  push:
+    tags: ['gateway-v*']
+  pull_request:
+    paths:
+      - 'iroh-local-gateway/**'
+      - 'iroh-link-extension/**'
+      - 'packaging/gateway/**'
+      - '.github/workflows/gateway-release.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gateway-${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check release tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/gateway-v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python -c "import os,tomllib; v=tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version']; assert os.environ['RELEASE_TAG'] == 'gateway-v'+v, 'Tag must match workspace version'"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test iroh-link-extension/rules.test.js
+      - run: python -m unittest discover -s packaging/gateway -p 'test_*.py'
+      - run: cargo test -p iroh-local-gateway --locked --bins --test background
+      - run: cargo build --release --locked -p iroh-local-gateway --bins --target ${{ matrix.target }}
+      - run: python packaging/gateway/stage.py ${{ matrix.target }}
+      - name: Build and test Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./packaging/gateway/windows/build.ps1
+          ./packaging/gateway/windows/smoke.ps1
+      - name: Build and test macOS installer
+        if: runner.os == 'macOS'
+        run: |
+          python packaging/gateway/macos/build.py
+          python packaging/gateway/macos/smoke.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gateway-${{ matrix.target }}
+          path: |
+            dist/*-setup.exe
+            dist/*.pkg
+            dist/*.sha256
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gateway-installer-logs-${{ matrix.target }}
+          path: installer-test-logs/
+  publish:
+    if: startsWith(github.ref, 'refs/tags/gateway-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gateway-*
+          merge-multiple: true
+          path: dist
+      - name: Publish installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "$RELEASE_TAG"
+          fi
