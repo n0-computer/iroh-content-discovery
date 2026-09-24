@@ -54,6 +54,8 @@ td.hash span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  -webkit-user-select: all;
+  user-select: all;
 }
 
 td.download {
