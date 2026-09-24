@@ -395,8 +395,7 @@ pub fn validate_listen_addr(addr: SocketAddr) -> Result<(), ListenAddrError> {
 ///
 /// # Errors
 ///
-/// Returns the same errors as [`parse_z32_bytes`], which decides what a valid
-/// encoding is.
+/// Fails like [`parse_z32_bytes`], which decides what a valid encoding is.
 pub fn parse_hash(value: &str) -> Result<Hash, Z32Error> {
     Ok(Hash::from_bytes(parse_z32_bytes(value)?))
 }
@@ -408,14 +407,14 @@ pub fn parse_hash(value: &str) -> Result<Hash, Z32Error> {
 ///
 /// # Errors
 ///
-/// Returns an error if `value` is not 52 characters of the z-base-32 alphabet,
-/// or if it is not the one encoding those 32 bytes have. Rejecting aliases
-/// keeps a hash or key to a single URL, and therefore to a single origin.
+/// Fails unless `value` is 52 characters of the z-base-32 alphabet and is the
+/// one encoding those 32 bytes have. Rejecting aliases keeps a hash or key to
+/// a single URL, and therefore to a single origin.
 pub fn parse_z32_bytes(value: &str) -> Result<[u8; 32], Z32Error> {
-    ensure!(value.len() == 52, Z32Error::Length);
-    let decoded = z32::decode(value.as_bytes()).map_err(|source| e!(Z32Error::Alphabet, source))?;
-    let bytes: [u8; 32] = decoded.try_into().map_err(|_| e!(Z32Error::ByteCount))?;
-    ensure!(z32::encode(&bytes) == value, Z32Error::Noncanonical);
+    ensure!(value.len() == 52, Z32Error);
+    let decoded = z32::decode(value.as_bytes()).map_err(|_| e!(Z32Error))?;
+    let bytes: [u8; 32] = decoded.try_into().map_err(|_| e!(Z32Error))?;
+    ensure!(z32::encode(&bytes) == value, Z32Error);
     Ok(bytes)
 }
 
@@ -425,26 +424,13 @@ pub fn parse_z32_bytes(value: &str) -> Result<[u8; 32], Z32Error> {
 pub struct ListenAddrError {}
 
 /// Rejection of a string that is not canonical z-base-32 for 32 bytes.
+///
+/// The length, the alphabet and the canonical form are one condition to a
+/// caller: every one of them means the label is not a hash or a key, and every
+/// one of them is answered the same way.
 #[n0_error::stack_error(derive, add_meta)]
-#[non_exhaustive]
-pub enum Z32Error {
-    /// The input is not 52 characters long.
-    #[error("expected 52 z-base-32 characters")]
-    Length {},
-    /// The input contains a character outside the z-base-32 alphabet.
-    #[error("invalid z-base-32")]
-    Alphabet {
-        /// Why the decoder rejected the input.
-        #[error(std_err, source)]
-        source: z32::Z32Error,
-    },
-    /// The input decodes to something other than 32 bytes.
-    #[error("expected 32 bytes")]
-    ByteCount {},
-    /// The input is not the encoding those bytes are written as.
-    #[error("noncanonical z-base-32")]
-    Noncanonical {},
-}
+#[error("expected 52 characters of canonical z-base-32")]
+pub struct Z32Error {}
 
 /// Failure of [`Gateway::serve`].
 #[n0_error::stack_error(derive, add_meta)]
