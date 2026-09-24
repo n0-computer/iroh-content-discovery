@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use iroh::{SecretKey, endpoint::presets};
 use iroh_mainline_endpoint_discovery::{
-    AddrIndex, Publisher, Resolver, SignedRecord, infohash_from_blake3, parse_infohash,
+    AddrIndex, Publisher, Resolver, infohash_from_blake3, parse_infohash,
 };
 use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id};
@@ -71,8 +71,7 @@ async fn main() -> Result<()> {
             Some(server) => AddrIndex::udp(attacker_dht, server).await?,
             None => AddrIndex::discover(attacker_dht).await?,
         };
-        let spoof = SignedRecord::sign(&SecretKey::generate());
-        let attacker_addrs = attacker.publish(&spoof).await?;
+        let attacker_addrs = attacker.publish(&SecretKey::generate()).await?;
         println!("attacker could only publish at {attacker_addrs:?}");
 
         let records = publisher.index().lookup(mapping).await?;

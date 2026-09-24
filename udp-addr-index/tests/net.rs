@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use iroh_base::SecretKey;
-use iroh_mainline_endpoint_discovery::{AddrIndex, Publisher, Resolver, SignedRecord, UdpClient};
+use iroh_mainline_endpoint_discovery::{AddrIndex, Publisher, Resolver, UdpClient};
 use n0_future::StreamExt;
 use n0_mainline::Dht;
 use tokio::net::UdpSocket;
@@ -25,7 +25,13 @@ async fn unannounced_replica_publishes_and_resolves_opaque_bytes() {
         .unwrap();
 
     let value = b"not a signed record".to_vec();
-    let addrs = client.publish(value.clone()).await.unwrap();
+    let addrs = client
+        .publish({
+            let value = value.clone();
+            move |_| value.clone()
+        })
+        .await
+        .unwrap();
     assert_eq!(addrs.len(), 1);
     assert!(addrs[0].ip().is_loopback());
     assert_eq!(
@@ -144,7 +150,7 @@ async fn concurrent_reads_are_demultiplexed_by_transaction() {
         .add_server(v4(loopback(handle.local_addr())))
         .await
         .unwrap();
-    let addr = client.publish(b"value".to_vec()).await.unwrap()[0];
+    let addr = client.publish(|_| b"value".to_vec()).await.unwrap()[0];
 
     let (left, right) = tokio::join!(client.resolve(addr), client.resolve(addr));
     assert_eq!(left.unwrap().values, [b"value".to_vec()]);
@@ -158,12 +164,42 @@ async fn discovery_directory_validates_opaque_record() {
     let index = AddrIndex::udp(test_dht(), v4(loopback(handle.local_addr())))
         .await
         .unwrap();
-    let record = SignedRecord::sign(&SecretKey::generate());
-    let addr = index.publish(&record).await.unwrap()[0];
-    assert_eq!(index.lookup(addr).await.unwrap(), [record]);
+    let secret = SecretKey::generate();
+    let addr = index.publish(&secret).await.unwrap()[0];
+    let records = index.lookup(addr).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].endpoint_id, secret.public());
+    assert_eq!(records[0].addr(), addr);
 
     server.put_local(addr, b"invalid".to_vec()).unwrap();
     assert!(index.lookup(addr).await.unwrap().is_empty());
+}
+
+/// Reads are public, so a record can be copied. It is signed for the socket it
+/// was stored under, so a reader discards it anywhere else.
+#[tokio::test]
+async fn a_copied_record_does_not_resolve_under_another_socket() {
+    let server = Server::new(Limits::for_tests());
+    let handle = server.attach(test_dht()).await.unwrap();
+    let server_addr = v4(loopback(handle.local_addr()));
+    let index = AddrIndex::udp(test_dht(), server_addr).await.unwrap();
+    let secret = SecretKey::generate();
+    let victim_addr = index.publish(&secret).await.unwrap()[0];
+    let stolen = index.lookup(victim_addr).await.unwrap()[0].encode();
+
+    let attacker = UdpClient::attach(test_dht()).await.unwrap();
+    attacker.add_server(server_addr).await.unwrap();
+    let attacker_addr = attacker.publish(move |_| stolen.clone()).await.unwrap()[0];
+
+    assert_ne!(attacker_addr, victim_addr);
+    // The server stored the bytes, because the attacker does receive there.
+    assert!(server.get_local(attacker_addr).is_some());
+    // A reader still only finds the victim's endpoint at the victim's socket.
+    assert!(index.lookup(attacker_addr).await.unwrap().is_empty());
+    assert_eq!(
+        index.lookup(victim_addr).await.unwrap()[0].endpoint_id,
+        secret.public()
+    );
 }
 
 #[tokio::test]
@@ -193,13 +229,15 @@ async fn servers_are_discovered_on_mainline_and_share_the_announced_socket() {
                 Err(err) => panic!("discovery failed: {err}"),
             }
         };
-        let record = SignedRecord::sign(&SecretKey::generate());
-        let addr = index.publish(&record).await.unwrap()[0];
+        let secret = SecretKey::generate();
+        let addr = index.publish(&secret).await.unwrap()[0];
         assert_eq!(
             addr.port(),
             reader_dht.info().await.unwrap().local_addr().port()
         );
-        assert_eq!(index.lookup(addr).await.unwrap(), [record]);
+        let records = index.lookup(addr).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].endpoint_id, secret.public());
         assert!(server.get_local(addr).is_some());
         drop(handle);
         // Detaching the index leaves the externally owned Mainline node alive.
@@ -231,9 +269,9 @@ async fn resolver_stream_yields_all_announced_endpoints() {
         for _ in 0..2 {
             let dht = node();
             let index = AddrIndex::udp(dht.clone(), server_addr).await.unwrap();
-            let record = SignedRecord::sign(&SecretKey::generate());
-            expected.push(record.endpoint_id);
-            index.publish(&record).await.unwrap();
+            let secret = SecretKey::generate();
+            expected.push(secret.public());
+            index.publish(&secret).await.unwrap();
             dht.get_closest_nodes(infohash).await.unwrap();
             dht.announce_peer(infohash, None).await.unwrap();
         }
@@ -423,8 +461,8 @@ async fn signed_list_precedes_custom_rendezvous_fallback() {
         let index = AddrIndex::discover_with_config(node(), config)
             .await
             .unwrap();
-        let record = SignedRecord::sign(&SecretKey::generate());
-        let addr = index.publish(&record).await.unwrap()[0];
+        let secret = SecretKey::generate();
+        let addr = index.publish(&secret).await.unwrap()[0];
         assert!(signed_server.get_local(addr).is_some());
         assert!(fallback_server.get_local(addr).is_none());
         let other = n0_mainline::SigningKey::from_bytes(&[45; 32]);
@@ -438,7 +476,7 @@ async fn signed_list_precedes_custom_rendezvous_fallback() {
         )
         .await
         .unwrap();
-        let addr = index.publish(&record).await.unwrap()[0];
+        let addr = index.publish(&secret).await.unwrap()[0];
         assert!(fallback_server.get_local(addr).is_some());
     })
     .await
@@ -466,7 +504,6 @@ async fn explicit_server_bypasses_both_discovery_sources() {
     .await
     .unwrap()
     .unwrap();
-    let record = SignedRecord::sign(&SecretKey::generate());
-    let addr = index.publish(&record).await.unwrap()[0];
+    let addr = index.publish(&SecretKey::generate()).await.unwrap()[0];
     assert!(server.get_local(addr).is_some());
 }
