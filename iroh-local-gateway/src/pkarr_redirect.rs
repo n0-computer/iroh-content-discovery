@@ -28,6 +28,13 @@ use iroh_mainline_endpoint_discovery::BLAKE3_DOMAIN;
 // Bound both memory use and how long changed names can remain stale.
 const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// How long to keep reading answers after the first one arrives.
+///
+/// Any node may answer with an older packet that still verifies, so taking the
+/// first answer lets one stale node roll a name back. Waiting for the whole
+/// lookup would cost seconds, so we take the newest answer within this window.
+const NEWEST_GRACE: Duration = Duration::from_millis(300);
+
 pub(crate) struct Cache(LruCache<[u8; 32], (Instant, n0_mainline::MutableItem)>);
 
 impl Default for Cache {
@@ -186,22 +193,49 @@ async fn resolve(
         tracing::warn!(%error, "Pkarr lookup failed");
         HttpError(StatusCode::BAD_GATEWAY, "Pkarr lookup failed")
     })?;
-    first_verified(&mut items, key).await
+    newest_verified(&mut items, key).await
 }
 
-async fn first_verified(
+/// Take the newest answer, waiting [`NEWEST_GRACE`] after the first one.
+///
+/// Every answer is signature-checked by `get_mutable`, but an old packet
+/// verifies just as well as a current one, so the sequence number decides.
+async fn newest_verified(
     items: &mut (impl n0_future::Stream<Item = n0_mainline::MutableItem> + Unpin),
     key: &[u8; 32],
 ) -> Result<n0_mainline::MutableItem, HttpError> {
-    let item = items
+    let first = items
         .next()
         .await
         .ok_or(HttpError(StatusCode::NOT_FOUND, "no Pkarr packet found"))?;
+    let mut newest = verified(first, key)?;
+    let deadline = tokio::time::sleep(NEWEST_GRACE);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            () = &mut deadline => break,
+            item = items.next() => {
+                let Some(item) = item else { break };
+                let item = verified(item, key)?;
+                if item.seq() > newest.seq() {
+                    newest = item;
+                }
+            }
+        }
+    }
     tracing::debug!(
-        sequence = item.seq(),
-        bytes = item.value().len(),
-        "received verified Pkarr item"
+        sequence = newest.seq(),
+        bytes = newest.value().len(),
+        "using newest verified Pkarr item"
     );
+    Ok(newest)
+}
+
+/// Reject an item that is not a well-formed answer for `key`.
+fn verified(
+    item: n0_mainline::MutableItem,
+    key: &[u8; 32],
+) -> Result<n0_mainline::MutableItem, HttpError> {
     // get_mutable verifies BEP44 signatures and binds each item to the requested
     // key. Its value is the DNS wire packet; no Pkarr envelope is needed.
     if item.seq() < 0 || item.key() != key {
@@ -271,6 +305,10 @@ mod tests {
     use simple_dns::{ResourceRecord, rdata::HTTPS};
 
     fn signed_packet(ttl: u32) -> (n0_mainline::MutableItem, Vec<u8>) {
+        signed_packet_with_sequence(ttl, 1)
+    }
+
+    fn signed_packet_with_sequence(ttl: u32, sequence: i64) -> (n0_mainline::MutableItem, Vec<u8>) {
         let key = n0_mainline::SigningKey::from_bytes(&[9; 32]);
         let mut packet = Packet::new_reply(0);
         packet.answers.push(ResourceRecord::new(
@@ -280,11 +318,14 @@ mod tests {
             RData::HTTPS(HTTPS(SVCB::new(0, "target.example".try_into().unwrap()))),
         ));
         let bytes = packet.build_bytes_vec_compressed().unwrap();
-        (n0_mainline::MutableItem::new(&key, &bytes, 1, None), bytes)
+        (
+            n0_mainline::MutableItem::new(&key, &bytes, sequence, None),
+            bytes,
+        )
     }
 
     #[tokio::test]
-    async fn first_record_does_not_wait_for_lookup_completion() {
+    async fn lookup_does_not_wait_for_completion() {
         let (item, _) = signed_packet(300);
         let key = *item.key();
         let stream = async_stream::stream! {
@@ -293,11 +334,30 @@ mod tests {
         };
         let mut stream = Box::pin(stream);
         let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            first_verified(&mut stream, &key),
+            NEWEST_GRACE + Duration::from_millis(200),
+            newest_verified(&mut stream, &key),
         )
         .await;
         assert!(result.is_ok_and(|item| item.is_ok()));
+    }
+
+    #[tokio::test]
+    async fn a_stale_answer_does_not_win_the_race() {
+        // A node answering first with an old packet would otherwise roll the
+        // name back for as long as the cache holds it.
+        let (stale, _) = signed_packet_with_sequence(300, 100);
+        let (current, _) = signed_packet_with_sequence(300, 200);
+        let key = *stale.key();
+        let stream = async_stream::stream! {
+            yield stale;
+            yield current;
+            std::future::pending::<()>().await;
+        };
+        let mut stream = Box::pin(stream);
+        let Ok(newest) = newest_verified(&mut stream, &key).await else {
+            panic!("newest lookup failed")
+        };
+        assert_eq!(newest.seq(), 200);
     }
 
     #[test]
