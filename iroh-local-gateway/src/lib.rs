@@ -1065,13 +1065,13 @@ async fn serve_blob(
     let body = if method == Method::HEAD || range.is_empty() {
         Body::empty()
     } else {
-        let chunks =
-            ChunkRanges::from(ChunkNum::full_chunks(range.start)..ChunkNum::chunks(range.end));
-        let (content, size) =
-            tokio::time::timeout(READ_TIMEOUT, start(&source.connection, hash, chunks))
-                .await
-                .map_err(HttpError::timeout)?
-                .map_err(HttpError::upstream)?;
+        let (content, size) = tokio::time::timeout(
+            READ_TIMEOUT,
+            start(&source.connection, hash, chunks_for(&range)),
+        )
+        .await
+        .map_err(HttpError::timeout)?
+        .map_err(HttpError::upstream)?;
         if size != source.size {
             return Err(HttpError(
                 StatusCode::BAD_GATEWAY,
@@ -1113,8 +1113,7 @@ fn multipart_content(
 ) -> impl n0_future::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::try_stream! {
         for range in ranges {
-            let chunks = ChunkRanges::from(ChunkNum::full_chunks(range.start)..ChunkNum::chunks(range.end));
-            let (content, size) = tokio::time::timeout(READ_TIMEOUT, start(&source.connection, hash, chunks)).await
+            let (content, size) = tokio::time::timeout(READ_TIMEOUT, start(&source.connection, hash, chunks_for(&range))).await
                 .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
             if size != source.size { Err(std::io::Error::other("provider changed blob size"))?; }
             yield Bytes::from(part_header(&source, &range, &boundary));
@@ -1124,6 +1123,14 @@ fn multipart_content(
         }
         yield Bytes::from(format!("--{boundary}--\r\n"));
     }
+}
+
+/// Returns the chunks that cover the byte range `range`.
+///
+/// Bao verifies whole chunks, so a request has to start at the chunk the range
+/// starts in and end at the chunk it ends in.
+fn chunks_for(range: &Range<u64>) -> ChunkRanges {
+    ChunkRanges::from(ChunkNum::full_chunks(range.start)..ChunkNum::chunks(range.end))
 }
 
 #[tracing::instrument(level = "debug", skip(connection, ranges), fields(hash = %hash))]
