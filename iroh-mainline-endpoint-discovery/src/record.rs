@@ -2,7 +2,6 @@
 
 use std::{
     net::SocketAddrV4,
-    ops::Deref,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -18,7 +17,7 @@ pub enum RecordPayload {
 }
 
 impl RecordPayload {
-    /// Access the initial payload.
+    /// Returns the initial payload.
     pub fn v1(&self) -> &RecordPayloadV1 {
         match self {
             Self::V1(payload) => payload,
@@ -51,16 +50,8 @@ pub struct SignedRecord {
     pub sig: Signature,
 }
 
-impl Deref for SignedRecord {
-    type Target = RecordPayloadV1;
-
-    fn deref(&self) -> &Self::Target {
-        self.payload.v1()
-    }
-}
-
 impl SignedRecord {
-    /// Sign a record binding an endpoint identity to `addr`.
+    /// Signs a record binding an endpoint identity to `addr`.
     ///
     /// `addr` is the public socket an index server observed, which is only
     /// known once that server has answered, so one record is signed per
@@ -78,12 +69,12 @@ impl SignedRecord {
         }
     }
 
-    /// The socket this record was signed for.
+    /// Returns the socket this record was signed for.
     pub fn addr(&self) -> SocketAddrV4 {
         self.payload.v1().addr
     }
 
-    /// Verify that `endpoint_id` signed this record's payload.
+    /// Verifies that `endpoint_id` signed this record's payload.
     ///
     /// A valid signature says nothing about where the record was found. Use
     /// [`Self::addr`] to check that it is the slot it was signed for.

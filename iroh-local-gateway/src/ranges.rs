@@ -37,7 +37,7 @@ pub(crate) fn select(value: Option<&str>, size: u64) -> Selection {
     Selection::Partial(merge(ranges))
 }
 
-/// Merge overlapping and adjacent ranges, keeping ascending order.
+/// Merges overlapping and adjacent ranges, keeping ascending order.
 fn merge(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
     ranges.sort_by_key(|range| (range.start, range.end));
     let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());

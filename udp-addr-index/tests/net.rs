@@ -11,7 +11,7 @@ use udp_addr_index::{Limits, Server};
 use udp_addr_index_proto::{MAX_DGRAM, Proto, Request, RequestV1, Response, ResponseV1};
 
 #[tokio::test]
-async fn unannounced_replica_publishes_and_resolves_opaque_bytes() {
+async fn an_unannounced_server_stores_and_returns_opaque_bytes() {
     let server = Server::new(Limits::for_tests());
     let handle = server
         .attach_with_rendezvous(test_dht(), None)
@@ -175,8 +175,10 @@ async fn discovery_directory_validates_opaque_record() {
     assert!(index.lookup(addr).await.unwrap().is_empty());
 }
 
-/// Reads are public, so a record can be copied. It is signed for the socket it
-/// was stored under, so a reader discards it anywhere else.
+/// Reads are public, so a record can be copied.
+///
+/// It is signed for the socket it was stored under, so a reader discards it
+/// anywhere else.
 #[tokio::test]
 async fn a_copied_record_does_not_resolve_under_another_socket() {
     let server = Server::new(Limits::for_tests());
@@ -276,12 +278,10 @@ async fn resolver_stream_yields_all_announced_endpoints() {
             dht.announce_peer(infohash, None).await.unwrap();
         }
         let reader = node();
-        let resolver = Resolver::bind(
+        let resolver = Resolver::new(
             reader.clone(),
             AddrIndex::udp(reader, server_addr).await.unwrap(),
-        )
-        .await
-        .unwrap();
+        );
         let mut stream = resolver.resolve_stream(infohash).await.unwrap();
         let mut actual = Vec::new();
         while let Some(id) = stream.next().await {
@@ -332,12 +332,10 @@ async fn publisher_announces_endpoint_for_resolver() {
         publisher.add_infohash(infohash);
 
         let reader = node();
-        let resolver = Resolver::bind(
+        let resolver = Resolver::new(
             reader.clone(),
             AddrIndex::udp(reader, server_addr).await.unwrap(),
-        )
-        .await
-        .unwrap();
+        );
         // `wait_published` fires before the announcements, so keep looking
         // until the publisher's endpoint shows up.
         let mut found = resolver.resolve_continuously(infohash);

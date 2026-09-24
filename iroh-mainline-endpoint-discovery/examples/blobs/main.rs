@@ -1,5 +1,6 @@
-//! Discover a real iroh-blobs provider through Mainline and the endpoint
-//! address index, then download its blob.
+//! Discovers a real iroh-blobs provider and downloads its blob.
+//!
+//! The provider is found through Mainline and the endpoint address index.
 
 use std::time::Duration;
 
@@ -55,7 +56,7 @@ async fn main() -> Result<()> {
     };
     let publisher = Publisher::new(provider_ep.secret_key().clone(), dht.clone(), index.clone());
     publisher.add_infohash(infohash);
-    let resolver = Resolver::bind(dht, index).await?;
+    let resolver = Resolver::new(dht, index);
 
     println!("blob {blob_hash}");
     println!("provider {}", provider_ep.id());

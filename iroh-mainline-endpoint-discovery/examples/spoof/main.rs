@@ -1,4 +1,4 @@
-//! Show that another UDP socket cannot replace a publisher's address-index value.
+//! Shows that another UDP socket cannot replace a publisher's address-index value.
 //!
 //! A public server is required so it and Mainline observe the same public UDP
 //! mapping for the shared DHT socket.
@@ -11,6 +11,7 @@ use iroh_mainline_endpoint_discovery::{
 };
 use n0_error::{Result, StackResultExt, StdResultExt, bail_any};
 use n0_mainline::{Dht, Id};
+use tracing::{debug, warn};
 
 const RESOLVE_DELAY: Duration = Duration::from_secs(5);
 const RESOLVE_BUDGET: Duration = Duration::from_secs(60);
@@ -51,7 +52,7 @@ async fn main() -> Result<()> {
         None => AddrIndex::discover(dht.clone()).await?,
     };
     let publisher = Publisher::new(secret, dht.clone(), index.clone());
-    let resolver = Resolver::bind(dht, index).await?;
+    let resolver = Resolver::new(dht, index);
     for infohash in infohashes {
         publisher.add_infohash(infohash);
     }
@@ -108,8 +109,8 @@ async fn resolve_publisher(
                 println!("resolved {infohash} to {expected}");
                 return Ok(());
             }
-            Ok(ids) => tracing::debug!(?ids, "publisher not returned yet"),
-            Err(err) => tracing::warn!(%err, "resolve"),
+            Ok(ids) => debug!(?ids, "publisher not returned yet"),
+            Err(err) => warn!(%err, "resolve"),
         }
         if Instant::now() >= deadline {
             bail_any!("timed out resolving {infohash} to {expected}");

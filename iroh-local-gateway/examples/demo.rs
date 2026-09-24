@@ -16,12 +16,15 @@ use iroh_mainline_endpoint_discovery::{
     infohash_from_blake3, pkarr_name,
 };
 use n0_mainline::{Dht, SigningKey, Testnet};
+use tracing::debug;
 use udp_addr_index::{Limits, Server};
 
 #[derive(Parser)]
 #[command(about = "Serve a file via Pkarr and a local gateway, using public Mainline")]
 struct Args {
-    /// File to serve, for example an MP4. Without a file, serve a text greeting.
+    /// File to serve, for example an MP4.
+    ///
+    /// Without a file, the gateway serves a short text greeting.
     file: Option<PathBuf>,
     /// Local HTTP port; configure the same port in the browser extension.
     #[arg(long, default_value_t = 8080)]
@@ -110,7 +113,7 @@ async fn main() -> Result<()> {
     let router = Router::builder(provider.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
         .spawn();
-    tracing::debug!(endpoint = %provider.id(), %hash, "demo blob provider started");
+    debug!(endpoint = %provider.id(), %hash, "demo blob provider started");
     let publisher = Publisher::new(provider.secret_key().clone(), provider_dht.clone(), index);
     publisher.add_infohash(infohash);
     let key = SigningKey::from_bytes(&rand::random());
@@ -130,13 +133,13 @@ async fn main() -> Result<()> {
     let index = AddrIndex::discover_with_config(gateway_dht.clone(), config)
         .await
         .context("gateway index server discovery failed")?;
-    let gateway = Gateway::new(client.clone(), Resolver::bind(gateway_dht, index).await?);
+    let gateway = Gateway::new(client.clone(), Resolver::new(gateway_dht, index));
     let serve = async {
         tokio::time::timeout(Duration::from_secs(120), publisher.wait_published())
             .await
             .context("content publication timed out")?;
         tokio::time::timeout(Duration::from_secs(60), pkarr.publish_all()).await??;
-        tracing::debug!(%public_key, %target, "demo Pkarr record published");
+        debug!(%public_key, %target, "demo Pkarr record published");
         println!("\nExtension port: {}", http_addr.port());
         println!("Open:         https://{public_key}.{PKARR_DOMAIN}/");
         println!("Serves:       https://{encoded}.{BLAKE3_DOMAIN}/");

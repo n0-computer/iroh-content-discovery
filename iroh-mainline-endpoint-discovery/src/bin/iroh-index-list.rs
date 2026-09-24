@@ -6,6 +6,7 @@ use iroh_mainline_endpoint_discovery::{ServerList, republish_server_list};
 use n0_error::{Result, StdResultExt};
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use std::net::SocketAddrV4;
+use tracing::info;
 use zeroize::Zeroizing;
 
 const SECRET_ENV: &str = "IROH_INDEX_LIST_SECRET";
@@ -15,7 +16,9 @@ const SECRET_ENV: &str = "IROH_INDEX_LIST_SECRET";
     about = "Publish and renew a BEP44 server list; reads IROH_INDEX_LIST_SECRET (64 hex digits)"
 )]
 struct Cli {
-    /// Public index server sockets (at most two). Omit to publish an empty list.
+    /// Public index server sockets (at most two).
+    ///
+    /// Omit to publish an empty list.
     #[arg(long, num_args = 1..=2)]
     server: Vec<SocketAddrV4>,
     /// Nonnegative BEP44 sequence; increase whenever the list changes.
@@ -47,7 +50,7 @@ fn main() -> Result<()> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    tracing::info!(%public_key, sequence = item.seq(), "starting index-list republisher");
+    info!(%public_key, sequence = item.seq(), "starting index-list republisher");
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

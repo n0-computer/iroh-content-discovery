@@ -21,4 +21,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
+      # The library crates keep their commands behind `cli`, so the code in
+      # them is only compiled when every feature is on.
+      - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - run: cargo test --all-targets
+      # --all-targets skips doctests, so the examples in our docs never run.
+      - run: cargo test --doc
+      - run: cargo check --workspace --no-default-features

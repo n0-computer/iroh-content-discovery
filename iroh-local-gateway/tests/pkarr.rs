@@ -95,7 +95,7 @@ async fn run() {
     let index = AddrIndex::udp(gateway_dht.clone(), server_addr)
         .await
         .unwrap();
-    let resolver = Resolver::bind(gateway_dht, index).await.unwrap();
+    let resolver = Resolver::new(gateway_dht, index);
     let endpoint = Endpoint::builder(presets::Minimal)
         .address_lookup(MemoryLookup::from_endpoint_info([provider.addr()]))
         .bind()

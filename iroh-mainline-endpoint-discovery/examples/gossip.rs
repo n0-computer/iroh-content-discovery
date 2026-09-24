@@ -1,4 +1,4 @@
-//! Join an iroh-gossip swarm whose members find each other through Mainline.
+//! Joins an iroh-gossip swarm whose members find each other through Mainline.
 //!
 //! The topic string is hashed into both a gossip topic id and a Mainline
 //! infohash. Every member announces itself under that infohash and resolves
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
     // published yet already sees whoever came before it.
     let publisher = Publisher::new(endpoint.secret_key().clone(), dht.clone(), index.clone());
     publisher.add_infohash(infohash);
-    let resolver = Resolver::bind(dht, index).await?;
+    let resolver = Resolver::new(dht, index);
 
     println!("topic {}", cli.topic);
     println!("infohash {infohash}");
