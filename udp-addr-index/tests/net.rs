@@ -8,7 +8,7 @@ use n0_future::StreamExt;
 use n0_mainline::Dht;
 use tokio::net::UdpSocket;
 use udp_addr_index::{Limits, Server};
-use udp_addr_index_proto::{MAX_DGRAM, Request, RequestV1, Response, ResponseV1};
+use udp_addr_index_proto::{MAX_DGRAM, Proto, Request, RequestV1, Response, ResponseV1};
 
 #[tokio::test]
 async fn unannounced_replica_publishes_and_resolves_opaque_bytes() {
@@ -46,7 +46,7 @@ async fn put_token_is_bound_to_exact_udp_socket_but_get_is_public() {
         tx: 1,
         padding: [0; 24],
     });
-    send(&owner, loopback(handle.local_addr()), &prepare).await;
+    send(&owner, loopback(handle.local_addr()), prepare.clone()).await;
     let Response::V1(ResponseV1::Prepared { addr, token, .. }) = recv(&owner).await else {
         panic!("unexpected prepare response")
     };
@@ -56,7 +56,7 @@ async fn put_token_is_bound_to_exact_udp_socket_but_get_is_public() {
         token,
         value: b"stolen".to_vec(),
     });
-    send(&attacker, loopback(handle.local_addr()), &stolen).await;
+    send(&attacker, loopback(handle.local_addr()), stolen.clone()).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), recv(&attacker))
             .await
@@ -70,7 +70,7 @@ async fn put_token_is_bound_to_exact_udp_socket_but_get_is_public() {
         token,
         value: b"owned".to_vec(),
     });
-    send(&owner, loopback(handle.local_addr()), &valid).await;
+    send(&owner, loopback(handle.local_addr()), valid.clone()).await;
     let Response::V1(ResponseV1::Stored { addr: stored, .. }) = recv(&owner).await else {
         panic!("unexpected put response")
     };
@@ -78,7 +78,7 @@ async fn put_token_is_bound_to_exact_udp_socket_but_get_is_public() {
     assert_eq!(server.get_local(addr).unwrap(), b"owned");
 
     let public_get = Request::V1(RequestV1::Get { tx: 5, addr });
-    send(&attacker, loopback(handle.local_addr()), &public_get).await;
+    send(&attacker, loopback(handle.local_addr()), public_get.clone()).await;
     let Response::V1(ResponseV1::Value {
         addr: returned,
         value,
@@ -101,7 +101,7 @@ async fn get_requires_full_sized_datagram() {
     server.put_local(addr, value.clone()).unwrap();
     let request = Request::V1(RequestV1::Get { tx: 7, addr });
     let mut buf = [0; MAX_DGRAM];
-    let bytes = request.encode(&mut buf).unwrap();
+    let bytes = Proto::Request(request.clone()).encode(&mut buf).unwrap();
     reader
         .send_to(&bytes[..MAX_DGRAM - 1], loopback(handle.local_addr()))
         .await
@@ -122,7 +122,7 @@ async fn get_requires_full_sized_datagram() {
             .await
             .is_err()
     );
-    send(&reader, loopback(handle.local_addr()), &request).await;
+    send(&reader, loopback(handle.local_addr()), request.clone()).await;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), recv(&reader))
             .await
@@ -309,16 +309,19 @@ async fn publisher_announces_endpoint_for_resolver() {
     .expect("publisher announcement was not resolved");
 }
 
-async fn send(socket: &UdpSocket, destination: std::net::SocketAddr, message: &Request) {
+async fn send(socket: &UdpSocket, destination: std::net::SocketAddr, message: Request) {
     let mut buf = [0; MAX_DGRAM];
-    let bytes = message.encode(&mut buf).unwrap();
+    let bytes = Proto::Request(message).encode(&mut buf).unwrap();
     socket.send_to(bytes, destination).await.unwrap();
 }
 
 async fn recv(socket: &UdpSocket) -> Response {
     let mut buf = [0; MAX_DGRAM];
     let (len, _) = socket.recv_from(&mut buf).await.unwrap();
-    Response::decode(&buf[..len]).unwrap()
+    match Proto::decode(&buf[..len]).unwrap() {
+        Proto::Response(response) => response,
+        Proto::Request(request) => panic!("server answered with a request: {request:?}"),
+    }
 }
 
 fn test_dht() -> Dht {
