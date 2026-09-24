@@ -14,13 +14,16 @@ use tracing::{info, warn};
 const RENEW: Duration = Duration::from_secs(600);
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Publish immediately and renew a signed server list every ten minutes.
+/// Publishes a signed server list immediately, then renews it every ten minutes.
 ///
 /// This future owns no signing key. Run it as a separate task and cancel it to
-/// stop renewal. Transient failures and thirty-second timeouts retry after thirty
-/// seconds. DHT shutdown and sequence conflicts return an error; supply a newly
+/// stop renewal. The item must have been signed for [`SERVER_LIST_SALT`].
+/// Transient failures and thirty-second timeouts retry after thirty seconds.
+///
+/// # Errors
+///
+/// Returns an error on DHT shutdown or a sequence conflict. Supply a newly
 /// signed item with an increased sequence when changing the list.
-/// The item must have been signed for [`SERVER_LIST_SALT`].
 pub async fn republish_server_list(dht: Dht, item: MutableItem) -> Result<()> {
     n0_error::ensure_any!(
         item.salt() == Some(SERVER_LIST_SALT),

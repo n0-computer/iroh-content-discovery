@@ -64,12 +64,12 @@ pub struct UdpClient {
 }
 
 impl UdpClient {
-    /// Attach to `dht` using the default operation timeout.
+    /// Attaches to `dht` using the default operation timeout.
     pub async fn attach(dht: Dht) -> Result<Self, UdpError> {
         Self::attach_with_timeout(dht, DEFAULT_TIMEOUT).await
     }
 
-    /// Attach to `dht` and configure the operation timeout.
+    /// Attaches to `dht` with the given operation timeout.
     pub async fn attach_with_timeout(dht: Dht, timeout: Duration) -> Result<Self, UdpError> {
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
         dht.set_datagram_hook(Some(DatagramHook::new(move |bytes, from| {
@@ -87,7 +87,7 @@ impl UdpClient {
         Ok(Self { tx })
     }
 
-    /// Add a server used by subsequent operations.
+    /// Adds a server used by subsequent operations.
     pub async fn add_server(&self, server: SocketAddrV4) -> Result<(), UdpError> {
         self.tx
             .send(ActorMsg::AddServer(server))
@@ -105,7 +105,7 @@ impl UdpClient {
             .map_err(|_| e!(UdpError::Closed))
     }
 
-    /// Remove a configured server.
+    /// Removes a configured server.
     pub async fn remove_server(&self, server: SocketAddrV4) -> Result<(), UdpError> {
         self.tx
             .send(ActorMsg::RemoveServer(server))
@@ -113,7 +113,7 @@ impl UdpClient {
             .map_err(|_| e!(UdpError::Closed))
     }
 
-    /// Obtain tokens and publish a value to every responsive server.
+    /// Obtains tokens and publishes a value to every responsive server.
     ///
     /// The value is built per server, from the public socket that server
     /// observed, which is only known once it has answered. Servers behind
@@ -132,7 +132,7 @@ impl UdpClient {
         rx.await.map_err(|_| e!(UdpError::Closed))?
     }
 
-    /// Read and deduplicate opaque values from all configured servers.
+    /// Reads and deduplicates opaque values from all configured servers.
     pub async fn resolve(&self, addr: SocketAddrV4) -> Result<ResolveResult, UdpError> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -152,11 +152,12 @@ pub struct ResolveResult {
 
 struct PendingPublish {
     value: ValueFor,
-    /// Set when a built value did not fit, so the failure is not a timeout.
+    /// Whether a built value was too large, so the failure is not a timeout.
     too_large: bool,
     awaiting: HashSet<SocketAddrV4>,
-    /// Servers already sent a put, so a repeated or forged `Prepared` cannot
-    /// make us send the value again.
+    /// Servers already sent a put.
+    ///
+    /// A repeated or forged `Prepared` cannot make us send the value again.
     prepared: HashSet<SocketAddrV4>,
     stored: HashSet<SocketAddrV4>,
     response: oneshot::Sender<Result<Vec<SocketAddrV4>, UdpError>>,
@@ -218,7 +219,7 @@ impl Actor {
         }
     }
 
-    /// A transaction id an off-path attacker cannot guess.
+    /// Returns a transaction id an off-path attacker cannot guess.
     ///
     /// Our socket and the servers we talk to are both public, so a predictable
     /// id would be enough to answer a lookup on a server's behalf.

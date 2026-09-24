@@ -1,5 +1,6 @@
-//! Discover a real iroh-blobs provider through Mainline and the endpoint
-//! address index, then download its blob.
+//! Discovers a real iroh-blobs provider and downloads its blob.
+//!
+//! The provider is found through Mainline and the endpoint address index.
 
 use std::time::Duration;
 

@@ -44,7 +44,7 @@ struct State {
 }
 
 impl Publisher {
-    /// Use an endpoint secret key, a shared Mainline node, and an address index.
+    /// Creates a publisher from a secret key, a Mainline node, and an address index.
     ///
     /// Publishing starts immediately, and does nothing until the first
     /// infohash is added.
@@ -67,27 +67,29 @@ impl Publisher {
         }
     }
 
-    /// Endpoint identity published by this instance.
+    /// Returns the endpoint identity published by this instance.
     pub fn id(&self) -> EndpointId {
         self.state.secret.public()
     }
 
-    /// Address-index index used by this publisher.
+    /// Returns the address index used by this publisher.
     pub fn index(&self) -> &AddrIndex {
         &self.state.index
     }
 
-    /// Most recently announced Mainline lookup key.
+    /// Returns the most recently announced Mainline lookup key.
     pub fn public_v4(&self) -> Option<SocketAddrV4> {
         *self.state.published.borrow()
     }
 
-    /// Infohashes currently registered for announcement.
+    /// Returns the infohashes currently registered for announcement.
     pub fn infohashes(&self) -> Vec<Id> {
         self.state.infohashes()
     }
 
-    /// Register an infohash. Returns whether it was newly inserted.
+    /// Registers an infohash for announcement.
+    ///
+    /// Returns whether it was newly inserted.
     pub fn add_infohash(&self, infohash: Id) -> bool {
         let inserted = self
             .state
@@ -101,7 +103,9 @@ impl Publisher {
         inserted
     }
 
-    /// Stop renewing an infohash.
+    /// Stops renewing an infohash.
+    ///
+    /// Returns whether it was registered.
     pub fn remove_infohash(&self, infohash: &Id) -> bool {
         let removed = self
             .state
@@ -115,7 +119,7 @@ impl Publisher {
         removed
     }
 
-    /// Wait until the first successful publication round completes.
+    /// Waits until the first successful publication round completes.
     ///
     /// A round stores the address-index record and announces every infohash
     /// captured at its start. Once a round succeeds, subsequent calls return
@@ -127,7 +131,7 @@ impl Publisher {
 }
 
 impl State {
-    /// Reconcile when hashes are added and periodically thereafter.
+    /// Reconciles when hashes are added and periodically thereafter.
     ///
     /// A failed reconcile is retried after thirty seconds; the publisher is
     /// meant to keep the record alive without supervision.
@@ -148,7 +152,7 @@ impl State {
         }
     }
 
-    /// Infohashes currently registered, sorted.
+    /// Returns the registered infohashes, sorted.
     fn infohashes(&self) -> Vec<Id> {
         let mut entries: Vec<_> = self
             .entries

@@ -1,8 +1,9 @@
-//! Mainline infohash → [`EndpointId`]s via `get_peers` and an addr → endpoint_id index.
+//! Resolution of a Mainline infohash to [`EndpointId`]s.
 //!
-//! The infohash is opaque (`SHA-1`, 20 bytes). BLAKE3 content is hashed at
-//! the call site (`SHA-1(blake3)`). Each compact `ip:port` is then resolved
-//! through the index.
+//! Peers come from `get_peers`, and each peer's address is looked up in the
+//! address index to recover the endpoint identity that published it. The
+//! infohash is opaque to this crate: BLAKE3 content is hashed to `SHA-1` at
+//! the call site.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -26,17 +27,17 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    /// The shared Mainline node used for lookups.
+    /// Returns the shared Mainline node used for lookups.
     pub fn dht(&self) -> &Dht {
         &self.dht
     }
 
-    /// Use the supplied shared Mainline node and address index.
+    /// Creates a resolver from a shared Mainline node and an address index.
     pub fn new(dht: Dht, index: AddrIndex) -> Self {
         Self { dht, index }
     }
 
-    /// Yield endpoint IDs as Mainline peers and index records arrive.
+    /// Yields endpoint IDs as Mainline peers and index records arrive.
     ///
     /// Up to 16 index lookups run concurrently, so a failed or slow peer does
     /// not delay other results. Lookup failures are logged and skipped.
@@ -86,7 +87,7 @@ impl Resolver {
         Ok(stream.boxed())
     }
 
-    /// Keep looking for providers until the consumer drops the stream.
+    /// Keeps looking for providers until the consumer drops the stream.
     ///
     /// A new Mainline lookup starts when the consumer asks for another item
     /// after the previous lookup ends. Results may include duplicate IDs.
@@ -114,11 +115,11 @@ impl Resolver {
         stream.boxed()
     }
 
-    /// `get_peers` for `infohash`, then index-resolve each compact peer.
+    /// Runs `get_peers` for `infohash`, then index-resolves each compact peer.
     ///
-    /// Unique endpoint_ids, sorted. Empty if the DHT has no peers or none of them are
-    /// in the index. Returned endpoint IDs are dialed through normal iroh
-    /// discovery, not through the DHT address.
+    /// Returns unique endpoint IDs, sorted, and nothing at all if the DHT has
+    /// no peers or none of them are in the index. Returned endpoint IDs are
+    /// dialed through normal iroh discovery, not through the DHT address.
     pub async fn resolve(&self, infohash: Id) -> Result<Vec<EndpointId>> {
         let mut stream = self.dht.get_peers(infohash).await.context("get_peers")?;
         let mut peers = HashSet::new();

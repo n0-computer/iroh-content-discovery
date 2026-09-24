@@ -123,7 +123,9 @@ struct CollectionSource {
 }
 
 impl Gateway {
-    /// Construct a gateway. The endpoint is used to dial resolved endpoint IDs.
+    /// Constructs a gateway.
+    ///
+    /// The endpoint is used to dial resolved endpoint IDs.
     pub fn new(endpoint: Endpoint, resolver: Resolver) -> Self {
         Self(Arc::new(Inner {
             endpoint,
@@ -136,7 +138,7 @@ impl Gateway {
         }))
     }
 
-    /// HTTP routes for blobs and paths inside collections, plus CORS preflight.
+    /// Returns the routes for blobs and paths inside collections, plus CORS preflight.
     ///
     /// `/blake3/{hash}` serves a blob, or lists the top level of a detected
     /// collection. `/blake3/{hash}/{path}` serves a file of a collection or
@@ -177,7 +179,7 @@ impl Gateway {
             .layer(axum::middleware::from_fn(log_request))
     }
 
-    /// Serve plaintext HTTP on a loopback socket until the shutdown future resolves.
+    /// Serves plaintext HTTP on a loopback socket until `shutdown` resolves.
     pub async fn serve(
         &self,
         listener: tokio::net::TcpListener,
@@ -393,7 +395,7 @@ async fn log_request(request: axum::extract::Request, next: axum::middleware::Ne
     }.instrument(span).await
 }
 
-/// Reject non-loopback HTTP listeners.
+/// Rejects non-loopback HTTP listeners.
 pub fn validate_listen_addr(addr: SocketAddr) -> anyhow::Result<()> {
     anyhow::ensure!(
         addr.ip().is_loopback(),
@@ -402,12 +404,12 @@ pub fn validate_listen_addr(addr: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parse a canonical, lowercase z-base-32 encoded 32-byte BLAKE3 hash.
+/// Parses a canonical, lowercase z-base-32 encoded 32-byte BLAKE3 hash.
 pub fn parse_hash(value: &str) -> anyhow::Result<Hash> {
     Ok(Hash::from_bytes(parse_z32_bytes(value)?))
 }
 
-/// Parse 32 bytes from canonical, lowercase z-base-32.
+/// Parses 32 bytes from canonical, lowercase z-base-32.
 ///
 /// Hashes and Pkarr public keys share this encoding, so a label alone does
 /// not say which one it is.
@@ -458,8 +460,10 @@ const SUBDOMAIN_ROUTES: [(&str, &str); 2] = [
     (".pkarr.localhost", "pkarr"),
 ];
 
-/// Rewrites `{z32}.blake3.localhost` and `{z32}.pkarr.localhost` requests to
-/// the equivalent `/blake3/{z32}` or `/pkarr/{z32}` path.
+/// Rewrites a per-hash subdomain to the path that serves it.
+///
+/// `{z32}.blake3.localhost` becomes `/blake3/{z32}`, and `{z32}.pkarr.localhost`
+/// becomes `/pkarr/{z32}`.
 async fn rewrite_subdomain(mut request: Request) -> Request {
     let host = request.uri().host().map(str::to_owned).or_else(|| {
         let host = request.headers().get(header::HOST)?.to_str().ok()?;
@@ -586,7 +590,7 @@ impl Root {
         }
     }
 
-    /// A listing shown under another route, such as a Pkarr key.
+    /// Creates a listing shown under another route, such as a Pkarr key.
     pub(crate) fn at(encoded: String, base: String, caching: Caching) -> Self {
         Self {
             encoded,
@@ -818,8 +822,10 @@ struct Entries<'a> {
 }
 
 impl<'a> Entries<'a> {
-    /// Collects the entries of `dir`, which is empty for the top level and
-    /// otherwise ends with `/`. Returns `None` if no name starts with `dir`.
+    /// Collects the entries directly inside `dir`.
+    ///
+    /// `dir` is empty for the top level and otherwise ends with `/`. Returns
+    /// `None` if no name starts with `dir`.
     fn new(dir: &str, collection: &'a Collection) -> Option<Self> {
         let mut dirs = BTreeSet::new();
         let mut files = Vec::new();
@@ -1178,7 +1184,7 @@ async fn read_collection(connection: &Connection, hash: Hash) -> anyhow::Result<
     Ok(collection)
 }
 
-/// Read a complete collection component without buffering more than its limit.
+/// Reads a complete collection component without buffering more than its limit.
 async fn read_collection_blob(
     header: AtBlobHeader,
     limit: u64,

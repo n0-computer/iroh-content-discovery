@@ -1,4 +1,4 @@
-//! Show that another UDP socket cannot replace a publisher's address-index value.
+//! Shows that another UDP socket cannot replace a publisher's address-index value.
 //!
 //! A public server is required so it and Mainline observe the same public UDP
 //! mapping for the shared DHT socket.

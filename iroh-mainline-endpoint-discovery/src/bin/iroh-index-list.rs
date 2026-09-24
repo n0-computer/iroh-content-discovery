@@ -16,7 +16,9 @@ const SECRET_ENV: &str = "IROH_INDEX_LIST_SECRET";
     about = "Publish and renew a BEP44 server list; reads IROH_INDEX_LIST_SECRET (64 hex digits)"
 )]
 struct Cli {
-    /// Public index server sockets (at most two). Omit to publish an empty list.
+    /// Public index server sockets (at most two).
+    ///
+    /// Omit to publish an empty list.
     #[arg(long, num_args = 1..=2)]
     server: Vec<SocketAddrV4>,
     /// Nonnegative BEP44 sequence; increase whenever the list changes.

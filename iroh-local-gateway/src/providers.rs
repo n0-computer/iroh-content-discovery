@@ -13,7 +13,7 @@ use tracing::debug;
 const CONCURRENT_PROBES: usize = 3;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Filter a provider stream to endpoints that serve a verified size for `hash`.
+/// Filters a provider stream to endpoints that serve a verified size for `hash`.
 ///
 /// This optional stage is independent of discovery. Each distinct endpoint is
 /// connected to and queried for the blob's last Bao chunk, validating the size

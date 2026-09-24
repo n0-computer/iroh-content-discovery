@@ -175,8 +175,10 @@ async fn discovery_directory_validates_opaque_record() {
     assert!(index.lookup(addr).await.unwrap().is_empty());
 }
 
-/// Reads are public, so a record can be copied. It is signed for the socket it
-/// was stored under, so a reader discards it anywhere else.
+/// Reads are public, so a record can be copied.
+///
+/// It is signed for the socket it was stored under, so a reader discards it
+/// anywhere else.
 #[tokio::test]
 async fn a_copied_record_does_not_resolve_under_another_socket() {
     let server = Server::new(Limits::for_tests());

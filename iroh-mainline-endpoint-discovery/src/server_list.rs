@@ -11,12 +11,12 @@ pub const SERVER_LIST_SALT: &[u8] = b"iroh-addr-index servers v1";
 ///
 /// The BEP44 byte-string value is one version byte (`1`) followed by six bytes
 /// per address: four IPv4 octets and a big-endian UDP port. An empty list is valid.
-/// At 13 bytes maximum, this fits comfortably within BEP44's value limit.
+/// At 13 bytes, the longest value is far below BEP44's 1000-byte limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerList(Vec<SocketAddrV4>);
 
 impl ServerList {
-    /// Build a list, rejecting invalid sockets and more than two entries.
+    /// Builds a list, rejecting invalid sockets and more than two entries.
     pub fn new(addresses: Vec<SocketAddrV4>) -> n0_error::Result<Self> {
         n0_error::ensure_any!(
             addresses.len() <= 2,
@@ -35,12 +35,12 @@ impl ServerList {
         Ok(Self(unique))
     }
 
-    /// Server sockets endorsed by the signer.
+    /// Returns the server sockets endorsed by the signer.
     pub fn addresses(&self) -> &[SocketAddrV4] {
         &self.0
     }
 
-    /// Encode the value to sign and store in BEP44.
+    /// Encodes the value to sign and store in BEP44.
     pub fn encode(&self) -> Vec<u8> {
         let mut value = vec![1];
         for addr in &self.0 {
@@ -50,7 +50,9 @@ impl ServerList {
         value
     }
 
-    /// Decode a list value. Signature verification is performed by the DHT client.
+    /// Decodes a list value.
+    ///
+    /// Signature verification is performed by the DHT client.
     pub fn decode(value: &[u8]) -> Option<Self> {
         let (&version, bytes) = value.split_first()?;
         if version != 1 || bytes.len() > 2 * 6 || bytes.len() % 6 != 0 {
@@ -70,7 +72,7 @@ impl ServerList {
         Self::new(addresses).ok()
     }
 
-    /// Sign a list for publication with [`n0_mainline::Dht::put_mutable`].
+    /// Signs a list for publication with [`n0_mainline::Dht::put_mutable`].
     ///
     /// Increase the sequence number whenever the list changes. Republish the
     /// same item periodically to keep it available in the DHT.

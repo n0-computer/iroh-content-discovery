@@ -1,4 +1,4 @@
-//! Publish signed Pkarr names and keep them alive on Mainline.
+//! Publishes signed Pkarr names and keeps them alive on Mainline.
 
 use std::{
     collections::HashMap,
@@ -33,7 +33,7 @@ pub const PKARR_DOMAIN: &str = "pkarr.net";
 /// Time to live of published records, in seconds.
 const TTL: u32 = 300;
 
-/// The name a public key is published under, in z-base-32.
+/// Returns the name a public key is published under, in z-base-32.
 pub fn pkarr_name(public_key: &[u8; 32]) -> String {
     z32::encode(public_key)
 }
@@ -74,8 +74,9 @@ struct State {
     generation: Mutex<u64>,
     /// The newest generation that has been published successfully.
     published: watch::Sender<u64>,
-    /// Held while publishing, so two rounds cannot race for a key. Mainline
-    /// rejects a write whose sequence is not the newest it has seen.
+    /// Held while publishing, so two rounds cannot race for a key.
+    ///
+    /// Mainline rejects a write whose sequence is not the newest it has seen.
     publishing: tokio::sync::Mutex<i64>,
 }
 
@@ -86,7 +87,7 @@ struct Entry {
 }
 
 impl PkarrPublisher {
-    /// Start a publisher on `dht`, with no names yet.
+    /// Starts a publisher on `dht`, with no names yet.
     pub fn new(dht: Dht) -> Self {
         let state = Arc::new(State {
             dht,
@@ -106,7 +107,7 @@ impl PkarrPublisher {
         }
     }
 
-    /// Publish an `HTTPS` record under `key`, pointing at `target`.
+    /// Publishes an `HTTPS` record under `key`, pointing at `target`.
     ///
     /// `name` is the label inside the key's zone; an empty label is the apex,
     /// which is what resolvers look up for the bare name. `target` is a
@@ -136,7 +137,7 @@ impl PkarrPublisher {
         self.set_raw(key, &packet)
     }
 
-    /// Publish `hash` under `key`, as an apex `HTTPS` record on [`BLAKE3_DOMAIN`].
+    /// Publishes `hash` under `key`, as an apex `HTTPS` record on [`BLAKE3_DOMAIN`].
     ///
     /// The key then names content that a gateway serves directly, and the
     /// name survives the content changing.
@@ -148,7 +149,7 @@ impl PkarrPublisher {
         self.set_https(key, "", &format!("{}.{BLAKE3_DOMAIN}", z32::encode(hash)))
     }
 
-    /// Publish `packet` under `key`, replacing anything set for it.
+    /// Publishes `packet` under `key`, replacing anything set for it.
     ///
     /// Record names are not checked; resolvers only read records named for
     /// the key's own zone.
@@ -175,7 +176,7 @@ impl PkarrPublisher {
         Ok(())
     }
 
-    /// Stop publishing the name of `public_key`.
+    /// Stops publishing the name of `public_key`.
     ///
     /// The DHT keeps serving it until the record expires.
     pub fn remove(&self, public_key: &[u8; 32]) -> bool {
@@ -192,7 +193,7 @@ impl PkarrPublisher {
         removed
     }
 
-    /// Wait until everything set so far has been published at least once.
+    /// Waits until everything set so far has been published at least once.
     ///
     /// Names set after this call may still be unpublished when it returns.
     pub async fn wait_published(&self) {
@@ -205,7 +206,7 @@ impl PkarrPublisher {
         }
     }
 
-    /// Publish every name now, instead of waiting for the background task.
+    /// Publishes every name now, instead of waiting for the background task.
     ///
     /// # Errors
     ///
@@ -217,7 +218,7 @@ impl PkarrPublisher {
 }
 
 impl State {
-    /// Publish every name, then wait for a change or the refresh interval.
+    /// Publishes every name, then waits for a change or the refresh interval.
     async fn run(&self) {
         loop {
             let delay = match self.publish_round().await {
@@ -234,13 +235,13 @@ impl State {
         }
     }
 
-    /// Record an edit, and wake the publishing task.
+    /// Records an edit and wakes the publishing task.
     fn edited(&self) {
         *self.generation.lock().expect("poisoned") += 1;
         self.changed.notify_one();
     }
 
-    /// Sign and publish every packet once.
+    /// Signs and publishes every packet once.
     ///
     /// Returns the first failure, after attempting all of them.
     async fn publish_round(&self) -> Result<()> {
@@ -266,7 +267,7 @@ impl State {
         result
     }
 
-    /// Sign the current packets, with a sequence number that always grows.
+    /// Signs the current packets, with a sequence number that always grows.
     fn sign_all(&self, previous: &mut i64) -> Result<Vec<MutableItem>> {
         // Mainline keeps the highest sequence it has seen, so a round that
         // lands in the same microsecond as the last one still has to count up.
@@ -370,7 +371,7 @@ mod tests {
         assert_eq!(target_of(&reader, &late).await, "late.example");
     }
 
-    /// Resolve the newest packet for `key` and return its HTTPS target.
+    /// Resolves the newest packet for `key` and returns its HTTPS target.
     async fn target_of(dht: &Dht, key: &SigningKey) -> String {
         let public = key.verifying_key().to_bytes();
         let mut items = dht.get_mutable(&public, None, None).await.unwrap();

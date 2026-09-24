@@ -73,7 +73,7 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// Loose limits suitable for tests.
+    /// Returns loose limits suitable for tests.
     pub fn for_tests() -> Self {
         Self {
             value_ttl_secs: 24 * 60 * 60,
@@ -100,7 +100,7 @@ struct Inner {
 }
 
 impl Server {
-    /// Create an empty server with a randomly generated token key.
+    /// Creates an empty server with a randomly generated token key.
     pub fn new(limits: Limits) -> Self {
         let mut token_key = [0; 32];
         rand::rng().fill_bytes(&mut token_key);
@@ -115,17 +115,17 @@ impl Server {
         }
     }
 
-    /// Limits used by this server.
+    /// Returns the limits used by this server.
     pub fn limits(&self) -> &Limits {
         &self.inner.limits
     }
 
-    /// Metrics shared by all clones of this server.
+    /// Returns the metrics shared by all clones of this server.
     pub fn metrics(&self) -> Arc<Metrics> {
         self.inner.metrics.clone()
     }
 
-    /// Store bytes directly, bypassing UDP token validation.
+    /// Stores bytes directly, bypassing UDP token validation.
     pub fn put_local(&self, addr: SocketAddrV4, value: Vec<u8>) -> Result<(), PutError> {
         let mut store = self.inner.store.lock().expect("poisoned");
         let result = store.put(addr, value, unix_secs(), &self.inner.limits);
@@ -133,7 +133,7 @@ impl Server {
         result
     }
 
-    /// Read a live value directly.
+    /// Reads a live value directly.
     pub fn get_local(&self, addr: SocketAddrV4) -> Option<Vec<u8>> {
         let mut store = self.inner.store.lock().expect("poisoned");
         let result = store.get(addr, unix_secs());
@@ -237,7 +237,7 @@ impl RateLimiters {
     }
 }
 
-/// Map an address to a bucket, mixing so neighbouring addresses spread out.
+/// Maps an address to a bucket, mixing so neighbouring addresses spread out.
 fn bucket_index(ip: IpAddr) -> usize {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     ip.hash(&mut hasher);

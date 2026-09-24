@@ -1,4 +1,4 @@
-//! Publish an apex HTTPS record and keep its signed packet alive on Mainline.
+//! Publishes an apex HTTPS record and keeps its signed packet alive on Mainline.
 
 use std::{
     fs::{File, OpenOptions},
@@ -16,8 +16,9 @@ use n0_mainline::{Dht, SigningKey};
 struct Args {
     /// Target hostname, e.g. example.com or <hash>.blake3.net (no scheme or path).
     target: String,
-    /// Read or create a 32-byte secret-key file to retain the same public-key URL.
-    /// Without this option, generate a temporary identity for this run.
+    /// Secret-key file to read or create, to keep the same public-key URL.
+    ///
+    /// Without this option, a temporary identity is generated for this run.
     #[arg(long)]
     key_file: Option<PathBuf>,
 }

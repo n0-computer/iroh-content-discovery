@@ -22,7 +22,9 @@ use udp_addr_index::{Limits, Server};
 #[derive(Parser)]
 #[command(about = "Serve a file via Pkarr and a local gateway, using public Mainline")]
 struct Args {
-    /// File to serve, for example an MP4. Without a file, serve a text greeting.
+    /// File to serve, for example an MP4.
+    ///
+    /// Without a file, the gateway serves a short text greeting.
     file: Option<PathBuf>,
     /// Local HTTP port; configure the same port in the browser extension.
     #[arg(long, default_value_t = 8080)]

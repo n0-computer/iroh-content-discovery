@@ -1,5 +1,6 @@
-//! Provide a file or directory through iroh-blobs and announce every blob
-//! and the collection on Mainline.
+//! Provides a file or directory through iroh-blobs.
+//!
+//! Every blob and the collection itself are announced on Mainline.
 
 use std::{
     net::SocketAddrV4,

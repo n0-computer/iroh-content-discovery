@@ -70,14 +70,14 @@ impl DiscoveryState {
 }
 
 impl AddrIndex {
-    /// Attach to a Mainline node's UDP socket and add one server.
+    /// Attaches to a Mainline node's UDP socket and adds one server.
     pub async fn udp(dht: Dht, server: SocketAddrV4) -> Result<Self, UdpError> {
         let client = UdpClient::attach(dht).await?;
         client.add_server(server).await?;
         Ok(Self::from_udp(client))
     }
 
-    /// Discover servers through Mainline using the same socket for index traffic.
+    /// Discovers servers through Mainline, using the same socket for index traffic.
     ///
     /// Refreshes on use after ten minutes. Discovery is limited to two candidates
     /// and thirty seconds; announcements are untrusted and do not prove availability.
@@ -85,7 +85,7 @@ impl AddrIndex {
         Self::discover_with_config(dht, DiscoveryConfig::default()).await
     }
 
-    /// Discover with a trusted BEP44 server list in addition to rendezvous peers.
+    /// Discovers with a trusted BEP44 server list in addition to rendezvous peers.
     ///
     /// Uses the default rendezvous hash only if no signed addresses are available.
     pub async fn discover_with_authority(dht: Dht, public_key: [u8; 32]) -> Result<Self, UdpError> {
@@ -99,7 +99,7 @@ impl AddrIndex {
         .await
     }
 
-    /// Discover at most two index servers, trying BEP44 before the rendezvous fallback.
+    /// Discovers at most two index servers, trying BEP44 before the rendezvous fallback.
     ///
     /// Each lookup has a thirty-second deadline. Refreshes on use after ten
     /// minutes, retaining the highest signed sequence for this index's lifetime.
@@ -194,7 +194,7 @@ impl AddrIndex {
         Ok(())
     }
 
-    /// Wrap an existing UDP client.
+    /// Wraps an existing UDP client.
     pub fn from_udp(client: UdpClient) -> Self {
         Self {
             client,
@@ -202,7 +202,7 @@ impl AddrIndex {
         }
     }
 
-    /// Publish a record for `secret`'s endpoint to all responsive servers.
+    /// Publishes a record for `secret`'s endpoint to all responsive servers.
     ///
     /// Each server gets a record signed for the socket it observed, so a
     /// reader can tell a record published here from one copied out of another
@@ -218,7 +218,7 @@ impl AddrIndex {
             .map_err(Into::into)
     }
 
-    /// Lookup the endpoints that listed `addr`.
+    /// Looks up the endpoints that listed `addr`.
     ///
     /// Records that were not signed for `addr` are discarded, so a record
     /// republished under another socket is not returned.

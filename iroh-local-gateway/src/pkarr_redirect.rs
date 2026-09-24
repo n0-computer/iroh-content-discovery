@@ -1,4 +1,4 @@
-//! Resolve and cache signed Pkarr records through the gateway's shared DHT.
+//! Resolves and caches signed Pkarr records through the gateway's shared DHT.
 
 use lru::LruCache;
 use std::time::{Duration, Instant};
@@ -202,7 +202,7 @@ async fn resolve(
     newest_verified(&mut items, key).await
 }
 
-/// Take the newest answer, waiting [`NEWEST_GRACE`] after the first one.
+/// Takes the newest answer, waiting [`NEWEST_GRACE`] after the first one.
 ///
 /// Every answer is signature-checked by `get_mutable`, but an old packet
 /// verifies just as well as a current one, so the sequence number decides.
@@ -237,7 +237,7 @@ async fn newest_verified(
     Ok(newest)
 }
 
-/// Reject an item that is not a well-formed answer for `key`.
+/// Rejects an item that is not a well-formed answer for `key`.
 fn verified(
     item: n0_mainline::MutableItem,
     key: &[u8; 32],
