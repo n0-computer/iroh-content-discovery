@@ -2,12 +2,12 @@
 
 use std::net::{SocketAddr, SocketAddrV4};
 
-use anyhow::Result;
 use clap::Parser;
 use data_encoding::HEXLOWER_PERMISSIVE;
 use iroh::endpoint::presets;
 use iroh_local_gateway::{Gateway, validate_listen_addr};
 use iroh_mainline_endpoint_discovery::{AddrIndex, DiscoveryConfig, Resolver};
+use n0_error::{Result, StdResultExt};
 use n0_mainline::Dht;
 use udp_addr_index_proto::RENDEZVOUS_INFOHASH;
 
@@ -43,7 +43,10 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    let dht = Dht::builder().port(args.dht_port).build()?;
+    let dht = Dht::builder()
+        .port(args.dht_port)
+        .build()
+        .std_context("failed to bind the Mainline socket")?;
     let config = DiscoveryConfig {
         server: args.index_server,
         public_key: args.index_list_key,
@@ -58,17 +61,19 @@ async fn main() -> Result<()> {
     let resolver = Resolver::bind(dht, index).await?;
     let endpoint = iroh::Endpoint::bind(presets::N0).await?;
     let gateway = Gateway::new(endpoint.clone(), resolver);
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
+    let listener = tokio::net::TcpListener::bind(args.listen)
+        .await
+        .with_std_context(|_| format!("failed to bind {}", args.listen))?;
     let result = gateway
         .serve(listener, async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await;
     endpoint.close().await;
-    result
+    Ok(result?)
 }
 
-fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N], String> {
+fn parse_hex<const N: usize>(value: &str) -> std::result::Result<[u8; N], String> {
     let invalid = || format!("expected {} hex digits", N * 2);
     HEXLOWER_PERMISSIVE
         .decode(value.as_bytes())

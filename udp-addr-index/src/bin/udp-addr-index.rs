@@ -4,10 +4,10 @@ use n0_mainline::Dht;
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc};
 
-use anyhow::Result;
 use clap::Parser;
 use data_encoding::HEXLOWER_PERMISSIVE;
 use iroh_metrics::{Registry, service::MetricsServer};
+use n0_error::{Result, StdResultExt};
 use tokio::signal;
 use tracing::info;
 use udp_addr_index::{Limits, Server};
@@ -60,13 +60,19 @@ async fn main() -> Result<()> {
     let _metrics_server = if let Some(addr) = cli.metrics_listen {
         let mut registry = Registry::default();
         registry.register(server.metrics());
-        let metrics_server = MetricsServer::spawn(addr, Arc::new(registry)).await?;
+        let metrics_server = MetricsServer::spawn(addr, Arc::new(registry))
+            .await
+            .std_context("failed to start the metrics server")?;
         info!(addr = %metrics_server.local_addr(), "metrics listening");
         Some(metrics_server)
     } else {
         None
     };
-    let dht = Dht::builder().server_mode().port(cli.dht_port).build()?;
+    let dht = Dht::builder()
+        .server_mode()
+        .port(cli.dht_port)
+        .build()
+        .std_context("failed to bind the Mainline socket")?;
     let mut udp = server
         .attach_with_rendezvous(dht, cli.rendezvous_hash)
         .await?;
@@ -83,14 +89,14 @@ async fn main() -> Result<()> {
 async fn shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
-        let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+        let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate()).anyerr()?;
         tokio::select! {
-            result = signal::ctrl_c() => result?,
+            result = signal::ctrl_c() => result.anyerr()?,
             _ = terminate.recv() => {},
         }
     }
     #[cfg(not(unix))]
-    signal::ctrl_c().await?;
+    signal::ctrl_c().await.anyerr()?;
     Ok(())
 }
 

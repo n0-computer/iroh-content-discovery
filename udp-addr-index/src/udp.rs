@@ -1,7 +1,7 @@
 //! Address-index service sharing a Mainline node's UDP socket.
 
 use crate::{Server, unix_secs};
-use anyhow::{Context, Result, bail};
+use n0_error::{bail, try_or};
 use n0_mainline::{ActorShutdown, Dht, Id};
 use std::{
     net::{SocketAddr, SocketAddrV4},
@@ -24,6 +24,42 @@ pub struct UdpHandle {
     announcement: Option<JoinHandle<()>>,
 }
 
+/// Reason a task owned by an [`UdpHandle`] stopped.
+///
+/// Every variant means the service is no longer running, but they say which
+/// half stopped and whether it stopped because of a failure.
+#[n0_error::stack_error(derive, add_meta)]
+#[non_exhaustive]
+pub enum TerminatedError {
+    /// The service task panicked or was aborted.
+    #[error("address-index service task failed")]
+    ServiceTask {
+        /// Why the service task did not run to completion.
+        #[error(std_err, source)]
+        source: tokio::task::JoinError,
+    },
+    /// The shared Mainline socket stopped, so requests can no longer be answered.
+    #[error("address-index transport stopped")]
+    Transport {
+        /// Why the Mainline actor stopped.
+        #[error(from, source)]
+        source: ActorShutdown,
+    },
+    /// The service task returned while the handle was still alive.
+    #[error("address-index service task stopped unexpectedly")]
+    ServiceStopped {},
+    /// The announcement task panicked or was aborted.
+    #[error("server announcement task failed")]
+    AnnouncementTask {
+        /// Why the announcement task did not run to completion.
+        #[error(std_err, source)]
+        source: tokio::task::JoinError,
+    },
+    /// The announcement task returned while the handle was still alive.
+    #[error("server announcement task stopped unexpectedly")]
+    AnnouncementStopped {},
+}
+
 impl UdpHandle {
     /// Local DHT socket address (the bind IP may be unspecified).
     pub fn local_addr(&self) -> SocketAddr {
@@ -38,13 +74,18 @@ impl UdpHandle {
         }
     }
 
-    /// Wait for either owned task to stop, reporting an unexpected exit.
-    pub async fn terminated(&mut self) -> Result<()> {
+    /// Waits for either owned task to stop, reporting an unexpected exit.
+    ///
+    /// # Errors
+    ///
+    /// Always returns an error, because neither task is meant to stop while the
+    /// handle lives. The variant says which task stopped, and carries the
+    /// panic or transport failure that ended it when there was one.
+    pub async fn terminated(&mut self) -> Result<(), TerminatedError> {
         tokio::select! {
             result = &mut self.task => {
-                result.context("address-index service task failed")?
-                    .context("address-index transport stopped")?;
-                bail!("address-index service task stopped unexpectedly")
+                try_or!(result, TerminatedError::ServiceTask)?;
+                bail!(TerminatedError::ServiceStopped)
             }
             result = async {
                 match &mut self.announcement {
@@ -52,8 +93,8 @@ impl UdpHandle {
                     None => std::future::pending().await,
                 }
             } => {
-                result.context("server announcement task failed")?;
-                bail!("server announcement task stopped unexpectedly")
+                try_or!(result, TerminatedError::AnnouncementTask);
+                bail!(TerminatedError::AnnouncementStopped)
             }
         }
     }

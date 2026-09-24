@@ -9,7 +9,6 @@ authors.workspace = true
 readme = "README.md"
 
 [dependencies]
-anyhow.workspace = true
 async-stream = "0.3"
 axum = "0.8"
 bao-tree = "0.16"
@@ -24,8 +23,9 @@ udp-addr-index-proto = { version = "0.1.0", path = "../udp-addr-index-proto" }
 lru = "0.18"
 mime_classifier = "0.0.1"
 mime_guess = "2"
-n0-mainline.workspace = true
+n0-error.workspace = true
 n0-future.workspace = true
+n0-mainline.workspace = true
 percent-encoding = "2"
 postcard.workspace = true
 simple-dns = "0.12"

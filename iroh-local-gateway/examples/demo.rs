@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
@@ -15,6 +14,7 @@ use iroh_mainline_endpoint_discovery::{
     AddrIndex, BLAKE3_DOMAIN, DiscoveryConfig, PKARR_DOMAIN, PkarrPublisher, Publisher, Resolver,
     infohash_from_blake3, pkarr_name,
 };
+use n0_error::{Result, StackResultExt, StdResultExt};
 use n0_mainline::{Dht, SigningKey, Testnet};
 use udp_addr_index::{Limits, Server};
 
@@ -44,14 +44,22 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     // Bind first so an occupied port fails before importing a potentially large file.
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, args.port)).await?;
-    let http_addr = listener.local_addr()?;
-    let temporary = tempfile::tempdir()?;
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, args.port))
+        .await
+        .with_std_context(|_| format!("failed to bind port {}", args.port))?;
+    let http_addr = listener.local_addr().anyerr()?;
+    let temporary = tempfile::tempdir().anyerr()?;
     let store = FsStore::load(temporary.path()).await?;
     let tag = match args.file {
         Some(path) => {
             println!("Importing {}...", path.display());
-            store.blobs().add_path(path.canonicalize()?).await?
+            store
+                .blobs()
+                .add_path(
+                    path.canonicalize()
+                        .with_std_context(|_| format!("cannot read {}", path.display()))?,
+                )
+                .await?
         }
         None => {
             store
@@ -65,7 +73,7 @@ async fn main() -> Result<()> {
     let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes())).into();
     let network = if args.local_testnet {
         println!("Using an isolated local Mainline testnet.");
-        Some(Testnet::new(3).await?)
+        Some(Testnet::new(3).await.anyerr()?)
     } else {
         println!(
             "Using public Mainline; discovering index servers and publishing may take a minute."
@@ -101,7 +109,7 @@ async fn main() -> Result<()> {
         )?;
     let provider = if args.local_testnet {
         Endpoint::builder(presets::Minimal)
-            .bind_addr("127.0.0.1:0".parse::<SocketAddr>()?)?
+            .bind_addr("127.0.0.1:0".parse::<SocketAddr>().anyerr()?)?
             .bind()
             .await?
     } else {
@@ -134,8 +142,10 @@ async fn main() -> Result<()> {
     let serve = async {
         tokio::time::timeout(Duration::from_secs(120), publisher.wait_published())
             .await
-            .context("content publication timed out")?;
-        tokio::time::timeout(Duration::from_secs(60), pkarr.publish_all()).await??;
+            .std_context("content publication timed out")?;
+        tokio::time::timeout(Duration::from_secs(60), pkarr.publish_all())
+            .await
+            .std_context("Pkarr publication timed out")??;
         tracing::debug!(%public_key, %target, "demo Pkarr record published");
         println!("\nExtension port: {}", http_addr.port());
         println!("Open:         https://{public_key}.{PKARR_DOMAIN}/");
@@ -148,15 +158,16 @@ async fn main() -> Result<()> {
             .serve(listener, async {
                 let _ = tokio::signal::ctrl_c().await;
             })
-            .await
+            .await?;
+        Ok(())
     };
     // The publishers keep running in their own tasks until they are dropped.
     let result = tokio::select! {
         result = serve => result,
-        result = tokio::signal::ctrl_c() => { result?; Ok(()) },
+        result = tokio::signal::ctrl_c() => { result.anyerr()?; Ok(()) },
     };
     client.close().await;
-    router.shutdown().await?;
+    router.shutdown().await.anyerr()?;
     // Router shutdown also shuts down the blob store before TempDir cleanup.
     result
 }

@@ -11,12 +11,12 @@ keywords = ["udp", "p2p", "directory"]
 categories = ["network-programming"]
 
 [dependencies]
-anyhow.workspace = true
 blake3.workspace = true
 clap.workspace = true
 data-encoding.workspace = true
 iroh-metrics = { version = "1.0.1", features = ["service"] }
 udp-addr-index-proto = { version = "0.1.0", path = "../udp-addr-index-proto" }
+n0-error.workspace = true
 n0-mainline.workspace = true
 postcard.workspace = true
 rand.workspace = true

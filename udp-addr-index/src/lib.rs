@@ -22,7 +22,7 @@ use rand::Rng;
 
 pub use metrics::Metrics;
 pub use store::{PutError, Store};
-pub use udp::UdpHandle;
+pub use udp::{TerminatedError, UdpHandle};
 
 /// Rate-limit buckets, shared between addresses by hashing.
 ///
