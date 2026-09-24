@@ -159,6 +159,7 @@ impl Server {
             RequestV1::Prepare { tx, padding: _ } => {
                 if !self.allow_request((*from.ip()).into()) {
                     self.metrics().rate_limited.inc();
+                    debug!(%from, "prepare rejected: rate limited");
                     return Ok(());
                 }
                 self.metrics().prepares.inc();
@@ -171,28 +172,33 @@ impl Server {
             RequestV1::Put { tx, token, value } => {
                 if !self.verify_token(from, &token, now) {
                     self.metrics().invalid_tokens.inc();
-                    trace!(%from, "invalid put token");
+                    debug!(%from, "put rejected: invalid token");
                     return Ok(());
                 }
                 if !self.allow_request((*from.ip()).into()) {
                     self.metrics().rate_limited.inc();
+                    debug!(%from, "put rejected: rate limited");
                     return Ok(());
                 }
+                let bytes = value.len();
                 if let Err(err) = self.put_local(from, value) {
                     self.metrics().rejected_puts.inc();
                     debug!(%from, %err, "put rejected");
                     return Ok(());
                 }
                 self.metrics().puts.inc();
+                debug!(%from, bytes, "stored mapping");
                 Some(Response::V1(ResponseV1::Stored { tx, addr: from }))
             }
             RequestV1::Get { tx, addr } => {
                 if !self.allow_request((*from.ip()).into()) {
                     self.metrics().rate_limited.inc();
+                    debug!(%from, %addr, "get rejected: rate limited");
                     return Ok(());
                 }
                 self.metrics().gets.inc();
                 let value = self.get_local(addr);
+                debug!(%from, %addr, found = value.is_some(), "read mapping");
                 if value.is_some() {
                     self.metrics().get_hits.inc();
                 }
