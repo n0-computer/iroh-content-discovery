@@ -11,7 +11,7 @@ use n0_mainline::{ActorShutdown, DatagramHook, Dht};
 use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 use tracing::debug;
 use udp_addr_index_proto::{
-    MAGIC, MAX_DGRAM, MAX_VALUE_LEN, Request, RequestV1, Response, ResponseV1, TransactionId,
+    MAGIC, MAX_DGRAM, MAX_VALUE_LEN, Proto, Request, RequestV1, Response, ResponseV1, TransactionId,
 };
 
 /// Default timeout for an address-index operation.
@@ -163,6 +163,9 @@ pub struct ResolveResult {
 struct PendingPublish {
     value: Vec<u8>,
     awaiting: HashSet<SocketAddrV4>,
+    /// Servers already sent a put, so a repeated or forged `Prepared` cannot
+    /// make us send the value again.
+    prepared: HashSet<SocketAddrV4>,
     stored: HashSet<SocketAddrV4>,
     response: oneshot::Sender<Result<Vec<SocketAddrV4>, UdpError>>,
     deadline: tokio::time::Instant,
@@ -184,7 +187,6 @@ struct Actor {
     servers: HashSet<SocketAddrV4>,
     publishes: HashMap<TransactionId, PendingPublish>,
     resolves: HashMap<TransactionId, PendingResolve>,
-    next_tx: TransactionId,
     timeout: Duration,
 }
 
@@ -202,7 +204,6 @@ impl Actor {
             servers: HashSet::new(),
             publishes: HashMap::new(),
             resolves: HashMap::new(),
-            next_tx: 0,
             timeout,
         }
     }
@@ -225,10 +226,12 @@ impl Actor {
         }
     }
 
+    /// A transaction id an off-path attacker cannot guess.
+    ///
+    /// Our socket and the servers we talk to are both public, so a predictable
+    /// id would be enough to answer a lookup on a server's behalf.
     fn next_id(&mut self) -> TransactionId {
-        let tx = self.next_tx;
-        self.next_tx = self.next_tx.wrapping_add(1);
-        tx
+        rand::random()
     }
 
     async fn handle_message(&mut self, message: ActorMsg, buf: &mut [u8; MAX_DGRAM]) {
@@ -256,7 +259,7 @@ impl Actor {
                     tx,
                     padding: [0; 24],
                 });
-                if let Some(bytes) = encode(&request, buf) {
+                if let Some(bytes) = encode(request, buf) {
                     for server in &self.servers {
                         if let Err(err) = self.dht.send_datagram(bytes.to_vec(), *server).await {
                             debug!(%server, %err, "send prepare");
@@ -267,6 +270,7 @@ impl Actor {
                         PendingPublish {
                             value,
                             awaiting: self.servers.clone(),
+                            prepared: HashSet::new(),
                             stored: HashSet::new(),
                             response,
                             deadline: tokio::time::Instant::now() + self.timeout,
@@ -283,7 +287,7 @@ impl Actor {
                 }
                 let tx = self.next_id();
                 let request = Request::V1(RequestV1::Get { tx, addr });
-                if let Some(bytes) = encode(&request, buf) {
+                if let Some(bytes) = encode(request, buf) {
                     for server in &self.servers {
                         if let Err(err) = self.dht.send_datagram(bytes.to_vec(), *server).await {
                             debug!(%server, %err, "send get");
@@ -308,15 +312,17 @@ impl Actor {
     }
 
     async fn handle_packet(&mut self, data: &[u8], from: SocketAddrV4, buf: &mut [u8; MAX_DGRAM]) {
-        let Some(Response::V1(response)) = Response::decode(data) else {
+        let Some(Proto::Response(Response::V1(response))) = Proto::decode(data) else {
             return;
         };
         match response {
             ResponseV1::Prepared { tx, addr, token } => {
-                let Some(pending) = self.publishes.get(&tx) else {
+                let Some(pending) = self.publishes.get_mut(&tx) else {
                     return;
                 };
-                if !pending.awaiting.contains(&from) {
+                // One put per server per transaction: otherwise every repeated
+                // or forged `Prepared` reflects the whole value at that server.
+                if !pending.awaiting.contains(&from) || !pending.prepared.insert(from) {
                     return;
                 }
                 let request = Request::V1(RequestV1::Put {
@@ -324,7 +330,7 @@ impl Actor {
                     token,
                     value: pending.value.clone(),
                 });
-                if let Some(bytes) = encode(&request, buf)
+                if let Some(bytes) = encode(request, buf)
                     && let Err(err) = self.dht.send_datagram(bytes.to_vec(), from).await
                 {
                     debug!(%from, %addr, %err, "send authorized request");
@@ -419,8 +425,9 @@ impl Actor {
     }
 }
 
-fn encode<'a>(value: &Request, buf: &'a mut [u8; MAX_DGRAM]) -> Option<&'a [u8]> {
-    value.encode(buf).ok()
+/// Frames a request for sending, or `None` if it does not fit a datagram.
+fn encode(value: Request, buf: &mut [u8; MAX_DGRAM]) -> Option<&[u8]> {
+    Proto::Request(value).encode(buf).ok()
 }
 
 async fn sleep_until(deadline: Option<tokio::time::Instant>) {

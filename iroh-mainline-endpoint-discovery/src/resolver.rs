@@ -89,16 +89,23 @@ impl Resolver {
     ///
     /// A new Mainline lookup starts when the consumer asks for another item
     /// after the previous lookup ends. Results may include duplicate IDs.
-    /// Consumers should set their own deadline for a bounded operation.
+    /// The stream ends when the Mainline node is gone, which is the only
+    /// reason a lookup cannot start. Consumers should set their own deadline
+    /// for a bounded operation.
     pub fn resolve_continuously(&self, infohash: Id) -> stream::Boxed<EndpointId> {
         let resolver = self.clone();
         let stream = async_stream::stream! {
             loop {
-                match resolver.resolve_stream(infohash).await {
-                    Ok(mut found) => while let Some(id) = found.next().await {
-                        yield id;
-                    },
-                    Err(err) => tracing::warn!(%infohash, %err, "Mainline provider lookup failed"),
+                // A lookup only fails to start once the Mainline node is gone,
+                // and it does not come back, so retrying would spin this loop
+                // at full speed forever.
+                let Ok(mut found) = resolver.resolve_stream(infohash).await.inspect_err(|err| {
+                    tracing::debug!(%infohash, %err, "Mainline node is gone, ending provider stream");
+                }) else {
+                    break;
+                };
+                while let Some(id) = found.next().await {
+                    yield id;
                 }
                 tokio::task::yield_now().await;
             }

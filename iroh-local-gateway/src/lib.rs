@@ -38,7 +38,7 @@ use iroh_mainline_endpoint_discovery::{Resolver, infohash_from_blake3};
 use lru::LruCache;
 use mime_classifier::MimeClassifier;
 use n0_future::{BufferedStreamExt, StreamExt};
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::Instrument;
 
@@ -56,6 +56,25 @@ const MAX_COLLECTION_ROOT_BYTES: u64 = 1024 * 1024;
 /// Name-list budget per file, excluding serialization overhead.
 const MAX_COLLECTION_NAME_BYTES: usize = 256;
 const COLLECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Characters RFC 8187 allows unescaped in a `filename*` parameter.
+///
+/// `attr-char` is a short allow list, so everything else is percent-encoded.
+/// Encoding only the URL-unsafe set would leave `;` and `=` in place, which
+/// end the parameter early and make the header unparseable.
+const ATTR_CHAR: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'!')
+    .remove(b'#')
+    .remove(b'$')
+    .remove(b'&')
+    .remove(b'+')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'^')
+    .remove(b'_')
+    .remove(b'`')
+    .remove(b'|')
+    .remove(b'~');
+
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'%')
@@ -504,7 +523,7 @@ fn attachment(filename: &str) -> String {
             _ => '_',
         })
         .collect();
-    let encoded = utf8_percent_encode(filename, PATH_SEGMENT);
+    let encoded = utf8_percent_encode(filename, ATTR_CHAR);
     format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
 }
 
@@ -1375,6 +1394,25 @@ mod tests {
         })
         .await
         .expect("collection limit test timed out");
+    }
+
+    #[test]
+    fn attachment_escapes_parameter_delimiters() {
+        // `;` and `=` end a parameter, so an unescaped one makes the extended
+        // form unparseable and the browser falls back to the ASCII name.
+        let header = attachment("report;v2=final.txt");
+        assert_eq!(
+            header,
+            "attachment; filename=\"report_v2_final.txt\"; \
+             filename*=UTF-8''report%3Bv2%3Dfinal.txt"
+        );
+        assert!(attachment("a b.txt").contains("filename*=UTF-8''a%20b.txt"));
+        assert!(attachment("grüße.txt").contains("filename*=UTF-8''gr%C3%BC%C3%9Fe.txt"));
+        // Plain names stay readable in both forms.
+        assert_eq!(
+            attachment("notes-1.txt"),
+            "attachment; filename=\"notes-1.txt\"; filename*=UTF-8''notes-1.txt"
+        );
     }
 
     #[test]

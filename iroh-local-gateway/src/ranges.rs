@@ -9,8 +9,13 @@ pub(crate) enum Selection {
     Unsatisfiable,
 }
 
-/// Ignore unknown units or malformed ranges. Bound multipart work to 16 parts;
-/// oversized range sets may be ignored under HTTP range semantics.
+/// Selects the byte ranges to serve for a `Range` header.
+///
+/// Unknown units and malformed ranges are ignored, which HTTP permits, and
+/// more than 16 parts is treated the same way. Overlapping and adjacent ranges
+/// are merged, so one request can never ask for more bytes than the blob
+/// holds: sixteen copies of `0-` would otherwise cost the provider sixteen
+/// transfers.
 pub(crate) fn select(value: Option<&str>, size: u64) -> Selection {
     let Some(value) = value.and_then(|s| s.strip_prefix("bytes=")) else {
         return Selection::Full;
@@ -27,10 +32,22 @@ pub(crate) fn select(value: Option<&str>, size: u64) -> Selection {
         }
     }
     if ranges.is_empty() {
-        Selection::Unsatisfiable
-    } else {
-        Selection::Partial(ranges)
+        return Selection::Unsatisfiable;
     }
+    Selection::Partial(merge(ranges))
+}
+
+/// Merge overlapping and adjacent ranges, keeping ascending order.
+fn merge(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
 }
 
 // This is deliberately a vector of ranges, not a vector of byte offsets.
@@ -78,6 +95,31 @@ fn single(value: &str, size: u64) -> Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Deliberately a vector of ranges, not a vector of byte offsets.
+    #[allow(clippy::single_range_in_vec_init)]
+    #[test]
+    fn overlapping_ranges_are_merged() {
+        // Sixteen copies of the whole blob must cost one transfer, not sixteen.
+        let repeated = std::iter::repeat_n("0-", 16).collect::<Vec<_>>().join(",");
+        assert_eq!(
+            select(Some(&format!("bytes={repeated}")), 1000),
+            Selection::Partial(vec![0..1000])
+        );
+        // Overlapping and adjacent ranges collapse; disjoint ones do not.
+        assert_eq!(
+            select(Some("bytes=0-99,50-149"), 1000),
+            Selection::Partial(vec![0..150])
+        );
+        assert_eq!(
+            select(Some("bytes=100-199,0-99"), 1000),
+            Selection::Partial(vec![0..200])
+        );
+        assert_eq!(
+            select(Some("bytes=0-9,500-599"), 1000),
+            Selection::Partial(vec![0..10, 500..600])
+        );
+    }
 
     #[test]
     fn video_ranges_and_boundaries() {

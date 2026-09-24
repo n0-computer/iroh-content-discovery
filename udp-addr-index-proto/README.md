@@ -41,3 +41,20 @@ Servers announce on Mainline under `b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b`
 Clients call `get_peers` on that hash to find candidate replicas. Mainline and
 index traffic share the same UDP socket, so the announced port serves both.
 An announcement is just a candidate, not a guarantee of availability or trust.
+
+## License
+
+This project is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  https://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  https://opensource.org/licenses/MIT)
+
+at your option.
+
+## Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.

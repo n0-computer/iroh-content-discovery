@@ -114,10 +114,10 @@ impl Publisher {
         removed
     }
 
-    /// Wait until the first address-index publication succeeds.
+    /// Wait until the first successful publication round completes.
     ///
-    /// This returns before Mainline infohash announcements complete. Once an
-    /// address-index publication has succeeded, subsequent calls return
+    /// A round stores the address-index record and announces every infohash
+    /// captured at its start. Once a round succeeds, subsequent calls return
     /// immediately, including after new infohashes are added.
     pub async fn wait_published(&self) {
         let mut receiver = self.state.published.subscribe();
@@ -176,7 +176,6 @@ impl State {
 
         if accelerated {
             *mapping = Some(next_mapping);
-            self.published.send_replace(Some(next_mapping));
             tracing::info!(mapping = %next_mapping, "public UDP mapping changed");
         }
 
@@ -203,6 +202,9 @@ impl State {
                 .await;
             }
         }
+        // Report the mapping only once every infohash is announced, so a
+        // waiter that starts resolving does not race the announcements.
+        self.published.send_replace(Some(next_mapping));
         tracing::info!(
             n_infohashes = entries.len(),
             "renewed Mainline announcements"
