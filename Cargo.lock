@@ -4285,13 +4285,13 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 name = "udp-addr-index"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "blake3",
  "clap",
  "data-encoding",
  "iroh-base",
  "iroh-mainline-endpoint-discovery",
  "iroh-metrics",
+ "n0-error",
  "n0-future",
  "n0-mainline",
  "postcard",
