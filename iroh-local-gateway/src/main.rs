@@ -1,6 +1,13 @@
 //! Local HTTP gateway command line interface.
 
-use std::net::{SocketAddr, SocketAddrV4};
+#[allow(dead_code)]
+mod background;
+
+use std::{
+    net::{SocketAddr, SocketAddrV4},
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::Result;
 use clap::Parser;
@@ -15,6 +22,9 @@ use udp_addr_index_proto::RENDEZVOUS_INFOHASH;
 #[derive(Parser)]
 #[command(about = "Serve local content at /blake3/<z32> and Pkarr redirects at /pkarr/<key>")]
 struct Args {
+    /// Lifecycle directory used by the per-user background launcher.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
     /// Loopback HTTP listen address (plaintext).
     #[arg(long, default_value = "127.0.0.1:45475")]
     listen: SocketAddr,
@@ -54,21 +64,73 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    let dht = Dht::builder().port(args.dht_port).build()?;
-    let config = args.discovery_config();
-    info!("finding index servers");
-    let index = AddrIndex::discover_with_config(dht.clone(), config).await?;
-    let resolver = Resolver::new(dht, index);
-    let endpoint = iroh::Endpoint::bind(presets::N0).await?;
-    let gateway = Gateway::new(endpoint.clone(), resolver);
+    let runtime = args
+        .state_dir
+        .as_deref()
+        .map(background::Runtime::acquire)
+        .transpose()?;
+    // Bind before discovery so an occupied port fails promptly, even offline.
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    let result = gateway
-        .serve(listener, async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await;
+    let endpoint = iroh::Endpoint::bind(presets::N0).await?;
+    let dht = Dht::builder().port(args.dht_port).build()?;
+    if let Some(runtime) = &runtime {
+        runtime.ready()?;
+    }
+    let result = tokio::select! {
+        result = serve(args, listener, endpoint.clone(), dht) => result,
+        _ = shutdown(runtime.as_ref()) => Ok(()),
+    };
     endpoint.close().await;
     result
+}
+
+async fn shutdown(runtime: Option<&background::Runtime>) {
+    let stop_file = async {
+        match runtime {
+            Some(runtime) => runtime.stopped().await,
+            None => std::future::pending().await,
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = terminate => {},
+        _ = stop_file => {},
+    }
+}
+
+async fn serve(
+    args: Args,
+    listener: tokio::net::TcpListener,
+    endpoint: iroh::Endpoint,
+    dht: Dht,
+) -> Result<()> {
+    let config = args.discovery_config();
+    info!("finding index servers");
+    let index = loop {
+        match AddrIndex::discover_with_config(dht.clone(), config.clone()).await {
+            Ok(index) => break index,
+            Err(error) if args.state_dir.is_some() => {
+                tracing::warn!(%error, "index discovery failed; retrying in 20 seconds");
+                tokio::time::sleep(Duration::from_secs(20)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let resolver = Resolver::new(dht, index);
+    let gateway = Gateway::new(endpoint, resolver);
+    info!(listen = %listener.local_addr()?, "gateway ready");
+    gateway.serve(listener, std::future::pending()).await
 }
 
 fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N], String> {

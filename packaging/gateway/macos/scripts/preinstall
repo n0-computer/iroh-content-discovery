@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+if [ "$(id -u)" -eq 0 ]; then
+    echo 'Install Iroh Gateway for your own user account, without sudo.' >&2
+    exit 1
+fi
+helper="$HOME/Applications/Iroh Gateway.app/Contents/MacOS/iroh-gateway-background"
+if [ -x "$helper" ]; then
+    "$helper" remove-agent
+fi

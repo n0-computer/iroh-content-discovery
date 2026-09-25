@@ -312,3 +312,68 @@ at your option.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license, shall
 be dual licensed as above, without any additional terms or conditions.
+
+## Per-user installers
+
+The gateway installers start the gateway at login and listen on `127.0.0.1:45475`.
+Windows x64 uses an Inno Setup `.exe`; macOS Apple Silicon uses a current-user
+`.pkg`. Installation does not require administrator access. Stop any other gateway
+using port 45475 before installation.
+An occupied port fails startup without stopping the other application.
+
+- Windows installs in `%LOCALAPPDATA%\Programs\Iroh Gateway` with Start, Stop,
+  extension instructions, and Uninstall entries in the Start menu.
+- macOS installs `Iroh Gateway.app`, Start/Stop commands, an uninstaller, and
+  `Iroh Gateway Extensions` under `~/Applications`. A per-user LaunchAgent runs
+  the gateway; Start registers it and Stop unregisters it. The app also starts
+  the gateway when opened. Install for your account without `sudo`.
+
+Extensions are local files for manual installation; browser profiles are not
+modified. Open `extensions/Install extensions.html` on Windows or
+`~/Applications/Iroh Gateway Extensions/Install extensions.html` on macOS.
+Chrome/Brave uses Developer mode and Load unpacked. Firefox supports a temporary
+add-on; the included unsigned XPI can be installed permanently in Developer
+Edition, Nightly, or ESR with signature enforcement disabled. Release Firefox
+requires Mozilla signing for permanent installation. The instructions link to
+Mozilla's requirements. No extension signing or publishing happens during builds.
+
+Settings and logs live in `%LOCALAPPDATA%\iroh-local-gateway` on Windows and
+`~/Library/Application Support/iroh-local-gateway` on macOS. `gateway.log` contains
+runtime logs; on gateway startup, logs larger than 5 MiB replace
+`gateway.previous.log` and `gateway.log` starts empty. Logs are not rotated while
+the gateway is running. `launcher.log` contains startup failures. Uninstall
+preserves this directory. Remove browser extensions manually before uninstalling
+their files.
+
+`arguments.json` is a JSON array of gateway CLI arguments, initially `[]`.
+For example, `["--listen", "127.0.0.1:8081"]` selects another port. Stop the gateway,
+edit the file, and start it again; use the same port in the browser extension.
+On macOS, use the Start command to update the LaunchAgent's arguments.
+The background gateway retries index discovery while offline and can be stopped
+while waiting. Startup readiness means the local listener is bound; discovery
+must succeed before content requests can be served.
+
+The local lifecycle files are separate from the HTTP content server. No HTTP
+administration endpoint is exposed. `iroh-gateway-background` starts the gateway;
+its `stop` and `status` commands operate on the current user's instance. An optional
+`--state-dir` is available for isolated instances and testing.
+
+### Building installers
+
+Build the `iroh-local-gateway` package's binaries for
+`x86_64-pc-windows-msvc` or `aarch64-apple-darwin` in release mode, then run:
+
+```sh
+python packaging/gateway/stage.py <target>
+# On Windows (PowerShell):
+./packaging/gateway/windows/build.ps1
+# On macOS:
+python packaging/gateway/macos/build.py
+```
+
+Installers and SHA-256 files are written to `dist/`. The macOS app is ad-hoc signed;
+the installer is not Developer ID signed or notarized. Windows installers are
+unsigned. Native install/upgrade/uninstall smoke tests run on ephemeral CI runners.
+The `Gateway installers` workflow builds PR artifacts and supports manual runs;
+only `gateway-v*` tags publish GitHub release assets. No Linux installer or Intel
+macOS binary is built.
