@@ -1,7 +1,7 @@
 //! Periodically publish an endpoint identity and announce Mainline infohashes.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::SocketAddrV4,
     sync::{Arc, Mutex},
     time::Duration,
@@ -11,16 +11,19 @@ use iroh_base::{EndpointId, SecretKey};
 use n0_error::{Result, StackResultExt, StdResultExt};
 use n0_future::task::{self, AbortOnDropHandle};
 use n0_mainline::{Dht, Id};
-use tokio::sync::{Notify, watch};
+use tokio::{
+    sync::{Notify, Semaphore, mpsc, watch},
+    time::Instant,
+};
 
 use crate::AddrIndex;
 use tracing::{info, warn};
 
 /// How often to renew Mainline announcements and address-index values.
 pub const REFRESH: Duration = Duration::from_secs(10 * 60);
-/// Delay between announcements after the public mapping changes.
+/// Minimum spacing between announcement starts.
 pub const ANNOUNCE_SPACING: Duration = Duration::from_millis(250);
-/// Delay before retrying after a failed reconcile.
+/// Delay before retrying a failed publication or announcement.
 pub const RETRY: Duration = Duration::from_secs(30);
 
 /// Keeps Mainline announcements and one signed endpoint value current.
@@ -119,11 +122,10 @@ impl Publisher {
         removed
     }
 
-    /// Waits until the first successful publication round completes.
+    /// Waits until the index record and all currently registered hashes are published.
     ///
-    /// A round stores the address-index record and announces every infohash
-    /// captured at its start. Once a round succeeds, subsequent calls return
-    /// immediately, including after new infohashes are added.
+    /// After the first successful publication, subsequent calls return immediately,
+    /// including after new infohashes are added.
     pub async fn wait_published(&self) {
         let mut receiver = self.state.published.subscribe();
         while receiver.borrow().is_none() && receiver.changed().await.is_ok() {}
@@ -131,23 +133,85 @@ impl Publisher {
 }
 
 impl State {
-    /// Reconciles when hashes are added and periodically thereafter.
-    ///
-    /// A failed reconcile is retried after thirty seconds; the publisher is
-    /// meant to keep the record alive without supervision.
+    /// Runs independent announcement workers and an address-index refresh worker.
     async fn run(&self) {
-        let mut refresh = tokio::time::interval_at(tokio::time::Instant::now() + REFRESH, REFRESH);
-        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut mapping = None;
+        let (mapping_tx, mut mapping_rx) = watch::channel(None);
+        let publish = async {
+            loop {
+                // Avoid publishing an unused endpoint before any hashes are added.
+                if self.infohashes().is_empty() {
+                    tokio::time::sleep(RETRY).await;
+                    continue;
+                }
+                let delay = match self.publish_index().await {
+                    Ok(mapping) => {
+                        mapping_tx.send_replace(Some(mapping));
+                        REFRESH
+                    }
+                    Err(err) => {
+                        warn!(%err, "address-index publication failed");
+                        RETRY
+                    }
+                };
+                tokio::time::sleep(delay).await;
+            }
+        };
+        // Start the index worker only once there is work, without polling latency.
+        while self.infohashes().is_empty() {
+            self.notify.notified().await;
+        }
+        tokio::pin!(publish);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut workers = HashMap::new();
+        let mut announced = HashSet::new();
+        let pacing = Arc::new(tokio::sync::Mutex::new(Instant::now()));
+        let permits = Arc::new(Semaphore::new(3));
         loop {
-            if let Err(err) = self.reconcile(&mut mapping).await {
-                warn!(%err, "publishing failed");
-                tokio::time::sleep(RETRY).await;
-                continue;
+            let entries: HashSet<_> = self.infohashes().into_iter().collect();
+            workers.retain(|hash, _| entries.contains(hash));
+            announced.retain(|hash| entries.contains(hash));
+            for hash in entries.iter().copied() {
+                workers.entry(hash).or_insert_with(|| {
+                    let dht = self.dht.clone();
+                    let mut mapping = mapping_rx.clone();
+                    let tx = tx.clone();
+                    let pacing = pacing.clone();
+                    let permits = permits.clone();
+                    AbortOnDropHandle::new(task::spawn(async move {
+                        // The address must be indexed before advertising it in the DHT.
+                        while mapping.borrow().is_none() {
+                            if mapping.changed().await.is_err() {
+                                return;
+                            }
+                        }
+                        repeat_announcement(|| async {
+                            let _permit = permits.acquire().await.expect("semaphore closed");
+                            {
+                                let mut next = pacing.lock().await;
+                                tokio::time::sleep_until(*next).await;
+                                *next = Instant::now() + ANNOUNCE_SPACING;
+                            }
+                            let result = announce(&dht, hash).await;
+                            match &result {
+                                Ok(()) => {
+                                    let _ = tx.send(hash);
+                                }
+                                Err(err) => warn!(%hash, %err, "Mainline announcement failed"),
+                            }
+                            result.is_ok()
+                        })
+                        .await;
+                    }))
+                });
+            }
+            if !entries.is_empty() && entries.is_subset(&announced) {
+                self.published.send_replace(*mapping_rx.borrow());
             }
             tokio::select! {
-                _ = self.notify.notified() => {}
-                _ = refresh.tick() => {}
+                _ = &mut publish => unreachable!("index publisher runs until cancelled"),
+                _ = self.notify.notified() => {},
+                _ = mapping_rx.changed() => {},
+                Some(hash) = rx.recv() => { announced.insert(hash); },
             }
         }
     }
@@ -165,54 +229,95 @@ impl State {
         entries
     }
 
-    async fn reconcile(&self, mapping: &mut Option<SocketAddrV4>) -> Result<()> {
-        let entries = self.infohashes();
-        if entries.is_empty() {
-            return Ok(());
-        }
-
-        let value_addrs = self.index.publish(&self.secret).await?;
-        let next_mapping = value_addrs
+    async fn publish_index(&self) -> Result<SocketAddrV4> {
+        self.index
+            .publish(&self.secret)
+            .await?
             .first()
             .copied()
-            .std_context("address-index publish returned no public mapping")?;
-        let accelerated = *mapping != Some(next_mapping);
+            .std_context("address-index publish returned no public mapping")
+    }
+}
 
-        if accelerated {
-            *mapping = Some(next_mapping);
-            info!(mapping = %next_mapping, "public UDP mapping changed");
-        }
+async fn announce(dht: &Dht, infohash: Id) -> Result<()> {
+    // Prime token-bearing closest nodes before the announce PUT.
+    dht.get_closest_nodes(infohash)
+        .await
+        .with_context(|_| format!("get_closest_nodes for {infohash}"))?;
+    dht.announce_peer(infohash, None)
+        .await
+        .with_context(|_| format!("announce_peer infohash {infohash}"))?;
+    info!(%infohash, "renewed Mainline announcement");
+    Ok(())
+}
 
-        let regular_spacing = REFRESH / entries.len() as u32;
+/// Each worker owns its timer; neither another hash nor a mapping change resets it.
+async fn repeat_announcement<F, Fut>(mut announce: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    loop {
+        let delay = if announce().await {
+            // Refresh slightly early with jitter to avoid synchronized renewals.
+            REFRESH - Duration::from_secs(rand::random_range(0..=60))
+        } else {
+            RETRY
+        };
+        tokio::time::sleep(delay).await;
+    }
+}
 
-        for (index, infohash) in entries.iter().copied().enumerate() {
-            // Refresh public-address votes and prime token-bearing closest nodes
-            // for the immediately following announce PUT.
-            self.dht
-                .get_closest_nodes(infohash)
-                .await
-                .with_context(|_| format!("get_closest_nodes for {infohash}"))?;
-            self.dht
-                .announce_peer(infohash, None)
-                .await
-                .with_context(|_| format!("announce_peer infohash {infohash}"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            if index + 1 != entries.len() {
-                tokio::time::sleep(if accelerated {
-                    ANNOUNCE_SPACING
-                } else {
-                    regular_spacing
-                })
-                .await;
-            }
-        }
-        // Report the mapping only once every infohash is announced, so a
-        // waiter that starts resolving does not race the announcements.
-        self.published.send_replace(Some(next_mapping));
-        info!(
-            n_infohashes = entries.len(),
-            "renewed Mainline announcements"
-        );
-        Ok(())
+    #[tokio::test(start_paused = true)]
+    async fn new_hash_does_not_wait_for_existing_refresh_and_removal_stops_it() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let first_tx = tx.clone();
+        let first = tokio::spawn(repeat_announcement(move || {
+            first_tx.send(1).expect("receiver alive");
+            async { true }
+        }));
+        assert_eq!(rx.recv().await, Some(1));
+        tokio::time::advance(Duration::from_secs(100)).await;
+        let second = tokio::spawn(repeat_announcement(move || {
+            tx.send(2).expect("receiver alive");
+            async { true }
+        }));
+        assert_eq!(rx.recv().await, Some(2));
+        let started = Instant::now();
+        assert_eq!(rx.recv().await, Some(1));
+        assert!(started.elapsed() >= Duration::from_secs(440));
+        assert!(started.elapsed() <= Duration::from_secs(500));
+        first.abort();
+        first.await.expect_err("worker cancelled");
+        assert_eq!(rx.recv().await, Some(2));
+        second.abort();
+        second.await.expect_err("worker cancelled");
+        tokio::time::advance(REFRESH * 2).await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failure_retries_only_the_failed_hash() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let failed_tx = tx.clone();
+        let failed = tokio::spawn(repeat_announcement(move || {
+            failed_tx.send(1).expect("receiver alive");
+            async { false }
+        }));
+        assert_eq!(rx.recv().await, Some(1));
+        let healthy = tokio::spawn(repeat_announcement(move || {
+            tx.send(2).expect("receiver alive");
+            async { true }
+        }));
+        assert_eq!(rx.recv().await, Some(2));
+        let started = Instant::now();
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(started.elapsed(), RETRY);
+        failed.abort();
+        healthy.abort();
     }
 }

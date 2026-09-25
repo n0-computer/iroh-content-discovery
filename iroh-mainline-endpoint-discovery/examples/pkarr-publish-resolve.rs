@@ -149,7 +149,7 @@ async fn receive(public: &[u8; 32], server: Option<SocketAddrV4>) -> Result<Vec<
     println!("  {target}");
     println!("\n[5/5] Discover a provider and download the content");
     let index = address_index(&dht, server).await?;
-    let resolver = Resolver::bind(dht, index).await?;
+    let resolver = Resolver::new(dht, index);
     let store = MemStore::new();
     let endpoint = Endpoint::bind(presets::N0).await?;
     let result = async {
