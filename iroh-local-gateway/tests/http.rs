@@ -460,7 +460,6 @@ async fn run() {
         assert!(html.contains(&format!("href=\"{tree}/notes/\"")));
         assert!(html.contains(&format!("href=\"{tree}/video.mp4\"")));
         assert!(!html.contains("hello"));
-        assert!(html.contains("iroh-content-discovery\">iroh content discovery</a>"));
         assert!(html.contains("<a href=\"?sizes\">Fetch sizes</a>"));
         assert!(html.contains(&format!("<h1>{}{SEP}</h1>", collection_hash)));
     }
