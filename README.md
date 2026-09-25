@@ -228,6 +228,36 @@ cargo run -p iroh-mainline-endpoint-discovery --example provide -- ./site
 It reads `PKARR_SECRET` (64 hex digits) to keep the same name across runs, and
 prints a generated one if unset. Use `--no-pkarr` to publish hashes only.
 
+For a complete named-content round trip without the HTTP gateway, run:
+
+```sh
+cargo run -p iroh-mainline-endpoint-discovery --example pkarr-publish-resolve -- --once
+```
+
+The example generates a temporary signing keypair, serves a demo blob over iroh,
+publishes its signed endpoint mapping, announces its content hash on Mainline,
+and publishes a Pkarr name pointing to that hash. A separate DHT client starts
+with only the public key and index configuration, resolves the signed name,
+discovers a provider through Mainline and the address index, and downloads and
+BLAKE3-verifies the blob into a separate store.
+
+Both sides discover address index servers by default. Use `--index-server
+IP:PORT` (or `IROH_ADDR_INDEX`) to use a particular reachable index on both sides.
+The example needs UDP access to Mainline and a working address index; it does
+not start an index server or HTTP gateway.
+
+Use `--key-file ./site.key` to load or create a persistent keypair and
+`--data 'updated content'` to change the blob while keeping the same name:
+
+```sh
+cargo run -p iroh-mainline-endpoint-discovery --example pkarr-publish-resolve -- \
+  --key-file ./site.key --data 'hello from my named content' --once
+```
+
+With `--once`, the example exits after the verified download. Omit it to keep
+serving the blob and republishing its provider announcement and Pkarr name until
+Ctrl-C. Restart with the same key file and different data to update the name.
+
 The gateway also accepts the BEP44 public key and rendezvous hash discovery
 options. See its README for configuration and HTTP behavior.
 
