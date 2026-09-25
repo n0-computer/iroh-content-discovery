@@ -333,8 +333,11 @@ Mozilla's requirements. No extension signing or publishing happens during builds
 
 Settings and logs live in `%LOCALAPPDATA%\iroh-local-gateway` on Windows and
 `~/Library/Application Support/iroh-local-gateway` on macOS. `gateway.log` contains
-runtime logs; `launcher.log` contains startup failures. Uninstall preserves this
-directory. Remove browser extensions manually before uninstalling their files.
+runtime logs; on gateway startup, logs larger than 5 MiB replace
+`gateway.previous.log` and `gateway.log` starts empty. Logs are not rotated while
+the gateway is running. `launcher.log` contains startup failures. Uninstall
+preserves this directory. Remove browser extensions manually before uninstalling
+their files.
 
 `arguments.json` is a JSON array of gateway CLI arguments, initially `[]`.
 For example, `["--listen", "127.0.0.1:8081"]` selects another port. Stop the gateway,

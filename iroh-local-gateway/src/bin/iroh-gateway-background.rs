@@ -92,13 +92,6 @@ async fn start(state: &Path) -> Result<()> {
         std::fs::remove_file(state.join("ready"))?;
     }
     let log_path = state.join("gateway.log");
-    if log_path.metadata().is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
-        let previous = state.join("gateway.previous.log");
-        if previous.exists() {
-            std::fs::remove_file(&previous)?;
-        }
-        std::fs::rename(&log_path, previous)?;
-    }
     let log = OpenOptions::new()
         .create(true)
         .append(true)

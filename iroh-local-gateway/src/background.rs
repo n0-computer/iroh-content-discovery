@@ -51,6 +51,13 @@ impl Runtime {
         let lock = lock(&state.join("gateway.lock"))?;
         remove(&state.join("stop"))?;
         remove(&state.join("ready"))?;
+        let log = state.join("gateway.log");
+        if log.metadata().is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+            // launchd (or the launcher) already opened stdout/stderr. Keep that
+            // file in place so subsequent appends still reach gateway.log.
+            std::fs::copy(&log, state.join("gateway.previous.log"))?;
+            OpenOptions::new().write(true).open(&log)?.set_len(0)?;
+        }
         Ok(Self {
             state: state.into(),
             _lock: lock,
@@ -77,5 +84,33 @@ fn remove(path: &Path) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn log_rotation_preserves_open_output_handles() -> Result<()> {
+        let state = tempfile::tempdir()?;
+        let log = state.path().join("gateway.log");
+        let previous = state.path().join("gateway.previous.log");
+        let mut output = OpenOptions::new().create(true).append(true).open(&log)?;
+        let contents = vec![b'x'; 5 * 1024 * 1024 + 1];
+        output.write_all(&contents)?;
+        std::fs::write(&previous, b"older log")?;
+
+        let runtime = Runtime::acquire(state.path())?;
+        assert_eq!(std::fs::read(&previous)?, contents);
+        output.write_all(b"new log\n")?;
+        assert_eq!(std::fs::read(&log)?, b"new log\n");
+        drop(runtime);
+
+        let _runtime = Runtime::acquire(state.path())?;
+        assert_eq!(std::fs::read(&log)?, b"new log\n");
+        assert_eq!(std::fs::read(&previous)?, contents);
+        Ok(())
     }
 }
