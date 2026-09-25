@@ -182,8 +182,8 @@ iroh-local-gateway --index-list-key <pkarr-public-key>
 
 Add `--rendezvous-hash b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b` to allow
 the public rendezvous fallback. With both options, curated addresses take precedence.
-The gateway requires at least one source or an explicit `--index-server`. Pkarr sequences
-are Unix timestamps in microseconds; iroh-share manages them automatically.
+With no discovery options set, the gateway uses the default rendezvous hash above.
+Pkarr sequences are Unix timestamps in microseconds; iroh-share manages them automatically.
 The previous salted binary list format is no longer read.
 
 `n0-mainline` verifies BEP44 signatures. An `AddrIndex` keeps the highest valid

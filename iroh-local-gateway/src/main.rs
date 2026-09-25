@@ -10,12 +10,10 @@ use iroh_local_gateway::{Gateway, validate_listen_addr};
 use iroh_mainline_endpoint_discovery::{AddrIndex, DiscoveryConfig, Resolver};
 use n0_mainline::Dht;
 use tracing::info;
+use udp_addr_index_proto::RENDEZVOUS_INFOHASH;
 
 #[derive(Parser)]
 #[command(about = "Serve local content at /blake3/<z32> and Pkarr redirects at /pkarr/<key>")]
-#[command(group(clap::ArgGroup::new("discovery")
-    .args(["index_server", "index_list_key", "rendezvous_hash"])
-    .required(true).multiple(true)))]
 struct Args {
     /// Loopback HTTP listen address (plaintext).
     #[arg(long, default_value = "127.0.0.1:45475")]
@@ -26,12 +24,25 @@ struct Args {
     /// Pkarr public key of the trusted server list, as z-base-32 or 64 hex digits.
     #[arg(long, env = "IROH_ADDR_INDEX_LIST_KEY", value_parser = parse_list_key)]
     index_list_key: Option<[u8; 32]>,
-    /// Optional rendezvous fallback for server discovery, as 40 hex digits.
+    /// Rendezvous hash as 40 hex digits; defaults to the protocol hash if no discovery source is set.
     #[arg(long, env = "IROH_ADDR_INDEX_RENDEZVOUS", value_parser = parse_hex::<20>)]
     rendezvous_hash: Option<[u8; 20]>,
     /// Local Mainline UDP port; zero selects an available port.
     #[arg(long, default_value_t = 0)]
     dht_port: u16,
+}
+
+impl Args {
+    fn discovery_config(&self) -> DiscoveryConfig {
+        DiscoveryConfig {
+            server: self.index_server,
+            public_key: self.index_list_key,
+            rendezvous_hash: self.rendezvous_hash.or_else(|| {
+                (self.index_server.is_none() && self.index_list_key.is_none())
+                    .then_some(RENDEZVOUS_INFOHASH)
+            }),
+        }
+    }
 }
 
 #[tokio::main]
@@ -44,11 +55,7 @@ async fn main() -> Result<()> {
         )
         .init();
     let dht = Dht::builder().port(args.dht_port).build()?;
-    let config = DiscoveryConfig {
-        server: args.index_server,
-        public_key: args.index_list_key,
-        rendezvous_hash: args.rendezvous_hash,
-    };
+    let config = args.discovery_config();
     info!("finding index servers");
     let index = AddrIndex::discover_with_config(dht.clone(), config).await?;
     let resolver = Resolver::new(dht, index);
@@ -93,8 +100,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_either_or_both_discovery_sources() {
-        // Environment-backed options are covered by Clap; test argument grouping
+    fn defaults_to_rendezvous_and_preserves_explicit_discovery_sources() {
+        // Environment-backed options are covered by Clap; test discovery defaults
         // with those bindings removed so the caller's environment cannot affect it.
         use clap::{CommandFactory, FromArgMatches};
         let parse = |args: Vec<&str>| {
@@ -107,21 +114,30 @@ mod tests {
         };
         let key = z32::encode(&[42; 32]);
         let hash = "01".repeat(20);
-        assert!(parse(vec!["gateway"]).is_err());
+        let default = parse(vec!["gateway"]).unwrap().discovery_config();
+        assert_eq!(default.rendezvous_hash, Some(RENDEZVOUS_INFOHASH));
+        assert!(default.server.is_none());
+        assert!(default.public_key.is_none());
         let curated = parse(vec!["gateway", "--index-list-key", &key]).unwrap();
-        assert!(curated.rendezvous_hash.is_none());
-        assert!(parse(vec!["gateway", "--rendezvous-hash", &hash]).is_ok());
-        assert!(
-            parse(vec![
-                "gateway",
-                "--index-list-key",
-                &key,
-                "--rendezvous-hash",
-                &hash
-            ])
-            .is_ok()
-        );
-        assert!(parse(vec!["gateway", "--index-server", "127.0.0.1:11223"]).is_ok());
+        assert!(curated.discovery_config().rendezvous_hash.is_none());
+        let custom = parse(vec!["gateway", "--rendezvous-hash", &hash]).unwrap();
+        assert_eq!(custom.discovery_config().rendezvous_hash, Some([1; 20]));
+        let both = parse(vec![
+            "gateway",
+            "--index-list-key",
+            &key,
+            "--rendezvous-hash",
+            &hash,
+        ])
+        .unwrap()
+        .discovery_config();
+        assert_eq!(both.public_key, Some([42; 32]));
+        assert_eq!(both.rendezvous_hash, Some([1; 20]));
+        let direct = parse(vec!["gateway", "--index-server", "127.0.0.1:11223"])
+            .unwrap()
+            .discovery_config();
+        assert_eq!(direct.server, Some("127.0.0.1:11223".parse().unwrap()));
+        assert!(direct.rendezvous_hash.is_none());
     }
 
     #[test]
