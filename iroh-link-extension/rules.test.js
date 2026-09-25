@@ -14,7 +14,7 @@ test("runtime permission requests cover both domains declared in the manifest", 
 });
 
 // Model URL matching and transformations; Chrome/Brave enforce the actual rules.
-function redirect(input, port = 8080) {
+function redirect(input, port = DEFAULT_SETTINGS.port) {
   const rules = makeRules({ port, enabled: true }).sort((a, b) => b.priority - a.priority);
   for (const { condition, action } of rules) {
     const regex = new RegExp(condition.regexFilter, condition.isUrlFilterCaseSensitive ? "" : "i");
@@ -34,9 +34,9 @@ function redirect(input, port = 8080) {
 
 test("hash subdomains rewrite to a local per-hash origin", () => {
   const hash = "y".repeat(52);
-  assert.equal(redirect(`https://${hash}.blake3.net/?download=1#time`), `http://${hash}.blake3.localhost:8080/?download=1#time`);
+  assert.equal(redirect(`https://${hash}.blake3.net/?download=1#time`), `http://${hash}.blake3.localhost:45475/?download=1#time`);
   assert.equal(redirect(`http://${hash}.blake3.net:80/`, 12345), `http://${hash}.blake3.localhost:12345/`);
-  assert.equal(redirect(`https://${hash}.blake3.net/site/index.html?x=1`), `http://${hash}.blake3.localhost:8080/site/index.html?x=1`);
+  assert.equal(redirect(`https://${hash}.blake3.net/site/index.html?x=1`), `http://${hash}.blake3.localhost:45475/site/index.html?x=1`);
 });
 
 test("single labels are forwarded for gateway validation", () => {
@@ -44,7 +44,7 @@ test("single labels are forwarded for gateway validation", () => {
     for (const label of ["www", "docs", "not-z32", "invalid_label", "y".repeat(51), "y".repeat(53)]) {
       assert.equal(
         redirect(`https://${label}.${domain}.net/path?x=1`),
-        `http://${label}.${domain}.localhost:8080/path?x=1`,
+        `http://${label}.${domain}.localhost:45475/path?x=1`,
       );
     }
   }
@@ -69,10 +69,10 @@ test("apex, lookalikes, nested subdomains, and localhost are untouched", () => {
 
 test("public-key subdomains rewrite to a local per-key origin", () => {
   const key = "y".repeat(52);
-  assert.equal(redirect(`https://${key}.pkarr.net/`), `http://${key}.pkarr.localhost:8080/`);
+  assert.equal(redirect(`https://${key}.pkarr.net/`), `http://${key}.pkarr.localhost:45475/`);
   assert.equal(redirect(`http://${key}.pkarr.net:80/`, 12345), `http://${key}.pkarr.localhost:12345/`);
-  assert.equal(redirect(`https://${key}.pkarr.net/?q=%2F#section`), `http://${key}.pkarr.localhost:8080/?q=%2F#section`);
-  assert.equal(redirect(`https://${key}.pkarr.net/a%2Fb/file%20name?x=1#part`), `http://${key}.pkarr.localhost:8080/a%2Fb/file%20name?x=1#part`);
+  assert.equal(redirect(`https://${key}.pkarr.net/?q=%2F#section`), `http://${key}.pkarr.localhost:45475/?q=%2F#section`);
+  assert.equal(redirect(`https://${key}.pkarr.net/a%2Fb/file%20name?x=1#part`), `http://${key}.pkarr.localhost:45475/a%2Fb/file%20name?x=1#part`);
 });
 
 test("ports are bounded, settings are optional only through defaults, disable removes rules", () => {

@@ -27,7 +27,7 @@ struct Args {
     /// Without a file, the gateway serves a short text greeting.
     file: Option<PathBuf>,
     /// Local HTTP port; configure the same port in the browser extension.
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, default_value_t = 45475)]
     port: u16,
     /// Use an isolated local DHT, server, and iroh discovery instead of public services.
     #[arg(long)]

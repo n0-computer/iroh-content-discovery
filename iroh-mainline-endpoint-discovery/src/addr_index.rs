@@ -14,24 +14,17 @@ use crate::{SignedRecord, UdpClient, UdpError};
 use tracing::debug;
 
 /// Initial index server discovery sources, tried in priority order.
-#[derive(Debug, Clone)]
+///
+/// Defaults to no sources. Configure an explicit server, a trusted Pkarr key,
+/// a rendezvous hash, or both discovery sources.
+#[derive(Debug, Clone, Default)]
 pub struct DiscoveryConfig {
     /// Explicit index server socket, used directly instead of either discovery source.
     pub server: Option<SocketAddrV4>,
-    /// Trusted BEP44 signing key, tried first when set.
+    /// Trusted Pkarr signing key, tried first when set.
     pub public_key: Option<[u8; 32]>,
     /// Untrusted rendezvous fallback; `None` disables it.
     pub rendezvous_hash: Option<[u8; 20]>,
-}
-
-impl Default for DiscoveryConfig {
-    fn default() -> Self {
-        Self {
-            server: None,
-            public_key: None,
-            rendezvous_hash: Some(RENDEZVOUS_INFOHASH),
-        }
-    }
 }
 
 /// UDP client for one or more index servers.
@@ -56,7 +49,10 @@ struct DiscoveryState {
 
 impl DiscoveryState {
     fn accept(&mut self, item: n0_mainline::MutableItem) {
-        if item.seq() < 0 || crate::ServerList::decode(item.value()).is_none() {
+        if item.salt().is_some()
+            || item.seq() < 0
+            || crate::ServerList::decode(item.value(), item.key()).is_none()
+        {
             return;
         }
         if self
@@ -77,17 +73,24 @@ impl AddrIndex {
         Ok(Self::from_udp(client))
     }
 
-    /// Discovers servers through Mainline, using the same socket for index traffic.
+    /// Discovers servers using the protocol rendezvous hash and the shared UDP socket.
     ///
     /// Refreshes on use after ten minutes. Discovery is limited to two candidates
     /// and thirty seconds; announcements are untrusted and do not prove availability.
     pub async fn discover(dht: Dht) -> Result<Self, UdpError> {
-        Self::discover_with_config(dht, DiscoveryConfig::default()).await
+        Self::discover_with_config(
+            dht,
+            DiscoveryConfig {
+                rendezvous_hash: Some(RENDEZVOUS_INFOHASH),
+                ..DiscoveryConfig::default()
+            },
+        )
+        .await
     }
 
-    /// Discovers with a trusted BEP44 server list in addition to rendezvous peers.
+    /// Discovers servers using only a trusted Pkarr list.
     ///
-    /// Uses the default rendezvous hash only if no signed addresses are available.
+    /// Use [`Self::discover_with_config`] to also configure a rendezvous fallback.
     pub async fn discover_with_authority(dht: Dht, public_key: [u8; 32]) -> Result<Self, UdpError> {
         Self::discover_with_config(
             dht,
@@ -99,7 +102,7 @@ impl AddrIndex {
         .await
     }
 
-    /// Discovers at most two index servers, trying BEP44 before the rendezvous fallback.
+    /// Discovers at most two index servers, trying Pkarr before the rendezvous fallback.
     ///
     /// Each lookup has a thirty-second deadline. Refreshes on use after ten
     /// minutes, retaining the highest signed sequence for this index's lifetime.
@@ -108,6 +111,9 @@ impl AddrIndex {
         debug!(?config, "configuring index server discovery");
         if let Some(server) = config.server {
             return Self::udp(dht, server).await;
+        }
+        if config.public_key.is_none() && config.rendezvous_hash.is_none() {
+            return Err(e!(UdpError::NoServers));
         }
         let client = UdpClient::attach(dht.clone()).await?;
         let index = Self {
@@ -137,10 +143,7 @@ impl AddrIndex {
             let Some(key) = discovery.config.public_key else {
                 return Ok::<_, UdpError>(());
             };
-            let mut stream = discovery
-                .dht
-                .get_mutable(&key, Some(crate::SERVER_LIST_SALT), None)
-                .await?;
+            let mut stream = discovery.dht.get_mutable(&key, None, None).await?;
             while let Some(item) = stream.next().await {
                 state.accept(item);
             }
@@ -151,7 +154,7 @@ impl AddrIndex {
         let mut peers = state
             .signed
             .as_ref()
-            .and_then(|item| crate::ServerList::decode(item.value()))
+            .and_then(|item| crate::ServerList::decode(item.value(), item.key()))
             .map(|list| list.addresses().iter().copied().collect::<HashSet<_>>())
             .unwrap_or_default();
         if peers.is_empty() {
@@ -259,6 +262,121 @@ mod tests {
     use super::*;
     use crate::ServerList;
 
+    #[tokio::test]
+    async fn curated_list_takes_precedence_over_rendezvous() {
+        use simple_dns::{
+            CLASS, Packet, ResourceRecord,
+            rdata::{RData, TXT},
+        };
+        let network = n0_mainline::Testnet::new(3).await.unwrap();
+        let node = || {
+            Dht::builder()
+                .bootstrap(&network.bootstrap)
+                .port(0)
+                .build()
+                .unwrap()
+        };
+        let key = n0_mainline::SigningKey::from_bytes(&[43; 32]);
+        let public = key.verifying_key().to_bytes();
+        let owner = crate::pkarr_name(&public);
+        // The same apex TXT records entered in iroh-share's DNS editor.
+        let mut packet = Packet::new_reply(0);
+        for socket in ["203.0.113.1:11223", "198.51.100.2:33445"] {
+            packet.answers.push(ResourceRecord::new(
+                owner.as_str().try_into().unwrap(),
+                CLASS::IN,
+                300,
+                RData::TXT(TXT::try_from(socket).unwrap()),
+            ));
+        }
+        let publisher = crate::PkarrPublisher::new(node());
+        publisher.set_raw(&key, &packet).unwrap();
+        publisher.publish_all().await.unwrap();
+        let index = AddrIndex::discover_with_config(
+            node(),
+            DiscoveryConfig {
+                server: None,
+                public_key: Some(public),
+                rendezvous_hash: Some([42; 20]),
+            },
+        )
+        .await
+        .unwrap();
+        let state = index.discovery.as_ref().unwrap().state.lock().await;
+        let item = state
+            .signed
+            .as_ref()
+            .expect("curated Pkarr packet was not discovered");
+        assert_eq!(item.salt(), None);
+        assert_eq!(
+            ServerList::decode(item.value(), item.key())
+                .unwrap()
+                .addresses(),
+            &[
+                "203.0.113.1:11223".parse::<SocketAddrV4>().unwrap(),
+                "198.51.100.2:33445".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn no_sources_fails_without_attaching_the_client() {
+        let dht = Dht::builder().no_bootstrap().port(0).build().unwrap();
+        let result = AddrIndex::discover_with_config(dht.clone(), DiscoveryConfig::default()).await;
+        assert!(matches!(result, Err(UdpError::NoServers { .. })));
+        // The failed configuration did not consume the socket's datagram hook.
+        assert!(
+            AddrIndex::udp(dht, "127.0.0.1:11223".parse().unwrap())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_curated_list_falls_back_to_rendezvous() {
+        let network = n0_mainline::Testnet::new(3).await.unwrap();
+        let node = || {
+            Dht::builder()
+                .bootstrap(&network.bootstrap)
+                .port(0)
+                .build()
+                .unwrap()
+        };
+        let authority = node();
+        let key = n0_mainline::SigningKey::from_bytes(&[44; 32]);
+        authority
+            .put_mutable(
+                ServerList::new(vec![]).unwrap().sign(&key, 1).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let hash = [45; 20];
+        authority
+            .announce_peer(hash.into(), Some(11223))
+            .await
+            .unwrap();
+        let index = AddrIndex::discover_with_config(
+            node(),
+            DiscoveryConfig {
+                server: None,
+                public_key: Some(key.verifying_key().to_bytes()),
+                rendezvous_hash: Some(hash),
+            },
+        )
+        .await
+        .unwrap();
+        let state = index.discovery.as_ref().unwrap().state.lock().await;
+        let item = state.signed.as_ref().unwrap();
+        assert!(
+            ServerList::decode(item.value(), item.key())
+                .unwrap()
+                .addresses()
+                .is_empty()
+        );
+        assert!(state.refreshed.is_some());
+    }
+
     #[test]
     fn signed_updates_reject_rollback_and_malformed_values() {
         let key = n0_mainline::SigningKey::from_bytes(&[42; 32]);
@@ -267,21 +385,19 @@ mod tests {
         state.accept(list.sign(&key, 2).unwrap());
         state.accept(list.sign(&key, 1).unwrap());
         assert_eq!(state.signed.as_ref().unwrap().seq(), 2);
-        state.accept(n0_mainline::MutableItem::new(
-            &key,
-            &[255],
-            3,
-            Some(crate::SERVER_LIST_SALT),
-        ));
+        state.accept(n0_mainline::MutableItem::new(&key, &[255], 3, None));
         assert_eq!(state.signed.as_ref().unwrap().seq(), 2);
         // A newer empty list explicitly withdraws the signed candidates.
         state.accept(ServerList::new(vec![]).unwrap().sign(&key, 4).unwrap());
         assert_eq!(state.signed.as_ref().unwrap().seq(), 4);
         assert!(
-            ServerList::decode(state.signed.as_ref().unwrap().value())
-                .unwrap()
-                .addresses()
-                .is_empty()
+            ServerList::decode(
+                state.signed.as_ref().unwrap().value(),
+                state.signed.as_ref().unwrap().key()
+            )
+            .unwrap()
+            .addresses()
+            .is_empty()
         );
     }
 }

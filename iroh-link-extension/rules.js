@@ -1,4 +1,4 @@
-export const DEFAULT_SETTINGS = { port: 8080, enabled: true };
+export const DEFAULT_SETTINGS = { port: 45475, enabled: true };
 
 // One entry per link domain: the public name, and the localhost suffix the
 // gateway serves it under. Rule ids follow this order.

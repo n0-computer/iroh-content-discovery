@@ -10,7 +10,7 @@ Run these commands from the repository root on the Linux server:
 ```sh
 cargo build --release --locked -p udp-addr-index --features cli --bin udp-addr-index
 sudo install -m 0755 target/release/udp-addr-index /usr/local/bin/udp-addr-index
-sudo install -m 0644 udp-addr-index/examples/systemd/udp-addr-index.service /etc/systemd/system/udp-addr-index.service
+sudo install -m 0644 udp-addr-index/packaging/systemd/udp-addr-index.service /etc/systemd/system/udp-addr-index.service
 sudo systemd-analyze verify /etc/systemd/system/udp-addr-index.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now udp-addr-index.service
