@@ -351,7 +351,17 @@ impl Actor {
                 if pending.addr != addr || !pending.awaiting.remove(&from) {
                     return;
                 }
-                debug!(indexer = %from, peer = %addr, found = value.is_some(), "indexer responded");
+                debug!(
+                    indexer = %from,
+                    peer = %addr,
+                    found = %match value.as_deref() {
+                        Some(bytes) => crate::SignedRecord::decode(bytes, addr)
+                            .map(|record| record.endpoint_id.to_string())
+                            .unwrap_or_else(|| "invalid".to_owned()),
+                        None => "none".to_owned(),
+                    },
+                    "indexer responded"
+                );
                 pending.responded = true;
                 if let Some(value) = value
                     && value.len() <= MAX_VALUE_LEN
