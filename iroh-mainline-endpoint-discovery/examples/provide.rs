@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
     // With the browser extension, the link URLs reach the local gateway.
     println!("\nBlake3 gateway URLs:");
     println!("    https://{collection}.{BLAKE3_DOMAIN}/");
-    println!("    http://{collection}.blake3.localhost:8080/");
+    println!("    http://{collection}.blake3.localhost:45475/");
 
     // The name outlives this run; the hash it points at does not. The
     // publisher keeps republishing in its own task until it is dropped.
@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
             let name = pkarr_name(&key.verifying_key().to_bytes());
             println!("\nPkarr gateway URLs:");
             println!("    https://{name}.{PKARR_DOMAIN}/");
-            println!("    http://{name}.pkarr.localhost:8080/");
+            println!("    http://{name}.pkarr.localhost:45475/");
             n0_error::Ok(publisher)
         })
         .transpose()?;

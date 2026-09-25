@@ -10,7 +10,7 @@ another program without pulling in `clap` and `tracing-subscriber`.
 
 ## Try the full workflow
 
-With the browser extension installed and enabled on port 8080:
+With the browser extension installed and enabled on port 45475:
 
 ```sh
 cargo run -p iroh-local-gateway --example demo -- /path/to/video.mp4
@@ -24,7 +24,7 @@ relays. The full browser flow is:
 
 ```text
 https://<public-key>.pkarr.net/
-  -> http://<public-key>.pkarr.localhost:8080/   (serves the named content)
+  -> http://<public-key>.pkarr.localhost:45475/   (serves the named content)
 ```
 
 The gateway resolves the signed HTTPS record on Mainline; when it names
@@ -55,13 +55,13 @@ Links from this mode work only through this demo's gateway.
 ## Standalone gateway
 
 ```sh
-cargo run -p iroh-local-gateway -- --listen 127.0.0.1:8080 --index-server 127.0.0.1:11223
+cargo run -p iroh-local-gateway -- --listen 127.0.0.1:45475 --index-server 127.0.0.1:11223
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8080/blake3/<z32>
+http://127.0.0.1:45475/blake3/<z32>
 ```
 
 For a sendme/swarmie collection root, `/blake3/<z32>` automatically shows a
@@ -73,9 +73,9 @@ The same content is also served on per-hash and per-key subdomains of
 `localhost`, which browsers and curl resolve to the loopback address:
 
 ```text
-http://<z32>.blake3.localhost:8080/
-http://<z32>.blake3.localhost:8080/<dir>/<name>
-http://<public-key>.pkarr.localhost:8080/
+http://<z32>.blake3.localhost:45475/
+http://<z32>.blake3.localhost:45475/<dir>/<name>
+http://<public-key>.pkarr.localhost:45475/
 ```
 
 Each hash and each key then has its own browser origin, and root-relative
@@ -170,11 +170,17 @@ the workspace's `Publisher` and blobs example.
 Server configuration follows one priority order:
 
 1. `--index-server IP:PORT` (`IROH_ADDR_INDEX`) skips discovery.
-2. `--index-list-key HEX` (`IROH_ADDR_INDEX_LIST_KEY`) selects the signed BEP44 list.
+2. `--index-list-key KEY` (`IROH_ADDR_INDEX_LIST_KEY`) selects a curated Pkarr list
+   of apex TXT `IPv4:port` records, publishable with iroh-share. The key can be
+   z-base-32 or 64 hex digits. See [publishing a list](../README.md#curated-bootstrap-list-pkarr).
 3. `--rendezvous-hash HEX` (`IROH_ADDR_INDEX_RENDEZVOUS`) selects the fallback hash;
-   if omitted, the protocol's default rendezvous hash is used.
+   with no discovery options set, the gateway uses the protocol hash
+   `b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b`.
 
-Use `--no-rendezvous` to disable the hash fallback. Public keys are 64 hex digits;
+Both discovery options may be supplied; the curated list takes precedence and
+rendezvous is used only if it yields no addresses. An explicit curated list does
+not enable rendezvous unless a hash is also supplied. Running with no arguments
+uses the default rendezvous hash. Public keys are z-base-32 or 64 hex digits;
 infohashes are 40 hex digits. `--dht-port` controls the local Mainline UDP port
 (default: an available port).
 
@@ -212,9 +218,9 @@ dropping the HTTP body drops the upstream request.
 iroh-blobs collections are browsed under the root hash:
 
 ```text
-http://127.0.0.1:8080/blake3/<z32>
-http://127.0.0.1:8080/blake3/<z32>/<dir>/
-http://127.0.0.1:8080/blake3/<z32>/<dir>/<name>
+http://127.0.0.1:45475/blake3/<z32>
+http://127.0.0.1:45475/blake3/<z32>/<dir>/
+http://127.0.0.1:45475/blake3/<z32>/<dir>/<name>
 ```
 
 Collection names are treated as `/`-separated paths. A path that matches a
@@ -309,10 +315,10 @@ be dual licensed as above, without any additional terms or conditions.
 
 ## Per-user installers
 
-The gateway installers start the gateway at login and listen on `127.0.0.1:8080`.
+The gateway installers start the gateway at login and listen on `127.0.0.1:45475`.
 Windows x64 uses an Inno Setup `.exe`; macOS Apple Silicon uses a current-user
 `.pkg`. Installation does not require administrator access. Stop any other gateway
-using port 8080 (including Blobtorrent's embedded gateway) before installation.
+using port 45475 before installation.
 An occupied port fails startup without stopping the other application.
 
 - Windows installs in `%LOCALAPPDATA%\Programs\Iroh Gateway` with Start, Stop,

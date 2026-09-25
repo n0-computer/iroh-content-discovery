@@ -27,7 +27,7 @@ pub use publisher::{ANNOUNCE_SPACING, Publisher, REFRESH, RETRY};
 pub use record::{RecordPayload, RecordPayloadV1, SignedRecord};
 pub use republisher::republish_server_list;
 pub use resolver::Resolver;
-pub use server_list::{SERVER_LIST_SALT, ServerList};
+pub use server_list::ServerList;
 pub use udp::{DEFAULT_TIMEOUT, ResolveResult, UdpClient, UdpError};
 
 /// Returns the Mainline infohash for a BLAKE3 hash, `SHA-1(blake3)`.

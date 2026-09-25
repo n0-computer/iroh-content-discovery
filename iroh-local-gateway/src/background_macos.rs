@@ -103,7 +103,7 @@ pub async fn install(state: &Path) -> Result<()> {
         Ok::<_, anyhow::Error>(())
     })
     .await
-    .context("gateway startup timed out; see gateway.log (port 8080 may already be in use)")??;
+    .context("gateway startup timed out; see gateway.log (port 45475 may already be in use)")??;
     Ok(())
 }
 pub async fn remove(state: &Path) -> Result<()> {

@@ -120,10 +120,10 @@ nodes are still required, since no server address is hardcoded. The
 `udp-addr-index` binary exits if its service or announcement task stops, and
 shuts down on Ctrl-C or SIGTERM.
 
-### Signed bootstrap list (BEP44)
+### Curated bootstrap list (Pkarr)
 
 An explicit server and the two discovery sources are configured independently.
-The trusted BEP44 key is tried first, and the rendezvous hash only when the
+The trusted Pkarr key is tried first, and the rendezvous hash only when the
 signed list yields nothing. Each lookup has a thirty-second deadline.
 
 ```rust,ignore
@@ -137,11 +137,12 @@ let index = AddrIndex::discover_with_config(dht, DiscoveryConfig {
 Each field is optional. An explicit `server` takes precedence over the key and
 the hash, and skips discovery entirely. Either discovery field can be `None` to
 turn that source off. `AddrIndex::discover` uses the default rendezvous hash
-with no key, and `AddrIndex::discover_with_authority` uses a key with that hash
-as fallback. A server announces under a custom hash with
+with no key as an explicit convenience helper. `AddrIndex::discover_with_authority`
+uses only the supplied key. `DiscoveryConfig::default()` has no sources; without
+a server, key, or hash, discovery returns `NoServers` immediately. A server announces under a custom hash with
 `Server::attach_with_rendezvous(dht, Some(hash))`.
 
-Discovery keeps at most two servers, and a signed list holds one or two
+Discovery keeps at most two servers, and a signed list holds up to two
 addresses. A signed result is never topped up with rendezvous candidates.
 Rendezvous candidates stay untrusted, and even a signed address only means the
 authority vouches for that server, not that it answered. Falling back means no
@@ -156,11 +157,34 @@ dht.put_mutable(item, None).await?;
 ```
 
 The signing key stays with the authority; clients need only the public key.
-Raise the nonnegative sequence number whenever the list changes, and republish
-the signed item periodically so the DHT keeps it. The salt is
-`iroh-addr-index servers v1`. The value is a version byte `1` followed by up to
-two compact IPv4 sockets, four address bytes and a big-endian port each. An
-empty list withdraws every signed candidate and allows the fallback.
+The value is a standard Pkarr DNS packet in an **unsalted** BEP44 item. Each
+apex IN TXT record contains one IPv4 socket. Only the apex matching the signer's
+z-base-32 public key is read; other owners and record types are ignored.
+Malformed apex TXT sockets or more than two entries invalidate the list.
+An empty apex TXT record (`@ 300 IN TXT ""`), or a packet without apex TXT
+records, withdraws the signed candidates and allows the fallback.
+
+To publish with **iroh-share**, create a standalone name, open its advanced DNS
+record editor, and replace its records with:
+
+```dns
+@ 300 IN TXT "203.0.113.1:11223"
+@ 300 IN TXT "198.51.100.2:33445"
+```
+
+Save the records and keep the iroh-share daemon running to renew publication.
+Configure clients with that name's public key. The gateway accepts the bare
+z-base-32 key displayed by iroh-share (without `https://` or `.pkarr.net`):
+
+```sh
+iroh-local-gateway --index-list-key <pkarr-public-key>
+```
+
+Add `--rendezvous-hash b86c3d910e1a67ec9ba8a69a95bd7f8b08be923b` to allow
+the public rendezvous fallback. With both options, curated addresses take precedence.
+With no discovery options set, the gateway uses the default rendezvous hash above.
+Pkarr sequences are Unix timestamps in microseconds; iroh-share manages them automatically.
+The previous salted binary list format is no longer read.
 
 `n0-mainline` verifies BEP44 signatures. An `AddrIndex` keeps the highest valid
 list it has seen across refreshes, including when a lookup times out, and
@@ -168,7 +192,7 @@ rejects lower sequences for its lifetime. That memory does not survive a
 restart, so a fresh client can still be handed an older signed list. Lists carry
 no wall-clock expiry.
 
-### Running the BEP44 republisher
+### Running the standalone Pkarr republisher
 
 Run the list publisher separately from the servers it names:
 
@@ -176,7 +200,7 @@ Run the list publisher separately from the servers it names:
 # Set IROH_INDEX_LIST_SECRET to a 64-hex-digit Ed25519 secret seed.
 cargo run -p iroh-mainline-endpoint-discovery --features cli \
   --bin iroh-index-list -- \
-  --sequence 1 --server 203.0.113.1:6881 203.0.113.2:6881
+  --server 203.0.113.1:6881 203.0.113.2:6881
 ```
 
 The process consumes and removes `IROH_INDEX_LIST_SECRET` before any runtime
@@ -188,7 +212,8 @@ remove it from the shell or service configuration that launched the process.
 Publication starts immediately and repeats every ten minutes. A transient error
 retries after thirty seconds, and each attempt times out after thirty. A
 sequence conflict or a DHT shutdown stops the task. To change the list, restart
-with new addresses and a higher sequence. Omit `--server` to publish an empty
+with new addresses. The timestamp defaults to the current time; an explicit
+`--sequence` must exceed the previous timestamp. Omit `--server` to publish an empty
 list. Ctrl-C stops renewal.
 
 Embedded applications can run `republish_server_list(dht, signed_item)` as a
@@ -197,14 +222,14 @@ task of their own; dropping that future stops renewal without stopping the DHT.
 ## Local HTTP content gateway
 
 The fourth workspace project, [`iroh-local-gateway`](iroh-local-gateway/README.md),
-serves `http://127.0.0.1:8080/blake3/<z32>`. It finds a provider through Mainline
+serves `http://127.0.0.1:45475/blake3/<z32>`. It finds a provider through Mainline
 and the address index, then streams Bao-verified bytes with MIME detection
 and HTTP range support for video seeking. Collection roots automatically show
 a directory listing at `/blake3/<z32>`, and `/blake3/<z32>/path/to/file`
 streams a file from the same provider. The same content is served on
-`http://<z32>.blake3.localhost:8080/`, giving each hash its own browser
+`http://<z32>.blake3.localhost:45475/`, giving each hash its own browser
 origin, and Pkarr keys resolve at `/pkarr/<key>` and
-`http://<key>.pkarr.localhost:8080/`.
+`http://<key>.pkarr.localhost:45475/`.
 
 Query flags:
 
@@ -228,7 +253,37 @@ cargo run -p iroh-mainline-endpoint-discovery --example provide -- ./site
 It reads `PKARR_SECRET` (64 hex digits) to keep the same name across runs, and
 prints a generated one if unset. Use `--no-pkarr` to publish hashes only.
 
-The gateway also accepts the BEP44 public key and rendezvous hash discovery
+For a complete named-content round trip without the HTTP gateway, run:
+
+```sh
+cargo run -p iroh-mainline-endpoint-discovery --example pkarr-publish-resolve -- --once
+```
+
+The example generates a temporary signing keypair, serves a demo blob over iroh,
+publishes its signed endpoint mapping, announces its content hash on Mainline,
+and publishes a Pkarr name pointing to that hash. A separate DHT client starts
+with only the public key and index configuration, resolves the signed name,
+discovers a provider through Mainline and the address index, and downloads and
+BLAKE3-verifies the blob into a separate store.
+
+Both sides discover address index servers by default. Use `--index-server
+IP:PORT` (or `IROH_ADDR_INDEX`) to use a particular reachable index on both sides.
+The example needs UDP access to Mainline and a working address index; it does
+not start an index server or HTTP gateway.
+
+Use `--key-file ./site.key` to load or create a persistent keypair and
+`--data 'updated content'` to change the blob while keeping the same name:
+
+```sh
+cargo run -p iroh-mainline-endpoint-discovery --example pkarr-publish-resolve -- \
+  --key-file ./site.key --data 'hello from my named content' --once
+```
+
+With `--once`, the example exits after the verified download. Omit it to keep
+serving the blob and republishing its provider announcement and Pkarr name until
+Ctrl-C. Restart with the same key file and different data to update the name.
+
+The gateway also accepts the Pkarr public key and rendezvous hash discovery
 options. See its README for configuration and HTTP behavior.
 
 ## Browser extension
@@ -239,7 +294,7 @@ rewrites `https://<z32>.blake3.net/<path>` to
 `https://<key>.pkarr.net/<path>` to `http://<key>.pkarr.localhost:<port>/<path>`,
 in Chrome, Brave and Firefox. Load that directory
 unpacked from the browser's extensions page with Developer mode enabled. The
-popup configures the local gateway port (default 8080) and enables/disables
+popup configures the local gateway port (default 45475) and enables/disables
 rewrites. The apex `blake3.net` site is unaffected.
 
 ## License

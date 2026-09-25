@@ -8,7 +8,7 @@ use n0_mainline::{
     errors::{PutMutableError, PutQueryError},
 };
 
-use crate::{RETRY, SERVER_LIST_SALT, ServerList};
+use crate::{RETRY, ServerList};
 use tracing::{info, warn};
 
 const RENEW: Duration = Duration::from_secs(600);
@@ -17,7 +17,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// Publishes a signed server list immediately, then renews it every ten minutes.
 ///
 /// This future owns no signing key. Run it as a separate task and cancel it to
-/// stop renewal. The item must have been signed for [`SERVER_LIST_SALT`].
+/// stop renewal. The item must be an unsalted Pkarr DNS packet.
 /// Transient failures and thirty-second timeouts retry after thirty seconds.
 ///
 /// # Errors
@@ -25,12 +25,9 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// Returns an error on DHT shutdown or a sequence conflict. Supply a newly
 /// signed item with an increased sequence when changing the list.
 pub async fn republish_server_list(dht: Dht, item: MutableItem) -> Result<()> {
+    n0_error::ensure_any!(item.salt().is_none(), "Pkarr records must not have a salt");
     n0_error::ensure_any!(
-        item.salt() == Some(SERVER_LIST_SALT),
-        "incorrect index-list salt"
-    );
-    n0_error::ensure_any!(
-        item.seq() >= 0 && ServerList::decode(item.value()).is_some(),
+        item.seq() >= 0 && ServerList::decode(item.value(), item.key()).is_some(),
         "invalid server list"
     );
     renew(|| async { dht.put_mutable(item.clone(), None).await.map(|_| ()) }).await

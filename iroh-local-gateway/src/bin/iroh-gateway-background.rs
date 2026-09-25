@@ -114,7 +114,7 @@ async fn start(state: &Path) -> Result<()> {
         loop {
             if let Some(status) = child.try_wait()? {
                 anyhow::bail!(
-                    "gateway exited ({status}); see gateway.log (port 8080 may already be in use)"
+                    "gateway exited ({status}); see gateway.log (port 45475 may already be in use)"
                 );
             }
             if running(state)? && state.join("ready").exists() {

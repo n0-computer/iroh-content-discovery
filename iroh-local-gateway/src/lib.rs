@@ -95,7 +95,6 @@ const SIZE_SLOTS: NonZeroUsize = NonZeroUsize::new(4096).expect("nonzero");
 
 /// Concurrent size requests per collection listing.
 const SIZE_REQUESTS: usize = 16;
-const REPO_URL: &str = "https://github.com/n0-computer/iroh-content-discovery";
 const LISTING_CSS: &str = include_str!("listing.css");
 /// Path separator in listing headings; `<wbr>` lets long paths wrap after it.
 const SEPARATOR: &str = "&nbsp;/&nbsp;<wbr>";
@@ -903,7 +902,6 @@ fn listing(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{LISTING_CSS}</style>\n\
-         <header><a href=\"{REPO_URL}\">iroh content discovery</a></header>\n\
          <h1>{heading}</h1>\n"
     );
     if sizes.is_none() {

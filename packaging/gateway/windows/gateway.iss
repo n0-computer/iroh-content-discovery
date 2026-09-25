@@ -75,6 +75,6 @@ begin
   if CurStep = ssPostInstall then
   begin
     if not Exec(ExpandConstant('{app}\iroh-gateway-background.exe'), '', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
-      SuppressibleMsgBox('Iroh Gateway is installed, but gateway startup failed (port 8080 may already be in use). See %LOCALAPPDATA%\iroh-local-gateway\launcher.log, then run iroh-gateway-background.exe to retry.', mbError, MB_OK, IDOK);
+      SuppressibleMsgBox('Iroh Gateway is installed, but gateway startup failed (port 45475 may already be in use). See %LOCALAPPDATA%\iroh-local-gateway\launcher.log, then run iroh-gateway-background.exe to retry.', mbError, MB_OK, IDOK);
   end;
 end;

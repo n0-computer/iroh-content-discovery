@@ -7,9 +7,9 @@ web server:
 
 ```text
 https://<z32>.blake3.net/path/to/file
-    -> http://<z32>.blake3.localhost:8080/path/to/file
+    -> http://<z32>.blake3.localhost:45475/path/to/file
 https://<public-key>.pkarr.net/path/to/file?x=1
-    -> http://<public-key>.pkarr.localhost:8080/path/to/file?x=1
+    -> http://<public-key>.pkarr.localhost:45475/path/to/file?x=1
 ```
 
 The hash is a 52-character lowercase z-base-32 encoded BLAKE3 digest, and the
@@ -36,7 +36,7 @@ The gateway validates public keys. Both domains use the same port and enable swi
 2. Enable **Developer mode**.
 3. Click **Load unpacked**, then choose this `iroh-link-extension` directory
    (the directory containing `manifest.json`). No build step is required.
-4. Open the extension popup, set the gateway port (default **8080**), leave
+4. Open the extension popup, set the gateway port (default **45475**), leave
    local redirects enabled, and click **Save**.
 5. Start the gateway and open a content link:
 

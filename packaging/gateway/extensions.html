@@ -3,7 +3,7 @@
 <title>Iroh Gateway — browser extensions</title>
 <style>body{font:17px system-ui;max-width:48em;margin:3em auto;padding:0 1em;line-height:1.6}code{background:#eee;padding:.15em .3em}</style>
 <h1>Connect your browser to Iroh Gateway</h1>
-<p>The gateway runs in the background on port <strong>8080</strong>. The extension
+<p>The gateway runs in the background on port <strong>45475</strong>. The extension
 redirects blake3.net and pkarr.net links to it. Install the extension manually;
 the installer does not change browser settings.</p>
 <h2>Chrome or Brave</h2>
@@ -11,7 +11,7 @@ the installer does not change browser settings.</p>
 <li>Open <code>chrome://extensions</code> or <code>brave://extensions</code>.</li>
 <li>Enable <strong>Developer mode</strong>, then choose <strong>Load unpacked</strong>.</li>
 <li>Select the <strong>chrome</strong> folder beside this instructions file.</li>
-<li>Open the extension popup and save port <strong>8080</strong> with redirects enabled.</li>
+<li>Open the extension popup and save port <strong>45475</strong> with redirects enabled.</li>
 </ol>
 <h2>Firefox</h2>
 <p>Firefox 140 or later is required. In regular Firefox, open
@@ -34,8 +34,8 @@ After upgrading the gateway, reload the extension on the browser's extensions
 page. Remove the extension manually when uninstalling the gateway.</p>
 <h2>If links do not work</h2>
 <p>Make sure the gateway is running and the extension port matches. Only one
-application can listen on port 8080; a running Blobtorrent gateway uses the same
-port. Stop that gateway or configure a different port before starting this one.</p>
+application can listen on port 45475. Stop any other application using that
+port or configure a different port before starting this gateway.</p>
 <p>Gateway settings and logs are in <code>%LOCALAPPDATA%\iroh-local-gateway</code>
 on Windows or <code>~/Library/Application Support/iroh-local-gateway</code> on macOS.
 <code>gateway.log</code> records discovery and HTTP activity; <code>launcher.log</code>

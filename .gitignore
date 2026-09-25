@@ -1,5 +1,8 @@
 /target
 /iroh-link-extension/dist/
+/dist/
+/installer-test-logs/
+__pycache__/
 .DS_Store
 *.swp
 /Babylon 5 S01E01 Midnight on the Firing Line.mp4

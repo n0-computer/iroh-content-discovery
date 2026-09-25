@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
         // keeps the name alive.
         publisher.publish_all().await.map_err(anyhow::Error::from)?;
         println!("Published: https://{public_key}.{PKARR_DOMAIN}/");
-        println!("Local origin: http://{public_key}.pkarr.localhost:8080/");
+        println!("Local origin: http://{public_key}.pkarr.localhost:45475/");
         println!("Republishing every ten minutes. Press Ctrl-C to stop.");
         std::future::pending().await
     };
