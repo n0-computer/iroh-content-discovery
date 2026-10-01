@@ -371,6 +371,11 @@ Debian package. The package cannot reach user services, so run
 `systemctl --user disable --now iroh-link-gateway` as each user who enabled one
 before removing it.
 
+On Arch Linux, the AUR package
+[`iroh-link-gateway-bin`](https://aur.archlinux.org/packages/iroh-link-gateway-bin)
+installs the same files from the release archive, for example with
+`yay -S iroh-link-gateway-bin`.
+
 Extensions are local files for manual installation; browser profiles are not
 modified. Open `extensions/Install extensions.html` on Windows or
 `~/Applications/Iroh Link Gateway Extensions/Install extensions.html` on macOS.
@@ -431,12 +436,23 @@ python packaging/gateway/linux/packages.py <target>
 
 Installers, Linux archives and packages, and SHA-256 files are written to
 `dist/`. The macOS app is ad-hoc signed; the installer is not Developer ID signed
-or notarized. Windows installers are unsigned. Native install/upgrade/uninstall smoke tests run on ephemeral CI runners;
-the Linux smoke test also starts and stops the gateway from the unpacked archive
-in a temporary directory, and the package smoke test installs, upgrades, and
-removes each package in a Debian, Fedora, and Arch Linux container. Those parts
-also run outside CI.
+or notarized. Windows installers are unsigned. Native install/upgrade/uninstall
+smoke tests run on ephemeral CI runners; the Linux smoke test also starts and
+stops the gateway from the unpacked archive in a temporary directory, the
+package smoke test installs, upgrades, and removes each package in a Debian,
+Fedora, and Arch Linux container, and the AUR smoke test builds the AUR package
+from the x64 archive and checks it with namcap. Those parts also run outside CI.
 The `Gateway installers` workflow builds PR artifacts and supports manual runs;
 only `gateway-v*` tags publish GitHub release assets. The Linux packages are
 release assets only; there is no APT, DNF, or pacman repository. No Intel macOS
 binary is built.
+
+### Publishing to the AUR
+
+After a `gateway-v*` release is published, the `aur` job renders
+`packaging/gateway/aur/PKGBUILD.in` with the release's version and archive
+checksums, builds it, and pushes it with `.SRCINFO` to the
+`iroh-link-gateway-bin` AUR repository. Edit the template here, not in the AUR.
+The job needs the `AUR_SSH_PRIVATE_KEY` secret in the `aur` environment: the
+private half of an SSH key registered with an AUR account that maintains the
+package.

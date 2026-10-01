@@ -91,6 +91,9 @@ jobs:
           python packaging/gateway/linux/smoke.py
           python packaging/gateway/linux/packages.py ${{ matrix.target }}
           python packaging/gateway/linux/smoke_packages.py
+      - name: Build and test AUR package
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: python packaging/gateway/aur/smoke.py
       - uses: actions/upload-artifact@v4
         with:
           name: gateway-${{ matrix.target }}
@@ -131,3 +134,28 @@ jobs:
           else
             gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "$RELEASE_TAG"
           fi
+  aur:
+    if: startsWith(github.ref, 'refs/tags/gateway-v')
+    needs: publish
+    runs-on: ubuntu-latest
+    # The AUR_SSH_PRIVATE_KEY secret lives in this environment, which only
+    # gateway-v* tags may deploy to.
+    environment: aur
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gateway-*-linux-musl
+          merge-multiple: true
+          path: dist
+      - run: python packaging/gateway/aur/pkgbuild.py aur
+      - uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        with:
+          pkgname: iroh-link-gateway-bin
+          pkgbuild: aur/PKGBUILD
+          commit_username: n0 team
+          commit_email: hello@n0.computer
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: Update to ${{ github.ref_name }}
+          # Build the package from the just-published release before pushing.
+          test: true
