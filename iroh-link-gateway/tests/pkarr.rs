@@ -3,7 +3,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
-use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
+use iroh_blobs::{BlobsProtocol, format::collection::Collection, store::mem::MemStore};
 use iroh_link_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{AddrIndex, BLAKE3_DOMAIN, Resolver, infohash_from_blake3};
 use n0_mainline::{Dht, MutableItem, SigningKey};
@@ -76,6 +76,8 @@ async fn run() {
     let text = b"served through a Pkarr name\n".to_vec();
     let store = MemStore::new();
     let text_tag = store.blobs().add_bytes(text.clone()).await.unwrap();
+    let website = Collection::from_iter([("index.html", text_tag.hash)]);
+    let website_tag = website.store(&store).await.unwrap();
     let provider = Endpoint::builder(presets::Minimal)
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .unwrap()
@@ -92,13 +94,15 @@ async fn run() {
         .publish(provider.secret_key())
         .await
         .unwrap();
-    provider_dht
-        .announce_peer(
-            infohash_from_blake3(&blake3::Hash::from_bytes(*text_tag.hash.as_bytes())).into(),
-            None,
-        )
-        .await
-        .unwrap();
+    for hash in [text_tag.hash, website_tag.hash()] {
+        provider_dht
+            .announce_peer(
+                infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes())).into(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
     let index = AddrIndex::udp(gateway_dht.clone(), server_addr)
         .await
         .unwrap();
@@ -187,6 +191,34 @@ async fn run() {
     // Content that the key does not name is still a miss.
     let response = client.get(format!("{url}/missing")).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A collection with an `index.html` is served as a page at the key's root,
+    // whose URL needs a slash for relative links to resolve.
+    let target = format!(
+        "{}.{BLAKE3_DOMAIN}",
+        z32::encode(website_tag.hash().as_bytes())
+    );
+    publish(&publisher, &key, &target).await;
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        response.headers()["location"],
+        format!("/pkarr/{encoded_key}/")
+    );
+    assert_eq!(response.headers()["cache-control"], "public, no-cache");
+    let response = client.get(format!("{url}/")).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), text);
+    let response = origin_client
+        .get(format!(
+            "http://{encoded_key}.pkarr.localhost:{}/",
+            listen_addr.port()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), text);
 
     publish(&publisher, &key, ".").await;
     assert_eq!(

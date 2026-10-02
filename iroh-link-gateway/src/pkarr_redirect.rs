@@ -170,7 +170,9 @@ pub(crate) async fn redirect(
             .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "path is not valid UTF-8"))?
             .into_owned();
         return if path.is_empty() {
-            serve_root(&gateway, root, hash, query, method, headers).await
+            // `/pkarr/{key}` has no slash; a subdomain's root is always `/`.
+            let slash = subdomain.is_some() || rest.contains('/');
+            serve_root(&gateway, root, hash, slash, query, method, headers).await
         } else {
             serve_path(gateway, root, hash, path, query, method, headers).await
         };

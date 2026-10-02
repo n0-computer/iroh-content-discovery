@@ -76,6 +76,10 @@ async fn run() {
         ("site/<unsafe>.txt", unannounced_tag.hash),
     ]);
     let collection_tag = collection.store(&store).await.unwrap();
+    // A website: `index.html` at the top level, served instead of a listing.
+    let website =
+        Collection::from_iter([("index.html", text_tag.hash), ("style.css", text_tag.hash)]);
+    let website_tag = website.store(&store).await.unwrap();
     let provider = Endpoint::builder(presets::Minimal)
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .unwrap()
@@ -96,6 +100,7 @@ async fn run() {
         empty_tag.hash,
         aligned_tag.hash,
         collection_tag.hash(),
+        website_tag.hash(),
     ] {
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
         publisher_dht
@@ -131,6 +136,12 @@ async fn run() {
         .timeout(Duration::from_secs(15))
         .build()
         .unwrap();
+    let no_redirect = client_builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
     let url = |hash: Hash| format!("{base}/blake3/{}", z32::encode(hash.as_bytes()));
     let video_url = url(video_tag.hash);
     let collection_hash = z32::encode(collection_tag.hash().as_bytes());
@@ -141,16 +152,78 @@ async fn run() {
     let index = res.text().await.unwrap();
     assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/site/\"")));
     assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/media/\"")));
+    // A directory with an `index.html` serves it instead of a listing.
     let res = client
         .get(format!("{collection_url}/site/"))
         .send()
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let index = res.text().await.unwrap();
-    assert!(index.contains(&format!("/blake3/{collection_hash}/site/index.html")));
-    assert!(index.contains("&lt;unsafe&gt;.txt"));
-    assert!(index.contains("site/%3Cunsafe%3E.txt"));
+    assert_eq!(res.headers()["content-type"], "text/html; charset=utf-8");
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    // Without its slash, relative links in the page would resolve against the
+    // parent, so the directory URL redirects first and keeps the query.
+    let res = no_redirect
+        .get(format!("{collection_url}/site?x=1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        res.headers()["location"],
+        format!("/blake3/{collection_hash}/site/?x=1")
+    );
+    // `?download` saves the page under its own name.
+    let res = client
+        .get(format!("{collection_url}/site/?download"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.headers()["content-disposition"],
+        "attachment; filename=\"index.html\"; filename*=UTF-8''index.html"
+    );
+    // `?listing` lists the directory anyway, and its links keep the flag.
+    for suffix in ["/site?listing", "/site/?listing"] {
+        let res = no_redirect
+            .get(format!("{collection_url}{suffix}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{suffix}");
+        let index = res.text().await.unwrap();
+        assert!(index.contains(&format!("/blake3/{collection_hash}/site/index.html")));
+        assert!(index.contains("&lt;unsafe&gt;.txt"));
+        assert!(index.contains("site/%3Cunsafe%3E.txt"));
+        assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/?listing\">../")));
+        assert!(index.contains("<a href=\"?sizes&amp;listing\">Fetch sizes</a>"));
+    }
+    // An `index.html` at the top level makes the root URL a page too.
+    let website_hash = z32::encode(website_tag.hash().as_bytes());
+    let website_url = format!("{base}/blake3/{website_hash}");
+    let res = no_redirect.get(&website_url).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        res.headers()["location"],
+        format!("/blake3/{website_hash}/")
+    );
+    assert_eq!(
+        res.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    let res = client.get(&website_url).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.url().path(), format!("/blake3/{website_hash}/"));
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = no_redirect
+        .get(format!("{website_url}?listing"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = res.text().await.unwrap();
+    assert!(html.contains(&format!("href=\"/blake3/{website_hash}/index.html\"")));
+    assert!(html.contains(&format!("href=\"/blake3/{website_hash}/style.css\"")));
     let res = client.head(&collection_url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["content-type"], "text/html; charset=utf-8");
@@ -559,7 +632,9 @@ async fn run() {
         .timeout(Duration::from_secs(15))
         .resolve(&subdomain(&collection_hash), listen_addr)
         .resolve(&subdomain(&video_hash), listen_addr)
+        .resolve(&subdomain(&website_hash), listen_addr)
         .resolve("other.localhost", listen_addr)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
     let origin = |hash: &str| format!("http://{}:{}", subdomain(hash), listen_addr.port());
@@ -581,6 +656,20 @@ async fn run() {
     )));
     assert!(html.contains("href=\"/notes/hello%20world.txt\""));
     assert!(html.contains(&format!("<td class=\"size\">{} B</td>", text.len())));
+    // A subdomain's root is `/`, so its `index.html` is served without a redirect.
+    let res = client
+        .get(format!("{}/", origin(&website_hash)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
+    let res = client.get(format!("{site}/site")).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(res.headers()["location"], "/site/");
+    let res = client.get(format!("{site}/site/")).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), text);
     let res = client
         .get(format!("{site}/site/style.css"))
         .send()

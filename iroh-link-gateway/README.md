@@ -65,7 +65,9 @@ http://127.0.0.1:45475/blake3/<z32>
 ```
 
 For a sendme/swarmie collection root, `/blake3/<z32>` automatically shows a
-directory listing; see [Collections](#collections). Raw blobs continue to
+directory listing. If the collection has a top-level `index.html`, it redirects
+to `/blake3/<z32>/` and serves that page instead; see
+[Collections](#collections). Raw blobs continue to
 stream directly from the same bare URL. Automatic collection detection is
 limited to roots of at most 1 MiB; larger roots are served as raw blobs.
 
@@ -148,8 +150,10 @@ packets without a supported HTTPS target `422`, invalid packets or failed
 lookups `502`, and lookup timeouts `504`.
 
 Content targets are served inline, so the key stays in the address bar, the
-bytes stay verified against the hash, and collections list in place with the
-same query flags as `/blake3`. The key keeps one origin as its content
+bytes stay verified against the hash, and collections are served in place with
+the same query flags as `/blake3`. A collection with a top-level `index.html`
+redirects from `/pkarr/<key>` to `/pkarr/<key>/` (`301`, revalidated like the
+content) and serves the page. The key keeps one origin as its content
 changes, which a per-hash URL cannot. This route can be used directly on
 localhost; the extension also routes
 `https://<public-key>.pkarr.net/path?query` to
@@ -226,9 +230,12 @@ http://127.0.0.1:45475/blake3/<z32>/<dir>/<name>
 
 Collection names are treated as `/`-separated paths. A path that matches a
 file name serves the file like a blob, with ranges, and a MIME type from the
-file extension where known. Any other path is listed as a directory: an HTML
-page with its subdirectories, its files, and a link to the parent. The bare
-`/blake3/<z32>` shows the top level if the blob is detected as a collection;
+file extension where known. Any other path is a directory. A directory that
+contains an `index.html` serves that file, so a collection can be a website;
+its URL first redirects to the same URL with a trailing slash, so relative links
+in the page resolve inside the directory. Other directories are listed: an HTML
+page with their subdirectories, their files, and a link to the parent. The bare
+`/blake3/<z32>` serves the top level if the blob is detected as a collection;
 `/blake3/<z32>/` always treats it as one.
 
 All collection reads cap the root HashSeq at 1 MiB (at most 32,767 files).
@@ -244,9 +251,12 @@ Query flags:
   reads it directly, skipping automatic detection, and returns `422` if it is
   not a collection or exceeds either collection limit.
 - `?download` saves the response instead of showing it, under the file's name
-  in the collection, or under the hash for a bare blob. On a root URL it saves
+  in the collection, as `index.html` for a directory that serves one, or under
+  the hash for a bare blob. On a root URL it saves
   the underlying hash sequence instead of a listing, and takes precedence over
   `?tree`. Listings link to it in a `Download` column.
+- `?listing` on a directory shows its listing even if it has an `index.html`.
+  Links in the listing keep the flag.
 - `?sizes` on a listing shows file sizes. The gateway fetches the last chunk
   of each listed file, which verifies its size, up to 16 at a time.
 - `?debug` on any URL of a hash shows a diagnostic page instead of the

@@ -90,6 +90,8 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'#')
     .add(b'?')
     .add(b'/')
+    // Browsers read `\` as `/` in http URLs.
+    .add(b'\\')
     .add(b'<')
     .add(b'>')
     .add(b'"')
@@ -104,6 +106,8 @@ const SIZE_SLOTS: NonZeroUsize = NonZeroUsize::new(4096).expect("nonzero");
 /// Concurrent size requests per collection listing.
 const SIZE_REQUESTS: usize = 16;
 const LISTING_CSS: &str = include_str!("listing.css");
+/// The file a directory serves instead of its listing.
+const INDEX_FILE: &str = "index.html";
 /// Path separator in listing headings; `<wbr>` lets long paths wrap after it.
 const SEPARATOR: &str = "&nbsp;/&nbsp;<wbr>";
 
@@ -156,10 +160,11 @@ impl Gateway {
 
     /// Returns the routes for blobs and paths inside collections, plus CORS preflight.
     ///
-    /// `/blake3/{hash}` serves a blob, or lists the top level of a detected
-    /// collection. `/blake3/{hash}/{path}` serves a file of a collection or
-    /// lists a directory, where directories are the `/`-separated prefixes of
-    /// names. Listings show file sizes with `?sizes`.
+    /// `/blake3/{hash}` serves a blob, or the top level of a detected
+    /// collection. `/blake3/{hash}/{path}` serves a file of a collection or a
+    /// directory, where directories are the `/`-separated prefixes of names.
+    /// A directory serves its `index.html` if it has one, and is listed
+    /// otherwise or with `?listing`. Listings show file sizes with `?sizes`.
     ///
     /// `/pkarr/{key}` resolves a signed HTTPS target and temporarily redirects.
     ///
@@ -705,6 +710,23 @@ impl Root {
             caching,
         }
     }
+
+    /// Returns the URL path of `path` in the collection, percent-encoded.
+    fn link(&self, path: &str) -> String {
+        let path = path
+            .split('/')
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        let link = format!("{}/{path}", self.base);
+        // A name with an empty first segment would make `//host/...`, which
+        // names another host; `/.` keeps it a path on this one.
+        if link.starts_with("//") {
+            format!("/.{link}")
+        } else {
+            link
+        }
+    }
 }
 
 /// Parses a hash from a path segment, reporting a bad request if invalid.
@@ -722,15 +744,21 @@ async fn blob(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let hash = parse_path_hash(&encoded)?;
+    // A subdomain's root is `/`, which the rewrite routes here without a slash.
+    let slash = subdomain.is_some();
     let root = Root::new(encoded, subdomain);
-    serve_root(&gateway, root, hash, query, method, headers).await
+    serve_root(&gateway, root, hash, slash, query, method, headers).await
 }
 
-/// Serves the root of `hash`: a blob, or a listing if it is a collection.
+/// Serves the root of `hash`: a blob, or the top directory if it is a collection.
+///
+/// `slash` says whether the requested URL ends with `/`, as a directory URL
+/// must before an `index.html` with relative links can be served from it.
 pub(crate) async fn serve_root(
     gateway: &Gateway,
     root: Root,
     hash: Hash,
+    slash: bool,
     query: Option<String>,
     method: Method,
     headers: HeaderMap,
@@ -738,6 +766,7 @@ pub(crate) async fn serve_root(
     if has_flag(query.as_deref(), "debug") {
         return Ok(debug_page::providers(gateway, hash).await);
     }
+    let url_path = if slash { "/" } else { "" };
     let download = has_flag(query.as_deref(), "download");
     // `?tree` skips automatic detection, but still enforces collection limits.
     // `?download` wins, and asks for the bytes.
@@ -745,16 +774,8 @@ pub(crate) async fn serve_root(
         let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
             .await
             .map_err(HttpError::timeout)??;
-        return collection_entry(
-            gateway,
-            &root,
-            collection,
-            String::new(),
-            query,
-            method,
-            headers,
-        )
-        .await;
+        return collection_entry(gateway, &root, collection, url_path, query, method, headers)
+            .await;
     }
     let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
@@ -770,16 +791,8 @@ pub(crate) async fn serve_root(
         )
         .await
     {
-        return collection_entry(
-            gateway,
-            &root,
-            collection,
-            String::new(),
-            query,
-            method,
-            headers,
-        )
-        .await;
+        return collection_entry(gateway, &root, collection, url_path, query, method, headers)
+            .await;
     }
     let encoded = z32::encode(hash.as_bytes());
     let download = download.then(|| encoded.clone());
@@ -844,16 +857,20 @@ pub(crate) async fn serve_path(
     let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
         .await
         .map_err(HttpError::timeout)??;
-    let path = path.strip_prefix('/').map(str::to_owned).unwrap_or(path);
-    collection_entry(&gateway, &root, collection, path, query, method, headers).await
+    let path = format!("/{}", path.strip_prefix('/').unwrap_or(&path));
+    collection_entry(&gateway, &root, collection, &path, query, method, headers).await
 }
 
-/// Serves the file at `path` in a collection, or lists it as a directory.
+/// Serves the file at `url_path` in a collection, or the directory there.
+///
+/// `url_path` is the requested URL path after the root's base: empty for the
+/// bare root, then `/`, `/dir`, `/dir/`, or `/dir/file`. A directory serves
+/// its `index.html` unless `?listing` asks for its listing, or it has none.
 async fn collection_entry(
     gateway: &Gateway,
     root: &Root,
     source: CollectionSource,
-    path: String,
+    url_path: &str,
     query: Option<String>,
     method: Method,
     headers: HeaderMap,
@@ -862,7 +879,11 @@ async fn collection_entry(
         collection,
         connection,
     } = source;
-    // A name can be both a file and the prefix of other names. List the
+    // A page's relative links resolve against its directory only when the URL
+    // ends with a slash.
+    let slash = url_path.ends_with('/');
+    let path = url_path.strip_prefix('/').unwrap_or(url_path).to_owned();
+    // A name can be both a file and the prefix of other names. Serve the
     // directory then, with or without a trailing slash, so its entries stay
     // reachable; the file keeps its own name only when nothing is below it.
     let prefix = format!("{path}/");
@@ -908,6 +929,42 @@ async fn collection_entry(
         StatusCode::NOT_FOUND,
         "path not found in collection",
     ))?;
+    let listing_flag = has_flag(query.as_deref(), "listing");
+    if !listing_flag
+        && let Some(&(_, hash)) = entries.files.iter().find(|(name, _)| *name == INDEX_FILE)
+    {
+        if !slash {
+            let mut location = root.link(&dir);
+            if let Some(query) = &query {
+                location.push('?');
+                location.push_str(query);
+            }
+            return Ok(Response::builder()
+                .status(StatusCode::MOVED_PERMANENTLY)
+                .header(header::LOCATION, location)
+                .header(header::CACHE_CONTROL, root.caching.header())
+                .body(Body::empty())
+                .expect("valid response"));
+        }
+        let name = format!("{dir}{INDEX_FILE}");
+        let source = tokio::time::timeout(
+            LOOKUP_TIMEOUT,
+            gateway.source_on_connection(connection, hash, Some(&name)),
+        )
+        .await
+        .map_err(HttpError::timeout)??;
+        let download = has_flag(query.as_deref(), "download").then(|| INDEX_FILE.to_owned());
+        return serve_blob(
+            source,
+            hash,
+            &z32::encode(hash.as_bytes()),
+            download,
+            root.caching,
+            method,
+            headers,
+        )
+        .await;
+    }
     let with_sizes = has_flag(query.as_deref(), "sizes");
     let sizes = if with_sizes {
         let hashes = entries.files.iter().map(|(_, hash)| *hash).collect();
@@ -925,7 +982,13 @@ async fn collection_entry(
         // availability can change between requests.
         .header(header::CACHE_CONTROL, "public, no-cache")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .body(Body::from(listing(root, &dir, &entries, sizes.as_ref())))
+        .body(Body::from(listing(
+            root,
+            &dir,
+            &entries,
+            sizes.as_ref(),
+            listing_flag,
+        )))
         .expect("valid response"))
 }
 
@@ -964,24 +1027,24 @@ impl<'a> Entries<'a> {
 /// Renders the HTML listing of `dir` in the collection at `root`.
 ///
 /// With `sizes`, file sizes are shown and directory links keep `?sizes`.
-/// Without, the page links to the same listing with sizes.
+/// Without, the page links to the same listing with sizes. With
+/// `listing_flag`, links to directories and to fetch sizes keep `?listing`,
+/// so directories with an `index.html` are listed too.
 fn listing(
     root: &Root,
     dir: &str,
     entries: &Entries<'_>,
     sizes: Option<&HashMap<Hash, u64>>,
+    listing_flag: bool,
 ) -> String {
-    let base = &root.base;
+    let link = |path: &str| html_escape(&root.link(path));
     let root = &root.encoded;
     let title = html_escape(&format!("{root}/{dir}"));
-    let query = if sizes.is_some() { "?sizes" } else { "" };
-    let link = |path: &str| {
-        let path = path
-            .split('/')
-            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
-            .collect::<Vec<_>>()
-            .join("/");
-        html_escape(&format!("{base}/{path}"))
+    let query = match (sizes.is_some(), listing_flag) {
+        (false, false) => "",
+        (true, false) => "?sizes",
+        (false, true) => "?listing",
+        (true, true) => "?sizes&amp;listing",
     };
     // Breadcrumbs: every ancestor links to its listing, the current directory
     // is plain text.
@@ -1014,7 +1077,14 @@ fn listing(
          <h1>{heading}</h1>\n"
     );
     if sizes.is_none() {
-        html.push_str("<p class=\"meta\"><a href=\"?sizes\">Fetch sizes</a></p>\n");
+        let fetch = if listing_flag {
+            "?sizes&amp;listing"
+        } else {
+            "?sizes"
+        };
+        html.push_str(&format!(
+            "<p class=\"meta\"><a href=\"{fetch}\">Fetch sizes</a></p>\n"
+        ));
     }
     html.push_str("<table>\n");
     if let Some(trimmed) = dir.strip_suffix('/') {
@@ -1544,6 +1614,18 @@ mod tests {
         })
         .await
         .expect("collection limit test timed out");
+    }
+
+    #[test]
+    fn links_stay_on_the_origin() {
+        let root = Root::at("root".into(), String::new(), Caching::Immutable);
+        assert_eq!(root.link("a b/"), "/a%20b/");
+        // Browsers would read these as `//evil.com/`, another host.
+        assert_eq!(root.link("\\evil.com/"), "/%5Cevil.com/");
+        assert_eq!(root.link("/evil.com/"), "/.//evil.com/");
+        let root = Root::at("root".into(), "/blake3/root".into(), Caching::Immutable);
+        assert_eq!(root.link(""), "/blake3/root/");
+        assert_eq!(root.link("/evil.com/"), "/blake3/root//evil.com/");
     }
 
     #[test]
