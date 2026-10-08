@@ -327,7 +327,11 @@ impl Gateway {
             Some(self.0.providers.clone()),
         );
         let provider = match tokio::time::timeout(DISCOVERY_TIMEOUT, verified.next()).await {
-            Ok(Some(provider)) => provider,
+            Ok(Some(provider)) => {
+                // Only a provider that passed its probe renews its hint.
+                self.0.hints.confirm(hash, provider);
+                provider
+            }
             Ok(None) => {
                 self.0.providers.record_missing(hash, Miss::NotFound);
                 return Err(NOT_FOUND);

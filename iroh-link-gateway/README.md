@@ -124,8 +124,11 @@ continues as usual, so a stale hint does not break announced content. A
 provider is only reachable if the gateway can look up its address from its ID,
 for example through the n0 DNS service where iroh-share daemons publish.
 
-Hints are kept in memory. After a gateway restart, a URL that still carries
-`?provider=` teaches the gateway again; one without it falls back to Mainline.
+Hints are for the pages of one visit, not storage. They are kept in memory,
+and each expires ten minutes after a URL last named it or it last passed a
+probe for the hash; a failed probe does not renew it. After that, or after a
+gateway restart, a URL that still carries `?provider=` teaches the gateway
+again; one without it falls back to Mainline.
 
 This suits content you are comfortable sharing with whoever has the link: the
 link contains the provider's endpoint ID, and if no named provider answers, the

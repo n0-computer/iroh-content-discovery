@@ -5,13 +5,19 @@
 //! providers for the hash, in memory only, so the page's subresources, which
 //! carry no query, find them too. A hint only adds candidates: the URL means
 //! the same content either way, and Mainline remains the fallback.
+//!
+//! Hints are for the pages of one visit, not storage: each expires
+//! [`HINT_TTL`] after a URL last named it or it last served the hash. A failed
+//! probe neither removes nor renews it, so a page survives a brief outage but
+//! a provider that stays gone is forgotten.
 
-use std::{num::NonZeroUsize, str::FromStr, sync::Mutex};
+use std::{num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
 
 use axum::http::StatusCode;
 use iroh::EndpointId;
 use iroh_blobs::Hash;
 use lru::LruCache;
+use tokio::time::Instant;
 
 use crate::{HttpError, parse_z32_bytes};
 
@@ -23,10 +29,22 @@ const MAX_PER_URL: usize = 4;
 const MAX_PER_HASH: usize = 8;
 /// Hashes remembered at once.
 const SLOTS: NonZeroUsize = NonZeroUsize::new(1024).expect("nonzero");
+/// How long a hint lasts after it was last named or last served the hash.
+///
+/// Longer than the provider cache's five minutes, so a page left open still
+/// gets a head start for its next request.
+const HINT_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// A provider named for a hash, and when it was last named or served it.
+#[derive(Debug, Clone, Copy)]
+struct Hint {
+    provider: EndpointId,
+    confirmed: Instant,
+}
 
 /// Providers that links named, per hash.
 #[derive(Debug)]
-pub(crate) struct Hints(Mutex<LruCache<Hash, Vec<EndpointId>>>);
+pub(crate) struct Hints(Mutex<LruCache<Hash, Vec<Hint>>>);
 
 impl Default for Hints {
     fn default() -> Self {
@@ -51,21 +69,43 @@ impl Hints {
 
     /// Adds `providers` for `hash`, ahead of the ones known before.
     fn add(&self, hash: Hash, providers: &[EndpointId]) {
+        let confirmed = Instant::now();
         let mut hints = self.0.lock().expect("poisoned");
         let known = hints.get_or_insert_mut(hash, Vec::new);
-        known.retain(|provider| !providers.contains(provider));
-        known.splice(0..0, providers.iter().copied());
+        known.retain(|hint| !providers.contains(&hint.provider));
+        known.splice(
+            0..0,
+            providers.iter().map(|&provider| Hint {
+                provider,
+                confirmed,
+            }),
+        );
         known.truncate(MAX_PER_HASH);
     }
 
-    /// Returns the providers known for `hash`, most recently named first.
+    /// Renews `provider` for `hash` if it is a hint, since it just served the hash.
+    pub(crate) fn confirm(&self, hash: Hash, provider: EndpointId) {
+        let mut hints = self.0.lock().expect("poisoned");
+        if let Some(hint) = hints
+            .get_mut(&hash)
+            .and_then(|known| known.iter_mut().find(|hint| hint.provider == provider))
+        {
+            hint.confirmed = Instant::now();
+        }
+    }
+
+    /// Returns the live providers known for `hash`, most recently named first.
     pub(crate) fn get(&self, hash: Hash) -> Vec<EndpointId> {
-        self.0
-            .lock()
-            .expect("poisoned")
-            .get(&hash)
-            .cloned()
-            .unwrap_or_default()
+        let mut hints = self.0.lock().expect("poisoned");
+        let Some(known) = hints.get_mut(&hash) else {
+            return Vec::new();
+        };
+        known.retain(|hint| hint.confirmed.elapsed() < HINT_TTL);
+        let live = known.iter().map(|hint| hint.provider).collect();
+        if known.is_empty() {
+            hints.pop(&hash);
+        }
+        live
     }
 }
 
@@ -139,5 +179,22 @@ mod tests {
         assert_eq!(known.len(), MAX_PER_HASH);
         assert_eq!(known[0], id(19));
         assert!(hints.get(Hash::new(b"other")).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hints_expire_unless_named_again_or_confirmed() {
+        let hints = Hints::default();
+        let hash = Hash::new(b"content");
+        hints.add(hash, &[id(1), id(2), id(3)]);
+        tokio::time::advance(HINT_TTL / 2).await;
+        // Named again by a URL, and serving the hash, both renew a hint.
+        hints.add(hash, &[id(2)]);
+        hints.confirm(hash, id(3));
+        // Confirming a provider that is no hint adds nothing.
+        hints.confirm(hash, id(9));
+        tokio::time::advance(HINT_TTL / 2).await;
+        assert_eq!(hints.get(hash), [id(2), id(3)]);
+        tokio::time::advance(HINT_TTL).await;
+        assert!(hints.get(hash).is_empty());
     }
 }
