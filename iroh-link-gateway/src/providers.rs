@@ -18,6 +18,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) enum Provenance {
     /// Announced for the content and found through discovery: a claim.
     Discovered,
+    /// Named by a link for the content: also a claim.
+    Linked,
     /// Passed a probe for the content before.
     ///
     /// Probed again all the same for now. A recent or fast probe could let a

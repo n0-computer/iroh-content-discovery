@@ -44,6 +44,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::{Instrument, debug, debug_span, warn};
 
 mod debug_page;
+mod hints;
 mod pkarr_redirect;
 mod provider_cache;
 mod providers;
@@ -58,6 +59,11 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// provider, so a lookup that runs out of time is recorded as such before the
 /// request as a whole is abandoned.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long providers named by links get before Mainline is asked.
+///
+/// A provider that answers in time is used without a Mainline lookup, so the
+/// hash's interest is not shown to the DHT at all.
+const HINT_HEAD_START: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
 /// Maximum HashSeq size: one metadata hash and at most 32,767 file hashes.
@@ -122,6 +128,8 @@ struct Inner {
     pkarr: Mutex<pkarr_redirect::Cache>,
     /// Recently verified providers and recently failed lookups, per hash.
     providers: Arc<provider_cache::ProviderCache>,
+    /// Providers that links named, per hash, asked before Mainline.
+    hints: hints::Hints,
     // Reuse one provider for repeated video seeks, with bounded metadata memory.
     cache: Mutex<LruCache<Hash, Source>>,
     collections: Mutex<LruCache<Hash, CollectionSource>>,
@@ -152,6 +160,7 @@ impl Gateway {
             classifier: MimeClassifier::new(),
             pkarr: Mutex::new(pkarr_redirect::Cache::default()),
             providers: Arc::default(),
+            hints: hints::Hints::default(),
             cache: Mutex::new(LruCache::new(SOURCE_SLOTS)),
             collections: Mutex::new(LruCache::new(SOURCE_SLOTS)),
             sizes: Mutex::new(LruCache::new(SIZE_SLOTS)),
@@ -165,6 +174,10 @@ impl Gateway {
     /// directory, where directories are the `/`-separated prefixes of names.
     /// A directory serves its `index.html` if it has one, and is listed
     /// otherwise or with `?listing`. Listings show file sizes with `?sizes`.
+    ///
+    /// `?provider={endpoint-id}`, which may repeat, names providers to ask
+    /// before Mainline. The gateway remembers them for the hash in memory, so
+    /// requests without the query, like a page's subresources, use them too.
     ///
     /// `/pkarr/{key}` resolves a signed HTTPS target and temporarily redirects.
     ///
@@ -254,7 +267,13 @@ impl Gateway {
         // A page asking for the same unavailable hash many times costs one
         // lookup. Other failures, like a blob that is not a collection, are
         // not remembered, so they cannot poison valid requests.
-        match self.0.providers.missing(hash) {
+        let hinted = self.0.hints.get(hash);
+        // A lookup that failed before a link named a provider must not block it.
+        match hinted
+            .is_empty()
+            .then(|| self.0.providers.missing(hash))
+            .flatten()
+        {
             Some(Miss::NotFound) => {
                 debug!("no provider found recently; not looking again yet");
                 return Err(NOT_FOUND);
@@ -275,20 +294,32 @@ impl Gateway {
         let known = self.0.providers.providers(hash);
         debug!(
             infohash = %iroh_mainline_endpoint_discovery::infohash_hex(&infohash),
+            hinted = hinted.len(),
             known = known.len(),
             "looking up content provider"
         );
-        let candidates = stream::iter(
-            known
-                .into_iter()
-                .map(|(provider, probed)| (provider, Provenance::Verified(probed))),
-        )
-        .chain(
-            self.0
-                .resolver
+        // Providers named by links go first and get a head start: if one
+        // answers in time, the lookup ends before Mainline is asked.
+        let head_start = if hinted.is_empty() {
+            Duration::ZERO
+        } else {
+            HINT_HEAD_START
+        };
+        let resolver = self.0.resolver.clone();
+        let discovered = stream::once_future(tokio::time::sleep(head_start)).flat_map(move |()| {
+            resolver
                 .resolve_stream(infohash.into())
-                .map(|provider| (provider, Provenance::Discovered)),
-        );
+                .map(|provider| (provider, Provenance::Discovered))
+        });
+        let candidates = stream::iter(
+            hinted
+                .into_iter()
+                .map(|provider| (provider, Provenance::Linked)),
+        )
+        .chain(stream::iter(known.into_iter().map(|(provider, probed)| {
+            (provider, Provenance::Verified(probed))
+        })))
+        .chain(discovered);
         let mut verified = verified_providers(
             self.0.endpoint.clone(),
             hash,
@@ -537,6 +568,7 @@ pub enum ServeError {
     },
 }
 
+#[derive(Debug)]
 struct HttpError(StatusCode, &'static str);
 
 impl HttpError {
@@ -800,6 +832,7 @@ pub(crate) async fn serve_root(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
+    gateway.0.hints.add_from_query(hash, query.as_deref())?;
     if has_flag(query.as_deref(), "debug") {
         return Ok(debug_page::providers(gateway, hash).await);
     }
@@ -887,6 +920,7 @@ pub(crate) async fn serve_path(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
+    gateway.0.hints.add_from_query(hash, query.as_deref())?;
     // Providers are per root hash, so `?debug` shows the same page on any path.
     if has_flag(query.as_deref(), "debug") {
         return Ok(debug_page::providers(&gateway, hash).await);

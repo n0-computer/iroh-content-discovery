@@ -103,6 +103,35 @@ Only loopback HTTP listeners are accepted, including `127.0.0.1` and `::1`.
 There is no TLS configuration. The iroh connection to the content peer remains
 encrypted and authenticated.
 
+## Named providers
+
+Content does not have to be announced on Mainline. A URL can name an endpoint
+that serves it with `provider`, which may repeat up to four times:
+
+```text
+https://<z32>.blake3.net/<path>?provider=<endpoint-id>
+```
+
+The endpoint ID is accepted in z-base-32 or in hex. The extension forwards the
+query unchanged. The gateway remembers the providers for the hash, at most eight
+and most recently named first, so requests without the query, such as a page's
+subresources, use them too. The URL and its origin are the same with or
+without the hint.
+
+Named providers are probed first and get a two-second head start. If one passes
+its probe in that time, Mainline is not asked at all; otherwise the lookup
+continues as usual, so a stale hint does not break announced content. A
+provider is only reachable if the gateway can look up its address from its ID,
+for example through the n0 DNS service where iroh-share daemons publish.
+
+Hints are kept in memory. After a gateway restart, a URL that still carries
+`?provider=` teaches the gateway again; one without it falls back to Mainline.
+
+This suits content you are comfortable sharing with whoever has the link: the
+link contains the provider's endpoint ID, and if no named provider answers, the
+gateway asks Mainline for the hash's infohash. It is not a mechanism for
+private content.
+
 ## Pkarr names
 
 Publish a test redirect and keep it alive with the included example:
@@ -272,7 +301,8 @@ Query flags:
   probe of that endpoint took or why it failed. On a Pkarr URL it shows every
   answer for the key, the newest record in the zone format the iroh-share GUI
   uses, and a link to the debug page of the content it points to. It bypasses all caches
-  and takes up to about half a minute.
+  and takes up to about half a minute. Providers that links named for the hash
+  are listed and probed first.
 
 The gateway discovers the provider
 using the **root hash** and fetches files from that same provider, so child
