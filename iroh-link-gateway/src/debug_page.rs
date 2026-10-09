@@ -374,6 +374,7 @@ fn page(title: &str, body: &str) -> Response {
     let title = html_escape(title);
     let html = format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n\
+         <meta name=\"color-scheme\" content=\"light dark\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{LISTING_CSS}</style>\n<h1>{title}</h1>\n{body}"
     );
