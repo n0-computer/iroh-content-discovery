@@ -9,17 +9,24 @@
 //! For a Pkarr key: every answer Mainline returns, the newest record in the
 //! zone format the iroh-share GUI edits, and a link to the debug page of the
 //! content it points to.
+//!
+//! Both pages stream: they show what has been found so far while the lookups
+//! run, and end with the complete page.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    convert::Infallible,
     net::{Ipv4Addr, Ipv6Addr, SocketAddrV4},
+    pin::pin,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
+    body::Body,
     http::header,
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use iroh::{Endpoint, EndpointId};
 use iroh_blobs::Hash;
 use iroh_mainline_endpoint_discovery::{AddrIndexError, SignedRecord, infohash_from_blake3};
@@ -28,7 +35,7 @@ use simple_dns::{
     Packet,
     rdata::{RData, SVCB, SVCParam},
 };
-use tokio::time::Instant;
+use tokio::{sync::mpsc, time::Instant};
 
 use crate::{Gateway, LISTING_CSS, html_escape, pkarr_redirect};
 
@@ -56,9 +63,20 @@ enum Resolution {
 /// Renders the providers page for `hash`.
 pub(crate) async fn providers(gateway: &Gateway, hash: Hash) -> Response {
     let encoded = z32::encode(hash.as_bytes());
-    let mut body = hinted_section(gateway, hash).await;
-    body.push_str(&providers_section(gateway, hash).await);
-    page(&format!("Providers of {encoded}"), &body)
+    let gateway = gateway.clone();
+    streamed_page(
+        &format!("Providers of {encoded}"),
+        move |mut snapshots| async move {
+            if !gateway.0.hints.get(hash).is_empty() {
+                snapshots
+                    .show(status("Probing providers named by links…"))
+                    .await;
+            }
+            let hinted = hinted_section(&gateway, hash).await;
+            let page = providers_section(&gateway, hash, &hinted, &mut snapshots).await;
+            snapshots.show(page).await;
+        },
+    )
 }
 
 /// Renders the providers that links named for `hash`, each probed, if there are any.
@@ -105,91 +123,143 @@ pub(crate) async fn pkarr(
     encoded: &str,
     host: Option<&str>,
 ) -> Response {
-    let started = Instant::now();
-    let mut items = Vec::new();
-    let lookup = async {
-        let mut answers = gateway
-            .0
-            .resolver
-            .dht()
-            .get_mutable(key, None, None)
-            .await
-            .map_err(|error| error.to_string())?;
-        while let Some(item) = answers.next().await {
-            items.push(item);
-        }
-        Ok::<_, String>(())
-    };
-    let note = mainline_note(tokio::time::timeout(MAINLINE_TIMEOUT, lookup).await);
-    let mut body = format!(
-        "<p class=\"meta\">{} answers from Mainline in {:.1} s.</p>\n",
-        items.len(),
-        started.elapsed().as_secs_f64(),
-    );
-    if let Some(note) = note {
-        body.push_str(&format!("<p class=\"meta\">{}</p>\n", html_escape(&note)));
-    }
-    // Several sequence numbers mean some nodes still hold an older record.
-    let mut answers: BTreeMap<i64, usize> = BTreeMap::new();
-    for item in &items {
-        *answers.entry(item.seq()).or_default() += 1;
-    }
-    if !answers.is_empty() {
-        body.push_str(
-            "<table>\n<tr><td>Sequence</td><td class=\"size\">Published</td>\
-             <td class=\"size\">Answers</td></tr>\n",
+    let gateway = gateway.clone();
+    let key = *key;
+    let encoded = encoded.to_owned();
+    let host = host.map(str::to_owned);
+    streamed_page(
+        &format!("Pkarr {encoded}"),
+        move |mut snapshots| async move {
+            let started = Instant::now();
+            snapshots
+                .show(status("Asking Mainline for the record…"))
+                .await;
+            let mut items = Vec::new();
+            let lookup = async {
+                let mut answers = gateway
+                    .0
+                    .resolver
+                    .dht()
+                    .get_mutable(&key, None, None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                while let Some(item) = answers.next().await {
+                    items.push(item);
+                    snapshots
+                        .show({
+                            let page = PkarrPage {
+                                key: &key,
+                                encoded: &encoded,
+                                host: host.as_deref(),
+                                items: &items,
+                            };
+                            page.render(None, started.elapsed())
+                        })
+                        .await;
+                }
+                Ok::<_, String>(())
+            };
+            let note = mainline_note(tokio::time::timeout(MAINLINE_TIMEOUT, lookup).await);
+            let page = PkarrPage {
+                key: &key,
+                encoded: &encoded,
+                host: host.as_deref(),
+                items: &items,
+            };
+            let body = page.render(note.as_deref(), started.elapsed());
+            snapshots.show(format!("{body}{}", status("Done."))).await;
+        },
+    )
+}
+
+/// What the Pkarr page shows: the answers Mainline returned for a key.
+struct PkarrPage<'a> {
+    key: &'a [u8; 32],
+    encoded: &'a str,
+    /// The request's `Host` header when it came in on a Pkarr subdomain.
+    host: Option<&'a str>,
+    items: &'a [n0_mainline::MutableItem],
+}
+
+impl PkarrPage<'_> {
+    /// Renders the answers so far, with `note` saying why the lookup stopped early.
+    fn render(&self, note: Option<&str>, elapsed: Duration) -> String {
+        let Self {
+            key,
+            encoded,
+            host,
+            items,
+        } = *self;
+        let mut body = format!(
+            "<p class=\"meta\">{} answers from Mainline in {:.1} s.</p>\n",
+            items.len(),
+            elapsed.as_secs_f64(),
         );
-        for (seq, count) in answers.iter().rev() {
+        if let Some(note) = note {
+            body.push_str(&format!("<p class=\"meta\">{}</p>\n", html_escape(note)));
+        }
+        // Several sequence numbers mean some nodes still hold an older record.
+        let mut answers: BTreeMap<i64, usize> = BTreeMap::new();
+        for item in items {
+            *answers.entry(item.seq()).or_default() += 1;
+        }
+        if !answers.is_empty() {
+            body.push_str(
+                "<table>\n<tr><td>Sequence</td><td class=\"size\">Published</td>\
+                 <td class=\"size\">Answers</td></tr>\n",
+            );
+            for (seq, count) in answers.iter().rev() {
+                body.push_str(&format!(
+                    "<tr><td>{seq}</td><td class=\"size\">{}</td><td class=\"size\">{count}</td></tr>\n",
+                    published(*seq)
+                ));
+            }
+            body.push_str("</table>\n");
+        }
+        let newest = items
+            .iter()
+            .filter(|item| item.seq() >= 0 && item.key() == key)
+            .max_by_key(|item| item.seq());
+        let mut content = None;
+        match newest {
+            None => body.push_str("<p>No record found.</p>\n"),
+            Some(item) => {
+                match text(encoded, item.value()) {
+                    Ok(text) => body.push_str(&format!(
+                        "<h1>Record</h1>\n<pre>{}</pre>\n",
+                        html_escape(&text)
+                    )),
+                    Err(error) => body.push_str(&format!(
+                        "<p>Cannot show the record: {}</p>\n",
+                        html_escape(&error)
+                    )),
+                }
+                content = Packet::parse(item.value())
+                    .ok()
+                    .and_then(|packet| pkarr_redirect::target(&packet, encoded))
+                    .and_then(|authority| pkarr_redirect::content_hash(&authority));
+            }
+        }
+        if let Some(hash) = content {
+            let hash = z32::encode(hash.as_bytes());
+            // A subdomain request links to the content's own origin on the same
+            // port; a path request stays on this origin.
+            let link = match host {
+                Some(host) => {
+                    let port = host
+                        .rsplit_once(':')
+                        .map_or(String::new(), |(_, port)| format!(":{port}"));
+                    format!("http://{hash}.blake3.localhost{port}/?debug")
+                }
+                None => format!("/blake3/{hash}/?debug"),
+            };
             body.push_str(&format!(
-                "<tr><td>{seq}</td><td class=\"size\">{}</td><td class=\"size\">{count}</td></tr>\n",
-                published(*seq)
+                "<p><a href=\"{}\">Providers of {hash}</a></p>\n",
+                html_escape(&link)
             ));
         }
-        body.push_str("</table>\n");
+        body
     }
-    let newest = items
-        .iter()
-        .filter(|item| item.seq() >= 0 && item.key() == key)
-        .max_by_key(|item| item.seq());
-    let mut content = None;
-    match newest {
-        None => body.push_str("<p>No record found.</p>\n"),
-        Some(item) => {
-            match text(encoded, item.value()) {
-                Ok(text) => body.push_str(&format!(
-                    "<h1>Record</h1>\n<pre>{}</pre>\n",
-                    html_escape(&text)
-                )),
-                Err(error) => body.push_str(&format!(
-                    "<p>Cannot show the record: {}</p>\n",
-                    html_escape(&error)
-                )),
-            }
-            content = Packet::parse(item.value())
-                .ok()
-                .and_then(|packet| pkarr_redirect::target(&packet, encoded))
-                .and_then(|authority| pkarr_redirect::content_hash(&authority));
-        }
-    }
-    if let Some(hash) = content {
-        let hash = z32::encode(hash.as_bytes());
-        // A subdomain request links to the content's own origin on the same
-        // port; a path request stays on this origin.
-        let link = match host {
-            Some(host) => {
-                let port = host
-                    .rsplit_once(':')
-                    .map_or(String::new(), |(_, port)| format!(":{port}"));
-                format!("http://{hash}.blake3.localhost{port}/?debug")
-            }
-            None => format!("/blake3/{hash}/?debug"),
-        };
-        body.push_str(&format!(
-            "<p><a href=\"{}\">Providers of {hash}</a></p>\n",
-            html_escape(&link)
-        ));
-    }
-    page(&format!("Pkarr {encoded}"), &body)
 }
 
 /// Describes when a sequence number was published, if it is a timestamp.
@@ -210,53 +280,36 @@ fn published(seq: i64) -> String {
 }
 
 /// Renders every peer Mainline returns for `hash`, with its index records and probes.
-async fn providers_section(gateway: &Gateway, hash: Hash) -> String {
+///
+/// Shows progress while the lookups run. Every snapshot, and the returned
+/// page, starts with `prefix`.
+async fn providers_section(
+    gateway: &Gateway,
+    hash: Hash,
+    prefix: &str,
+    snapshots: &mut Snapshots,
+) -> String {
     let started = Instant::now();
-    let (peers, peers_note) = peers(gateway, hash).await;
-    let lookups: Vec<(SocketAddrV4, Resolution)> = stream::iter(peers.iter().copied())
-        // TODO: drop with LOOKUP_SPACING.
-        .then(|peer| async move {
-            tokio::time::sleep(LOOKUP_SPACING).await;
-            peer
-        })
-        .map(|peer| {
-            let index = gateway.0.resolver.index().clone();
-            async move {
-                let resolutions = match index.lookup_uncached(peer).await {
-                    Ok(records) if records.is_empty() => vec![Resolution::NotInIndex],
-                    Ok(records) => records.into_iter().map(Resolution::Record).collect(),
-                    Err(error) => vec![Resolution::Failed(error)],
-                };
-                resolutions
-                    .into_iter()
-                    .map(move |r| (peer, r))
-                    .collect::<Vec<_>>()
-            }
-        })
-        .buffered_unordered(CONCURRENT_LOOKUPS)
-        .flat_map(stream::iter)
-        .collect()
+    let render = |status_line: Option<&str>,
+                  peers: &BTreeSet<SocketAddrV4>,
+                  note: Option<&str>,
+                  rows: &[(SocketAddrV4, Resolution)],
+                  probes: &HashMap<EndpointId, Result<Duration, String>>| {
+        let table = render_providers(peers, note, rows, probes, started.elapsed());
+        let status_line = status_line.map(status).unwrap_or_default();
+        format!("{prefix}{status_line}{table}")
+    };
+    let no_probes = HashMap::new();
+    snapshots
+        .show(render(
+            Some("Asking Mainline for peers…"),
+            &BTreeSet::new(),
+            None,
+            &[],
+            &no_probes,
+        ))
         .await;
-    let endpoints: BTreeSet<EndpointId> = lookups
-        .iter()
-        .filter_map(|(_, resolution)| match resolution {
-            Resolution::Record(record) => Some(record.endpoint_id),
-            _ => None,
-        })
-        .collect();
-    let probes: HashMap<EndpointId, Result<Duration, String>> = stream::iter(endpoints)
-        .map(|provider| {
-            let endpoint = gateway.0.endpoint.clone();
-            async move { (provider, probe(&endpoint, hash, provider).await) }
-        })
-        .buffered_unordered(CONCURRENT_PROBES)
-        .collect()
-        .await;
-    render_providers(&peers, peers_note, lookups, &probes, started.elapsed())
-}
 
-/// Collects the peers Mainline returns for `hash`, and a note if that stopped early.
-async fn peers(gateway: &Gateway, hash: Hash) -> (BTreeSet<SocketAddrV4>, Option<String>) {
     let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
     let mut peers = BTreeSet::new();
     let lookup = async {
@@ -269,11 +322,87 @@ async fn peers(gateway: &Gateway, hash: Hash) -> (BTreeSet<SocketAddrV4>, Option
             .map_err(|error| error.to_string())?;
         while let Some(batch) = batches.next().await {
             peers.extend(batch);
+            snapshots
+                .show({
+                    render(
+                        Some("Asking Mainline for peers…"),
+                        &peers,
+                        None,
+                        &[],
+                        &no_probes,
+                    )
+                })
+                .await;
         }
         Ok::<_, String>(())
     };
     let note = mainline_note(tokio::time::timeout(MAINLINE_TIMEOUT, lookup).await);
-    (peers, note)
+    let note = note.as_deref();
+
+    let mut lookups = Vec::new();
+    let mut resolved = pin!(
+        stream::iter(peers.iter().copied())
+            // TODO: drop with LOOKUP_SPACING.
+            .then(|peer| async move {
+                tokio::time::sleep(LOOKUP_SPACING).await;
+                peer
+            })
+            .map(|peer| {
+                let index = gateway.0.resolver.index().clone();
+                async move {
+                    let resolutions = match index.lookup_uncached(peer).await {
+                        Ok(records) if records.is_empty() => vec![Resolution::NotInIndex],
+                        Ok(records) => records.into_iter().map(Resolution::Record).collect(),
+                        Err(error) => vec![Resolution::Failed(error)],
+                    };
+                    resolutions
+                        .into_iter()
+                        .map(move |r| (peer, r))
+                        .collect::<Vec<_>>()
+                }
+            })
+            .buffered_unordered(CONCURRENT_LOOKUPS)
+    );
+    while let Some(resolutions) = resolved.next().await {
+        lookups.extend(resolutions);
+        snapshots
+            .show({
+                let status_line = "Looking up peers in the address index…";
+                render(Some(status_line), &peers, note, &lookups, &no_probes)
+            })
+            .await;
+    }
+
+    let endpoints: BTreeSet<EndpointId> = lookups
+        .iter()
+        .filter_map(|(_, resolution)| match resolution {
+            Resolution::Record(record) => Some(record.endpoint_id),
+            _ => None,
+        })
+        .collect();
+    let mut probes = HashMap::new();
+    let mut probed = pin!(
+        stream::iter(endpoints)
+            .map(|provider| {
+                let endpoint = gateway.0.endpoint.clone();
+                async move { (provider, probe(&endpoint, hash, provider).await) }
+            })
+            .buffered_unordered(CONCURRENT_PROBES)
+    );
+    while let Some((provider, result)) = probed.next().await {
+        probes.insert(provider, result);
+        snapshots
+            .show(render(
+                Some("Probing endpoints…"),
+                &peers,
+                note,
+                &lookups,
+                &probes,
+            ))
+            .await;
+    }
+    let page = render(None, &peers, note, &lookups, &probes);
+    format!("{page}{}", status("Done."))
 }
 
 /// Describes a Mainline lookup that did not run to completion.
@@ -304,13 +433,18 @@ async fn probe(endpoint: &Endpoint, hash: Hash, provider: EndpointId) -> Result<
     }
 }
 
+/// Renders the peers found so far, with their records and probes.
+///
+/// Peers whose lookup has not finished, and probes still running, show as
+/// pending.
 fn render_providers(
     peers: &BTreeSet<SocketAddrV4>,
-    peers_note: Option<String>,
-    mut rows: Vec<(SocketAddrV4, Resolution)>,
+    peers_note: Option<&str>,
+    rows: &[(SocketAddrV4, Resolution)],
     probes: &HashMap<EndpointId, Result<Duration, String>>,
     elapsed: Duration,
 ) -> String {
+    let mut rows: Vec<_> = rows.iter().collect();
     // Working providers first, fastest first, then failed probes, then peers
     // without a record.
     let rank = |resolution: &Resolution| match resolution {
@@ -322,23 +456,30 @@ fn render_providers(
         Resolution::Failed(_) => (3, Duration::ZERO),
     };
     rows.sort_by(|(a_peer, a), (b_peer, b)| rank(a).cmp(&rank(b)).then(a_peer.cmp(b_peer)));
+    let endpoints: BTreeSet<EndpointId> = rows
+        .iter()
+        .filter_map(|(_, resolution)| match resolution {
+            Resolution::Record(record) => Some(record.endpoint_id),
+            _ => None,
+        })
+        .collect();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
     let mut html = format!(
         "<p class=\"meta\">{} peers from Mainline, {} endpoints, in {:.1} s.</p>\n",
         peers.len(),
-        probes.len(),
+        endpoints.len(),
         elapsed.as_secs_f64(),
     );
     if let Some(note) = peers_note {
-        html.push_str(&format!("<p class=\"meta\">{}</p>\n", html_escape(&note)));
+        html.push_str(&format!("<p class=\"meta\">{}</p>\n", html_escape(note)));
     }
     html.push_str(
         "<table>\n<tr><td>Peer</td><td>Endpoint</td><td class=\"size\">Record age</td>\
          <td class=\"size\">Probe</td></tr>\n",
     );
-    for (peer, resolution) in &rows {
+    for (peer, resolution) in rows.iter().copied() {
         let (endpoint, age, probe) = match resolution {
             Resolution::Record(record) => {
                 let id = record.endpoint_id.to_string();
@@ -346,7 +487,7 @@ fn render_providers(
                 let probe = match probes.get(&record.endpoint_id) {
                     Some(Ok(latency)) => format!("{} ms", latency.as_millis()),
                     Some(Err(error)) => html_escape(error),
-                    None => String::new(),
+                    None => "…".into(),
                 };
                 (
                     format!("<span title=\"{id}\">{id}</span>"),
@@ -366,24 +507,93 @@ fn render_providers(
              <td class=\"size\">{age}</td><td class=\"size\">{probe}</td></tr>\n"
         ));
     }
+    let resolved: BTreeSet<SocketAddrV4> = rows.iter().map(|(peer, _)| *peer).collect();
+    for peer in peers.difference(&resolved) {
+        html.push_str(&format!(
+            "<tr><td>{peer}</td><td class=\"hash\">looking up…</td>\
+             <td class=\"size\"></td><td class=\"size\"></td></tr>\n"
+        ));
+    }
     html.push_str("</table>\n");
     html
 }
 
-fn page(title: &str, body: &str) -> Response {
+/// A paragraph saying what a streamed page is doing.
+fn status(text: &str) -> String {
+    format!("<p class=\"meta\">{}</p>\n", html_escape(text))
+}
+
+/// Progress of a streamed page; see [`streamed_page`].
+struct Snapshots {
+    tx: mpsc::Sender<Bytes>,
+    /// Snapshots shown so far, which also numbers their ids.
+    count: usize,
+}
+
+impl Snapshots {
+    /// Shows `content` in place of what the page showed before.
+    async fn show(&mut self, content: String) {
+        // Hide the previous snapshot by id. A selector like `:last-of-type`
+        // cannot do it: Chrome does not match it among children that are
+        // still being parsed, so it would hide every snapshot until the end.
+        let hide = match self.count.checked_sub(1) {
+            Some(previous) => format!("<style>#s{previous} {{ display: none; }}</style>\n"),
+            None => String::new(),
+        };
+        let id = self.count;
+        self.count += 1;
+        // A failed send means the browser went away, which also stops the
+        // work that renders the page; see `streamed_page`.
+        let _ = self
+            .tx
+            .send(Bytes::from(format!(
+                "{hide}<section id=\"s{id}\">\n{content}</section>\n"
+            )))
+            .await;
+    }
+}
+
+/// Streams a page whose content `work` shows as it goes.
+///
+/// The head goes out at once. Every snapshot follows in its own `<section>`,
+/// together with a style rule that hides the one before, so the page updates
+/// in place without scripts, which the sandboxed path routes would not run. The
+/// last snapshot `work` shows is the complete page. If the browser goes away,
+/// `work` is dropped.
+fn streamed_page<F>(title: &str, work: impl FnOnce(Snapshots) -> F) -> Response
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let title = html_escape(title);
-    let html = format!(
+    let head = format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n\
          <meta name=\"color-scheme\" content=\"light dark\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{title}</title>\n<style>{LISTING_CSS}</style>\n<h1>{title}</h1>\n{body}"
+         <title>{title}</title>\n<style>{LISTING_CSS}</style>\n<h1>{title}</h1>\n"
     );
+    let (tx, rx) = mpsc::channel(4);
+    let closed = tx.clone();
+    let work = work(Snapshots { tx, count: 0 });
+    tokio::spawn(async move {
+        tokio::select! {
+            () = work => {}
+            () = closed.closed() => {}
+        }
+    });
+    let snapshots = stream::unfold(rx, |mut rx| async move {
+        let snapshot = rx.recv().await?;
+        Some((snapshot, rx))
+    });
+    let body = stream::once(Bytes::from(head))
+        .chain(snapshots)
+        .map(Ok::<_, Infallible>);
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
-        html,
+        Body::from_stream(body),
     )
         .into_response()
 }
