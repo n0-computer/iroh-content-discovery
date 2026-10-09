@@ -1109,6 +1109,7 @@ fn listing(
     heading.push_str(SEPARATOR);
     let mut html = format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n\
+         <meta name=\"color-scheme\" content=\"light dark\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{LISTING_CSS}</style>\n\
          <h1>{heading}</h1>\n"

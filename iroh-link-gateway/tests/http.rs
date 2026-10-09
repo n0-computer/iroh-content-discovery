@@ -150,6 +150,8 @@ async fn run() {
     let res = client.get(&collection_url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let index = res.text().await.unwrap();
+    // Listings follow the system's light or dark setting from the first paint.
+    assert!(index.contains("<meta name=\"color-scheme\" content=\"light dark\">"));
     assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/site/\"")));
     assert!(index.contains(&format!("href=\"/blake3/{collection_hash}/media/\"")));
     // A directory with an `index.html` serves it instead of a listing.
