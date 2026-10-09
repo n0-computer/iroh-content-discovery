@@ -3,7 +3,8 @@
 //! For a hash: serving stops at the first provider that passes a probe and
 //! remembers what it found. This asks Mainline for peers, looks up every peer
 //! in the address index and probes every endpoint found, so the page also
-//! shows peers that did not resolve and providers that failed.
+//! shows peers that did not resolve and providers that failed. Providers that
+//! links named for the hash are listed and probed first.
 //!
 //! For a Pkarr key: every answer Mainline returns, the newest record in the
 //! zone format the iroh-share GUI edits, and a link to the debug page of the
@@ -55,8 +56,43 @@ enum Resolution {
 /// Renders the providers page for `hash`.
 pub(crate) async fn providers(gateway: &Gateway, hash: Hash) -> Response {
     let encoded = z32::encode(hash.as_bytes());
-    let body = providers_section(gateway, hash).await;
+    let mut body = hinted_section(gateway, hash).await;
+    body.push_str(&providers_section(gateway, hash).await);
     page(&format!("Providers of {encoded}"), &body)
+}
+
+/// Renders the providers that links named for `hash`, each probed, if there are any.
+async fn hinted_section(gateway: &Gateway, hash: Hash) -> String {
+    let hinted = gateway.0.hints.get(hash);
+    if hinted.is_empty() {
+        return String::new();
+    }
+    let probes: Vec<(EndpointId, Result<Duration, String>)> = stream::iter(hinted)
+        .map(|provider| {
+            let endpoint = gateway.0.endpoint.clone();
+            async move { (provider, probe(&endpoint, hash, provider).await) }
+        })
+        .buffered_ordered(CONCURRENT_PROBES)
+        .collect()
+        .await;
+    let mut html = format!(
+        "<p class=\"meta\">{} providers named by links, asked before Mainline.</p>\n\
+         <table>\n<tr><td>Endpoint</td><td class=\"size\">Probe</td></tr>\n",
+        probes.len()
+    );
+    for (provider, probe) in &probes {
+        let id = provider.to_string();
+        let probe = match probe {
+            Ok(latency) => format!("{} ms", latency.as_millis()),
+            Err(error) => html_escape(error),
+        };
+        html.push_str(&format!(
+            "<tr><td class=\"hash\"><span title=\"{id}\">{id}</span></td>\
+             <td class=\"size\">{probe}</td></tr>\n"
+        ));
+    }
+    html.push_str("</table>\n");
+    html
 }
 
 /// Renders the Pkarr page for `key`, linking to its content target's debug page.
