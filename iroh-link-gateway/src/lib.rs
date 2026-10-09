@@ -62,8 +62,10 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long providers named by links get before Mainline is asked.
 ///
 /// A provider that answers in time is used without a Mainline lookup, so the
-/// hash's interest is not shown to the DHT at all.
-const HINT_HEAD_START: Duration = Duration::from_secs(2);
+/// hash's interest is not shown to the DHT at all. One that answers later
+/// still usually wins, since Mainline peers need DHT round trips and probes of
+/// their own.
+const HINT_HEAD_START: Duration = Duration::from_secs(1);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
 /// Maximum HashSeq size: one metadata hash and at most 32,767 file hashes.

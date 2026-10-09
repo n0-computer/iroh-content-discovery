@@ -118,7 +118,7 @@ and most recently named first, so requests without the query, such as a page's
 subresources, use them too. The URL and its origin are the same with or
 without the hint.
 
-Named providers are probed first and get a two-second head start. If one passes
+Named providers are probed first and get a one-second head start. If one passes
 its probe in that time, Mainline is not asked at all; otherwise the lookup
 continues as usual, so a stale hint does not break announced content. A
 provider is only reachable if the gateway can look up its address from its ID,
