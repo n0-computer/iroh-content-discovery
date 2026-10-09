@@ -136,8 +136,19 @@ async fn run() {
     let res = get(format!("{base}/blake3/{hash}/?debug")).await;
     assert_eq!(res.status(), StatusCode::OK);
     let page = res.text().await.unwrap();
-    assert!(page.contains("named by links"));
-    assert!(page.contains(&provider.id().to_string()));
+    // The page streams snapshots, each hiding the one before; the last is complete.
+    let sections = page.matches("<section id=").count();
+    assert!(sections > 1);
+    assert_eq!(
+        page.matches("{ display: none; }</style>").count(),
+        sections - 1
+    );
+    let last = page.rsplit("<section id=").next().unwrap();
+    assert_eq!(last.matches("named by links").count(), 1);
+    assert!(last.contains(&provider.id().to_string()));
+    assert!(last.contains("peers from Mainline"));
+    assert!(!last.contains("Asking Mainline"));
+    assert!(last.contains("Done."));
 
     // A hint that does not answer falls back to Mainline after its head start.
     let dead = z32::encode(iroh::SecretKey::from_bytes(&[7; 32]).public().as_bytes());
