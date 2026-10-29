@@ -53,7 +53,7 @@ data-encoding = { workspace = true, optional = true }
 iroh.workspace = true
 iroh-blobs.workspace = true
 iroh-mainline-endpoint-discovery = { version = "0.1.0", path = "../iroh-mainline-endpoint-discovery" }
-lru = "0.18"
+lru = "0.19"
 mime_classifier = "0.0.1"
 mime_guess = "2"
 n0-error.workspace = true
