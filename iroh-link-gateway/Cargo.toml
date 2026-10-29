@@ -45,7 +45,7 @@ dirs = { version = "7", optional = true }
 serde_json = { version = "1", optional = true }
 async-stream = "0.3"
 axum = "0.8"
-bao-tree = "0.16"
+bao-tree = "0.17"
 blake3.workspace = true
 bytes = "1"
 clap = { workspace = true, optional = true }
