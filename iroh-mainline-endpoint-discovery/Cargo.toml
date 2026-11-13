@@ -50,7 +50,7 @@ bytes = "1"
 clap.workspace = true
 iroh.workspace = true
 iroh-blobs.workspace = true
-iroh-gossip = "0.101"
+iroh-gossip = "0.102"
 tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
