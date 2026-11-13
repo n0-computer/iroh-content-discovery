@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Event::Lagged => println!("lagged, some messages were dropped"),
+                _ => {}
             }
         }
         n0_error::Ok(())
