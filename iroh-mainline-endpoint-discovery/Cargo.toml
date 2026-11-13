@@ -27,7 +27,7 @@ blake3.workspace = true
 clap = { workspace = true, optional = true }
 data-encoding.workspace = true
 iroh-base.workspace = true
-lru = "0.18"
+lru = "0.19"
 udp-addr-index-proto = { version = "0.1.0", path = "../udp-addr-index-proto" }
 n0-error.workspace = true
 n0-future.workspace = true
