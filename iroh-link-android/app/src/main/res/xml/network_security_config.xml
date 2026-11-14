@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The in-app gateway serves plain HTTP on *.localhost, and as a browser the
+     app also follows links to ordinary http:// sites. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

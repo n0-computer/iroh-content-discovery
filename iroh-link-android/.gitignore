@@ -1,0 +1,10 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+# Built by build-native.sh.
+app/src/main/jniLibs/
+# Release signing material stays local.
+keystore.properties
+*.jks

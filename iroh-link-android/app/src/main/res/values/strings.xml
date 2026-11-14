@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">iroh link</string>
+    <string name="url_hint">Type a blake3.net or pkarr.net link</string>
+    <string name="tabs">Tabs</string>
+    <string name="new_tab">New tab</string>
+    <string name="close_tab">Close tab</string>
+    <string name="more">More options</string>
+    <string name="forward">Forward</string>
+    <string name="reload">Reload</string>
+    <string name="add_bookmark">Add bookmark</string>
+    <string name="remove_bookmark">Remove bookmark</string>
+    <string name="bookmarks">Bookmarks</string>
+    <string name="history">History</string>
+    <string name="share">Share link</string>
+    <string name="copy_link">Copy link</string>
+    <string name="open_by_default">Open links by default</string>
+    <string name="gateway_status">Gateway status</string>
+    <string name="clear_history">Clear history</string>
+    <string name="open_new_tab">Open in new tab</string>
+    <string name="rename">Rename</string>
+    <string name="delete">Delete</string>
+    <string name="just_now">Just now</string>
+    <string name="no_history">No history yet</string>
+    <string name="no_bookmarks">No bookmarks yet. Add one from the menu on any page.</string>
+    <string name="not_a_link">Not a link: %1$s</string>
+    <string name="link_copied">Link copied</string>
+    <string name="bookmark_added">Bookmark added</string>
+    <string name="bookmark_removed">Bookmark removed</string>
+    <string name="downloading">Downloading %1$s</string>
+    <string name="download_unsupported">This download is not supported</string>
+    <string name="no_app">No app can open this link</string>
+    <string name="connecting">Connecting to the iroh network: %1$s</string>
+    <string name="start_failed">The gateway did not start: %1$s</string>
+    <string name="clear_history_confirm">Clear all history?</string>
+    <string name="clear">Clear</string>
+    <string name="cancel">Cancel</string>
+    <string name="ok">OK</string>
+    <string name="open_by_default_help">To open blake3.net and pkarr.net links in this app, choose \"Add link\" on the next screen and select the domains.</string>
+    <string name="status_message">Status: %1$s\n\nThe gateway runs inside this app on 127.0.0.1:%2$d. It finds content on the BitTorrent Mainline DHT and fetches it over iroh, verifying every byte against its BLAKE3 hash.</string>
+</resources>

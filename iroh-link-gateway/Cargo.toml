@@ -36,6 +36,11 @@ path = "examples/demo.rs"
 required-features = ["cli"]
 
 [[example]]
+name = "publish-dir"
+path = "examples/publish-dir.rs"
+required-features = ["cli"]
+
+[[example]]
 name = "pkarr-publish"
 path = "examples/pkarr-publish.rs"
 required-features = ["cli"]

@@ -54,6 +54,8 @@ your content and names announced. Run it on a box that's on all the time.
   index server and its wire protocol.
 - [`iroh-link-gateway`][gateway-readme]: the local HTTP gateway.
 - [`iroh-link-extension`][extension-readme]: the browser extension.
+- [`iroh-link-android`][android-readme]: an Android browser with the gateway
+  built in.
 
 To see the whole thing work in one process, discovery and all:
 
@@ -98,4 +100,5 @@ be dual licensed as above, without any additional terms or conditions.
 [server]: udp-addr-index/README.md
 [proto]: udp-addr-index-proto/README.md
 [gateway-readme]: iroh-link-gateway/README.md
+[android-readme]: iroh-link-android/README.md
 [extension-readme]: iroh-link-extension/README.md

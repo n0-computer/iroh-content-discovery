@@ -4,6 +4,7 @@ members = [
     "udp-addr-index",
     "iroh-mainline-endpoint-discovery",
     "iroh-link-gateway",
+    "iroh-link-android/native",
 ]
 resolver = "3"
 

@@ -1,0 +1,28 @@
+[package]
+name = "iroh-link-android"
+description = "JNI library that runs the iroh link gateway inside the Android app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+axum = "0.8"
+iroh.workspace = true
+iroh-link-gateway = { path = "../../iroh-link-gateway", default-features = false }
+iroh-mainline-endpoint-discovery = { path = "../../iroh-mainline-endpoint-discovery" }
+jni = "0.21"
+n0-mainline.workspace = true
+tokio.workspace = true
+tower = { version = "0.5", features = ["util"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[lints]
+workspace = true
