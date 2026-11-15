@@ -38,6 +38,17 @@ mod logcat;
 const READY_WAIT: Duration = Duration::from_secs(45);
 /// Pause between attempts to discover index servers or bind the endpoint.
 const RETRY_DELAY: Duration = Duration::from_secs(10);
+/// How often [`watch_mainline`] checks the routing table.
+const WATCH_INTERVAL: Duration = Duration::from_secs(30);
+/// Empty checks in a row before the Mainline node is replaced.
+const EMPTY_TABLE_CHECKS: u32 = 3;
+/// The default bootstrap nodes of n0-mainline, which it does not export.
+const BOOTSTRAP_NODES: [&str; 4] = [
+    "router.bittorrent.com:6881",
+    "dht.transmissionbt.com:6881",
+    "dht.libtorrent.org:25401",
+    "relay.pkarr.org:6881",
+];
 /// Signed index list from the last successful discovery.
 ///
 /// Used when the list's Pkarr record does not resolve, as the desktop
@@ -143,10 +154,11 @@ async fn proxy(
     }
 }
 
-/// Binds the endpoint, discovers index servers, and publishes the gateway.
+/// Binds the endpoint, starts Mainline, finds index servers, and serves.
 ///
 /// Retries each step until it succeeds, since the phone may be offline when
-/// the app starts.
+/// the app starts. Then watches the Mainline node and starts over with a new
+/// one if it loses all its peers.
 async fn run(state_dir: PathBuf, ready: watch::Sender<Option<Router>>) {
     let endpoint = loop {
         match iroh::Endpoint::bind(presets::N0).await {
@@ -159,19 +171,59 @@ async fn run(state_dir: PathBuf, ready: watch::Sender<Option<Router>>) {
         }
     };
     info!(endpoint = %endpoint.id(), "iroh endpoint bound");
-    let dht = loop {
-        match Dht::builder().port(0).build() {
-            Ok(dht) => break dht,
+    loop {
+        let dht = start_mainline().await;
+        let index = discover_index(&dht, &state_dir).await;
+        let gateway = Gateway::new(endpoint.clone(), Resolver::new(dht.clone(), index));
+        ready.send_replace(Some(gateway.router()));
+        set_status("ready");
+        info!("gateway ready");
+        watch_mainline(&dht).await;
+        warn!("Mainline node has no peers; starting a new one");
+        set_status("reconnecting to Mainline");
+    }
+}
+
+/// Starts a Mainline node with bootstrap nodes given by address.
+///
+/// n0-mainline resolves bootstrap host names once, when the node starts. If
+/// that fails, as it does offline, the node never finds a peer. So resolve
+/// them here, and wait until at least one resolves.
+async fn start_mainline() -> Dht {
+    loop {
+        let mut addresses = Vec::new();
+        for host in BOOTSTRAP_NODES {
+            match tokio::net::lookup_host(host).await {
+                Ok(found) => addresses.extend(
+                    found
+                        .filter(|address| address.is_ipv4())
+                        .map(|address| address.to_string()),
+                ),
+                Err(error) => warn!(host, %error, "cannot resolve Mainline bootstrap node"),
+            }
+        }
+        if addresses.is_empty() {
+            set_status("waiting for the network");
+            tokio::time::sleep(RETRY_DELAY).await;
+            continue;
+        }
+        info!(?addresses, "starting Mainline node");
+        match Dht::builder().port(0).bootstrap(&addresses).build() {
+            Ok(dht) => return dht,
             Err(error) => {
                 warn!(%error, "cannot start Mainline node; retrying");
                 set_status(format!("cannot start Mainline node: {error}"));
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         }
-    };
+    }
+}
+
+/// Finds the address index servers, falling back to the list stored last time.
+async fn discover_index(dht: &Dht, state_dir: &Path) -> AddrIndex {
     set_status("discovering index servers");
     let mut builder = AddrIndex::builder(dht.clone()).n0_defaults();
-    if let Some(item) = load_index_list(&state_dir) {
+    if let Some(item) = load_index_list(state_dir) {
         builder = builder.fallback_list(item);
     }
     let index = loop {
@@ -185,14 +237,36 @@ async fn run(state_dir: PathBuf, ready: watch::Sender<Option<Router>>) {
         }
     };
     if let Some(item) = index.signed_list().await
-        && let Err(error) = store_index_list(&state_dir, &item)
+        && let Err(error) = store_index_list(state_dir, &item)
     {
         warn!(%error, "cannot store the signed index list");
     }
-    let gateway = Gateway::new(endpoint, Resolver::new(dht, index));
-    ready.send_replace(Some(gateway.router()));
-    set_status("ready");
-    info!("gateway ready");
+    index
+}
+
+/// Returns once the Mainline node has had no peers for [`EMPTY_TABLE_CHECKS`] checks in a row.
+///
+/// The node refills its routing table from the bootstrap nodes when the
+/// network comes back; this catches the cases where it does not.
+async fn watch_mainline(dht: &Dht) {
+    let mut empty = 0;
+    loop {
+        tokio::time::sleep(WATCH_INTERVAL).await;
+        let peers = match dht.info().await {
+            Ok(info) => info.routing_table_size(),
+            Err(_) => return,
+        };
+        if peers > 0 {
+            empty = 0;
+            continue;
+        }
+        empty += 1;
+        warn!(checks = empty, "Mainline routing table is empty");
+        // Ask the bootstrap nodes again before giving up on this node.
+        if empty >= EMPTY_TABLE_CHECKS && !dht.bootstrapped().await.unwrap_or(false) {
+            return;
+        }
+    }
 }
 
 fn load_index_list(state: &Path) -> Option<MutableItem> {

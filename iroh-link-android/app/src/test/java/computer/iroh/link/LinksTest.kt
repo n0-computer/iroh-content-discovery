@@ -73,4 +73,24 @@ class LinksTest {
         )
         assertNull(Links.findInText("nothing here https://example.com"))
     }
+
+    @Test
+    fun parsesContentLinksForDisplay() {
+        val parsed = Links.parse("http://$key.pkarr.localhost:45475/a/b.html?x=1#top")!!
+        assertEquals(Links.Kind.PKARR, parsed.kind)
+        assertEquals(key, parsed.label)
+        assertEquals("/a/b.html", parsed.path)
+        assertEquals("?x=1", parsed.query)
+        assertEquals(Links.Kind.BLAKE3, Links.parse("https://$hash.blake3.net")!!.kind)
+        val other = Links.parse("https://example.com/p")!!
+        assertNull(other.kind)
+        assertEquals("example.com", other.host)
+        assertNull(Links.parse("about:blank"))
+    }
+
+    @Test
+    fun originsIncludeThePort() {
+        assertEquals("http://$key.pkarr.localhost:45475", Links.origin("http://$key.pkarr.localhost:45475/x"))
+        assertEquals("https://example.com", Links.origin("https://example.com/x"))
+    }
 }

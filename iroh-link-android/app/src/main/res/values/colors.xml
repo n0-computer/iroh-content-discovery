@@ -3,4 +3,14 @@
     <color name="brand">#6A4DB8</color>
     <color name="launcher_background">#1E1B2E</color>
     <color name="launcher_foreground">#FFFFFF</color>
+    <!-- Address pills: a strong badge and a light body, teal for BLAKE3 content
+         and amber for Pkarr names, so the two kinds are easy to tell apart. -->
+    <color name="blake3_badge">#00796B</color>
+    <color name="blake3_badge_text">#FFFFFF</color>
+    <color name="blake3_body">#C8ECE6</color>
+    <color name="blake3_body_text">#00382F</color>
+    <color name="pkarr_badge">#C2410C</color>
+    <color name="pkarr_badge_text">#FFFFFF</color>
+    <color name="pkarr_body">#FDE2CC</color>
+    <color name="pkarr_body_text">#4A1A00</color>
 </resources>

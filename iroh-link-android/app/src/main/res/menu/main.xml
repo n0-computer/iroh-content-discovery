@@ -6,6 +6,8 @@
     <item android:id="@+id/bookmark" android:title="@string/add_bookmark" />
     <item android:id="@+id/bookmarks" android:title="@string/bookmarks" />
     <item android:id="@+id/history" android:title="@string/history" />
+    <item android:id="@+id/downloads" android:title="@string/downloads" />
+    <item android:id="@+id/pin" android:title="@string/add_to_home_screen" />
     <item android:id="@+id/share" android:title="@string/share" />
     <item android:id="@+id/copy_link" android:title="@string/copy_link" />
     <item android:id="@+id/open_by_default" android:title="@string/open_by_default" />

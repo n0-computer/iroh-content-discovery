@@ -5,88 +5,181 @@
     android:layout_height="match_parent"
     android:background="?attr/colorSurface">
 
-    <LinearLayout
+    <FrameLayout
         android:id="@+id/root"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical">
+        android:layout_height="match_parent">
 
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="56dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="8dp"
-            android:paddingEnd="0dp">
+            android:layout_height="match_parent"
+            android:orientation="vertical">
 
-            <EditText
-                android:id="@+id/url_bar"
-                android:layout_width="0dp"
-                android:layout_height="40dp"
-                android:layout_weight="1"
-                android:background="@drawable/url_bar_background"
-                android:hint="@string/url_hint"
-                android:imeOptions="actionGo|flagNoExtractUi"
-                android:importantForAutofill="no"
-                android:inputType="textUri"
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="8dp"
+                android:paddingEnd="0dp">
+
+                <FrameLayout
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1">
+
+                    <EditText
+                        android:id="@+id/url_bar"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:background="@drawable/url_bar_background"
+                        android:hint="@string/url_hint"
+                        android:imeOptions="actionGo|flagNoExtractUi"
+                        android:importantForAutofill="no"
+                        android:inputType="textUri"
+                        android:paddingHorizontal="16dp"
+                        android:singleLine="true"
+                        android:textSize="15sp" />
+
+                    <!-- The address when not editing: a pill for content links. -->
+                    <TextView
+                        android:id="@+id/url_display"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:background="@drawable/url_bar_background"
+                        android:ellipsize="end"
+                        android:gravity="center_vertical"
+                        android:paddingHorizontal="12dp"
+                        android:singleLine="true"
+                        android:textColorHint="?attr/colorOnSurfaceVariant"
+                        android:hint="@string/url_hint"
+                        android:textSize="15sp" />
+                </FrameLayout>
+
+                <FrameLayout
+                    android:id="@+id/tabs_button"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="4dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/tabs">
+
+                    <TextView
+                        android:id="@+id/tab_count"
+                        android:layout_width="22dp"
+                        android:layout_height="22dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tab_count_background"
+                        android:gravity="center"
+                        android:textColor="?attr/colorOnSurface"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </FrameLayout>
+
+                <ImageButton
+                    android:id="@+id/menu_button"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/more"
+                    android:src="@drawable/ic_more_vert" />
+            </LinearLayout>
+
+            <com.google.android.material.progressindicator.LinearProgressIndicator
+                android:id="@+id/progress"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="invisible"
+                app:trackThickness="2dp" />
+
+            <TextView
+                android:id="@+id/banner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?attr/colorSecondaryContainer"
                 android:paddingHorizontal="16dp"
-                android:selectAllOnFocus="true"
-                android:singleLine="true"
-                android:textSize="15sp" />
+                android:paddingVertical="6dp"
+                android:textColor="?attr/colorOnSecondaryContainer"
+                android:textSize="13sp"
+                android:visibility="gone" />
 
             <FrameLayout
-                android:id="@+id/tabs_button"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="4dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="@string/tabs">
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1">
 
-                <TextView
-                    android:id="@+id/tab_count"
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:layout_gravity="center"
-                    android:background="@drawable/tab_count_background"
-                    android:gravity="center"
-                    android:textColor="?attr/colorOnSurface"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
+                <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+                    android:id="@+id/swipe_refresh"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent">
+
+                    <FrameLayout
+                        android:id="@+id/web_container"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent" />
+                </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+
+                <androidx.coordinatorlayout.widget.CoordinatorLayout
+                    android:id="@+id/snackbar_host"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="bottom" />
             </FrameLayout>
-
-            <ImageButton
-                android:id="@+id/menu_button"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="@string/more"
-                android:src="@drawable/ic_more_vert" />
         </LinearLayout>
 
-        <com.google.android.material.progressindicator.LinearProgressIndicator
-            android:id="@+id/progress"
+        <!-- Tab switcher: a grid of tab previews over the browser. -->
+        <LinearLayout
+            android:id="@+id/switcher"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:visibility="invisible"
-            app:trackThickness="2dp" />
+            android:layout_height="match_parent"
+            android:background="?attr/colorSurfaceContainer"
+            android:clickable="true"
+            android:focusable="true"
+            android:orientation="vertical"
+            android:visibility="gone">
 
-        <TextView
-            android:id="@+id/banner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="?attr/colorSecondaryContainer"
-            android:paddingHorizontal="16dp"
-            android:paddingVertical="6dp"
-            android:textColor="?attr/colorOnSecondaryContainer"
-            android:textSize="13sp"
-            android:visibility="gone" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="4dp"
+                android:paddingEnd="12dp">
 
-        <FrameLayout
-            android:id="@+id/web_container"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1" />
-    </LinearLayout>
+                <ImageButton
+                    android:id="@+id/switcher_close"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/back"
+                    android:src="@drawable/ic_arrow_back" />
+
+                <TextView
+                    android:id="@+id/switcher_title"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:textAppearance="?attr/textAppearanceTitleLarge" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/switcher_new_tab"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/new_tab"
+                    app:icon="@drawable/ic_add" />
+            </LinearLayout>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/switcher_grid"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipToPadding="false"
+                android:paddingHorizontal="6dp"
+                android:paddingBottom="16dp" />
+        </LinearLayout>
+    </FrameLayout>
 
     <FrameLayout
         android:id="@+id/fullscreen"

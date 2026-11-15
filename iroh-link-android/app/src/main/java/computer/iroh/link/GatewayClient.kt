@@ -16,6 +16,10 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Loads gateway URLs for the WebView, with a disk cache and resumable transfers.
@@ -36,9 +40,11 @@ import java.security.MessageDigest
  * Range requests, as media elements send them, and other methods than `GET`
  * are left to the WebView.
  */
-class GatewayClient(dir: File) {
+class GatewayClient(dir: File, private val online: () -> Boolean) {
     private val metaDir = File(dir, "meta").apply { mkdirs() }
     private val blobDir = File(dir, "blobs").apply { mkdirs() }
+    /** Runs revalidations that may outlive the request they serve. */
+    private val background = Executors.newCachedThreadPool()
     private val tempDir = File(dir, "tmp").apply {
         mkdirs()
         listFiles()?.forEach { it.delete() }
@@ -60,12 +66,49 @@ class GatewayClient(dir: File) {
      */
     fun load(url: String, method: String, headers: Map<String, String>, followRedirects: Boolean): WebResourceResponse? {
         val ranged = headers.keys.any { it.equals("Range", ignoreCase = true) }
+        // Only gateway ETags are content hashes, so only gateway URLs are cached.
+        if (!Links.isInternal(url)) return passThrough(url, method, headers)
         if (method != "GET" || ranged) return if (followRedirects) passThrough(url, method, headers) else null
         val requestHeaders = headers.filterKeys { name ->
             !name.equals("Host", true) && !name.startsWith("If-", true) && !name.equals("Accept-Encoding", true)
         }
         val cached = lookup(url)
-        if (cached != null && cached.immutable) return fromCache(cached)
+        if (cached != null && (cached.immutable || !online())) return fromCache(cached)
+        if (cached == null) return fetch(url, requestHeaders, null, followRedirects)
+        // Revalidate, but do not keep an offline-capable page waiting: after
+        // the budget, serve the cached copy and finish the request in the
+        // background, so a new version is cached for the next visit.
+        val revalidation = background.submit<WebResourceResponse?> { fetch(url, requestHeaders, cached, followRedirects) }
+        return try {
+            revalidation.get(REVALIDATION_BUDGET_MS, TimeUnit.MILLISECONDS)
+        } catch (timeout: TimeoutException) {
+            Log.i(TAG, "revalidating $url takes long; serving the cached copy")
+            background.execute {
+                try {
+                    (revalidation.get()?.data as? Body)?.use { it.drain() }
+                } catch (error: Exception) {
+                    Log.w(TAG, "background revalidation of $url failed: $error")
+                }
+            }
+            fromCache(cached)
+        } catch (error: ExecutionException) {
+            Log.w(TAG, "revalidating $url failed: ${error.cause}")
+            fromCache(cached)
+        }
+    }
+
+    /**
+     * Returns the bytes at [url], a public or gateway URL, through the cache.
+     *
+     * Returns `null` if the response is not a success.
+     */
+    fun fetchBytes(url: String): ByteArray? {
+        val internal = Links.toInternal(url) ?: url
+        val response = load(internal, "GET", emptyMap(), followRedirects = true) ?: return null
+        return response.data?.use { body -> if (response.statusCode == 200) body.readBytes() else null }
+    }
+
+    private fun fetch(url: String, requestHeaders: Map<String, String>, cached: Entry?, followRedirects: Boolean): WebResourceResponse? {
         var target = url
         var retried = false
         var redirects = 0
@@ -401,6 +444,14 @@ class GatewayClient(dir: File) {
             }
         }
 
+        /** Reads the rest of the body, which stores it in the cache. */
+        fun drain() {
+            val buffer = ByteArray(64 * 1024)
+            while (read(buffer, 0, buffer.size) >= 0) {
+                // Each read copies into the cache file.
+            }
+        }
+
         override fun close() {
             if (!finished) {
                 finished = true
@@ -424,6 +475,8 @@ class GatewayClient(dir: File) {
         /** Upper bound for cached bodies; the least recently used go first. */
         const val MAX_BYTES = 512L * 1024 * 1024
         const val MAX_REDIRECTS = 5
+        /** How long a page waits for revalidation before it gets the cached copy. */
+        const val REVALIDATION_BUDGET_MS = 3000L
         const val MAX_RESUMES = 10
         /** How long one resume keeps trying. */
         const val RESUME_WINDOW_MS = 90_000L

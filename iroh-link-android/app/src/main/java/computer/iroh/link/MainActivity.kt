@@ -1,16 +1,13 @@
 package computer.iroh.link
 
-import android.annotation.SuppressLint
-import android.app.DownloadManager
-import android.content.ActivityNotFoundException
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
@@ -19,23 +16,22 @@ import android.text.Html
 import android.util.Log
 import android.view.KeyEvent
 import android.view.LayoutInflater
+import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.ConsoleMessage
-import android.webkit.CookieManager
-import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
@@ -48,22 +44,32 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.isVisible
-import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.bottomsheet.BottomSheetBehavior
-import com.google.android.material.bottomsheet.BottomSheetDialog
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.google.android.material.snackbar.Snackbar
 import org.json.JSONArray
 
 /** The browser: tabs of WebViews, an address bar, and a menu. */
 class MainActivity : AppCompatActivity() {
     private lateinit var store: Store
     private lateinit var urlBar: EditText
+    private lateinit var urlDisplay: TextView
     private lateinit var progress: LinearProgressIndicator
     private lateinit var banner: TextView
     private lateinit var container: FrameLayout
     private lateinit var fullscreen: FrameLayout
     private lateinit var tabCount: TextView
+    private lateinit var switcher: View
+    private lateinit var switcherGrid: RecyclerView
+    private lateinit var switcherTitle: TextView
+    private lateinit var snackbarHost: View
+    private lateinit var swipeRefresh: SwipeRefreshLayout
+    private val switcherAdapter = TabAdapter()
 
     private val tabs = mutableListOf<Tab>()
     private lateinit var current: Tab
@@ -83,10 +89,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** A tab and its WebView. */
-    private inner class Tab(val webView: WebView, val parent: Tab?, val external: Boolean) {
+    private inner class Tab(val webView: BrowserWebView, val parent: Tab?, val external: Boolean) {
         var title = ""
         var progress = 100
-        /** A URL to load when the tab is first shown, for tabs restored at startup. */
+        var favicon: Bitmap? = null
+        /** The top of the page as last seen, for the tab switcher. */
+        var thumbnail: Bitmap? = null
+        /** A URL to load when the tab is first shown, for tabs restored at startup or opened in the background. */
         var pendingUrl: String? = null
 
         /** The page URL in public form, or an empty string for the start page. */
@@ -103,11 +112,27 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         store = Store.get(this)
         urlBar = findViewById(R.id.url_bar)
+        urlDisplay = findViewById(R.id.url_display)
         progress = findViewById(R.id.progress)
         banner = findViewById(R.id.banner)
         container = findViewById(R.id.web_container)
         fullscreen = findViewById(R.id.fullscreen)
         tabCount = findViewById(R.id.tab_count)
+        switcher = findViewById(R.id.switcher)
+        switcherGrid = findViewById(R.id.switcher_grid)
+        switcherTitle = findViewById(R.id.switcher_title)
+        snackbarHost = findViewById(R.id.snackbar_host)
+        swipeRefresh = findViewById(R.id.swipe_refresh)
+        // Pull to refresh only when the page itself is pulled past its top.
+        swipeRefresh.setOnChildScrollUpCallback { _, _ -> current.webView.keepsGesture() }
+        swipeRefresh.setOnRefreshListener {
+            if (current.url.isEmpty()) {
+                showStartPage(current)
+                swipeRefresh.isRefreshing = false
+            } else {
+                current.webView.reload()
+            }
+        }
 
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.root)) { view, insets ->
             val bars = insets.getInsets(
@@ -128,8 +153,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         urlBar.setOnFocusChangeListener { _, focused -> if (!focused) showUrl() }
-        findViewById<View>(R.id.tabs_button).setOnClickListener { showTabs() }
+        urlDisplay.setOnClickListener { editAddress() }
+        findViewById<View>(R.id.tabs_button).setOnClickListener { showSwitcher() }
         findViewById<ImageButton>(R.id.menu_button).setOnClickListener { showMenu(it) }
+        setUpSwitcher()
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = goBack()
         })
@@ -143,7 +170,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        linkFromIntent(intent)?.let { openTab(it, external = true) }
+        linkFromIntent(intent)?.let {
+            hideSwitcher()
+            openTab(it, external = true)
+        }
     }
 
     override fun onResume() {
@@ -165,6 +195,13 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacksAndMessages(null)
         tabs.forEach { it.webView.destroy() }
         super.onDestroy()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // The pill colours follow the theme, and the grid the screen width.
+        showUrl()
+        (switcherGrid.layoutManager as GridLayoutManager).spanCount = spanCount()
     }
 
     private fun linkFromIntent(intent: Intent?): String? = when (intent?.action) {
@@ -198,10 +235,8 @@ class MainActivity : AppCompatActivity() {
         val tab = current
         when {
             fullscreen.isVisible -> hideCustomView()
-            urlBar.hasFocus() -> {
-                urlBar.clearFocus()
-                hideKeyboard()
-            }
+            switcher.isVisible -> hideSwitcher()
+            urlBar.hasFocus() -> hideKeyboard()
             tab.webView.canGoBack() -> tab.webView.goBack()
             tab.parent != null && tabs.size > 1 -> closeTab(tab)
             tab.external && tabs.size > 1 -> {
@@ -213,56 +248,85 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Tabs
+    // Address bar
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun createWebView(): WebView = WebView(this).apply {
-        layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            @Suppress("DEPRECATION")
-            databaseEnabled = true
-            setSupportMultipleWindows(true)
-            javaScriptCanOpenWindowsAutomatically = false
-            mediaPlaybackRequiresUserGesture = true
-            loadWithOverviewMode = true
-            useWideViewPort = true
-            builtInZoomControls = true
-            displayZoomControls = false
-            allowFileAccess = false
-            allowContentAccess = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            setGeolocationEnabled(false)
-        }
-        CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
+    /** Shows the formatted address, unless the user is editing it. */
+    private fun showUrl() {
+        if (urlBar.hasFocus()) return
+        urlDisplay.isVisible = true
+        val url = current.url
+        urlDisplay.text = if (url.isEmpty()) "" else AddressFormat.format(this, url)
     }
 
-    private fun openTab(url: String?, parent: Tab? = null, external: Boolean = false, blank: Boolean = false): Tab {
-        val webView = createWebView()
-        val tab = Tab(webView, parent, external)
+    /** Switches to the editable full address, all selected. */
+    private fun editAddress() {
+        urlDisplay.isVisible = false
+        urlBar.setText(current.url)
+        urlBar.requestFocus()
+        urlBar.selectAll()
+        showKeyboard()
+    }
+
+    // Tabs
+
+    private fun createWebView(tab: () -> Tab): BrowserWebView = BrowserWebView(this).apply {
+        layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        WebPages.configure(this)
+        setDownloadListener { url, userAgent, disposition, mime, _ ->
+            WebPages.download(this@MainActivity, url, userAgent, disposition, mime)
+        }
+        setOnLongClickListener { WebPages.onLongPress(this@MainActivity, this) { url -> openInBackground(url, tab()) } }
+    }
+
+    /**
+     * Opens a tab after [parent], or at the end.
+     *
+     * Without a [url], the tab shows the start page, or nothing if [blank].
+     * Unless [select] is false, the new tab becomes the current one.
+     */
+    private fun openTab(
+        url: String?,
+        parent: Tab? = null,
+        external: Boolean = false,
+        blank: Boolean = false,
+        select: Boolean = true,
+    ): Tab {
+        lateinit var tab: Tab
+        val webView = createWebView { tab }
+        tab = Tab(webView, parent, external)
         webView.webViewClient = Client(tab)
         webView.webChromeClient = Chrome(tab)
-        webView.setDownloadListener { downloadUrl, userAgent, disposition, mime, _ ->
-            download(downloadUrl, userAgent, disposition, mime)
-        }
-        val index = if (parent != null) tabs.indexOf(parent) + 1 else tabs.size
+        val index = if (parent != null && parent in tabs) tabs.indexOf(parent) + 1 else tabs.size
         tabs.add(index, tab)
         when {
+            !select && url != null -> tab.pendingUrl = url
             url != null -> load(tab, url)
             !blank -> showStartPage(tab)
         }
+        if (!select) {
+            updateUi()
+            return tab
+        }
         if (url != null && urlBar.hasFocus()) hideKeyboard()
         selectTab(tab)
-        if (url == null && !blank) {
-            urlBar.requestFocus()
-            showKeyboard()
-        }
+        if (url == null && !blank) editAddress()
         return tab
     }
 
+    /** Opens a link from a page's long-press menu in a new tab behind the current one. */
+    private fun openInBackground(url: String, parent: Tab) {
+        val tab = openTab(url, parent = parent, select = false)
+        Snackbar.make(snackbarHost, R.string.opened_in_new_tab, Snackbar.LENGTH_LONG)
+            .setAction(R.string.switch_tab) { if (tab in tabs) selectTab(tab) }
+            .show()
+    }
+
     private fun selectTab(tab: Tab) {
-        if (::current.isInitialized && current !== tab) current.webView.onPause()
+        if (::swipeRefresh.isInitialized) swipeRefresh.isRefreshing = false
+        if (::current.isInitialized && current !== tab) {
+            captureThumbnail(current)
+            current.webView.onPause()
+        }
         current = tab
         container.removeAllViews()
         container.addView(tab.webView)
@@ -271,20 +335,38 @@ class MainActivity : AppCompatActivity() {
         updateUi()
     }
 
-    private fun closeTab(tab: Tab) {
+    /** Removes a tab; a snackbar offers to bring it back for a few seconds. */
+    private fun closeTab(tab: Tab, offerUndo: Boolean = false) {
         val index = tabs.indexOf(tab)
         if (index < 0) return
         tabs.removeAt(index)
+        container.removeView(tab.webView)
+        tab.webView.onPause()
         if (tab === current) {
             when {
-                tabs.isEmpty() -> openTab(null)
+                // A fresh start page, without opening the keyboard.
+                tabs.isEmpty() -> showStartPage(openTab(null, blank = true))
                 tab.parent != null && tab.parent in tabs -> selectTab(tab.parent)
                 else -> selectTab(tabs[minOf(index, tabs.size - 1)])
             }
         }
-        container.removeView(tab.webView)
-        tab.webView.destroy()
         updateUi()
+        if (!offerUndo) {
+            tab.webView.destroy()
+            return
+        }
+        val host = if (switcher.isVisible) switcher else snackbarHost
+        Snackbar.make(host, R.string.tab_closed, Snackbar.LENGTH_LONG)
+            .setAction(R.string.undo) {
+                tabs.add(minOf(index, tabs.size), tab)
+                updateUi()
+            }
+            .addCallback(object : Snackbar.Callback() {
+                override fun onDismissed(snackbar: Snackbar, event: Int) {
+                    if (event != DISMISS_EVENT_ACTION) tab.webView.destroy()
+                }
+            })
+            .show()
     }
 
     private fun showStartPage(tab: Tab) {
@@ -320,48 +402,121 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showTabs() {
-        val dialog = BottomSheetDialog(this)
-        val view = layoutInflater.inflate(R.layout.sheet_tabs, null)
-        val list = view.findViewById<RecyclerView>(R.id.tab_list)
-        list.layoutManager = LinearLayoutManager(this)
-        list.adapter = TabAdapter(dialog)
-        list.scrollToPosition(tabs.indexOf(current))
-        view.findViewById<View>(R.id.new_tab).setOnClickListener {
-            dialog.dismiss()
+    // Tab switcher
+
+    private fun spanCount(): Int = maxOf(2, resources.configuration.screenWidthDp / 200)
+
+    private fun setUpSwitcher() {
+        switcherGrid.layoutManager = GridLayoutManager(this, spanCount())
+        switcherGrid.adapter = switcherAdapter
+        findViewById<View>(R.id.switcher_close).setOnClickListener { hideSwitcher() }
+        findViewById<View>(R.id.switcher_new_tab).setOnClickListener {
+            hideSwitcher()
             openTab(null)
         }
-        dialog.setContentView(view)
-        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
-        dialog.show()
+        // Swipe a card sideways to close its tab, as in Chrome.
+        ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(0, ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT) {
+            override fun onMove(recycler: RecyclerView, from: RecyclerView.ViewHolder, to: RecyclerView.ViewHolder) = false
+
+            override fun onSwiped(holder: RecyclerView.ViewHolder, direction: Int) {
+                tabs.getOrNull(holder.bindingAdapterPosition)?.let { closeTab(it, offerUndo = true) }
+            }
+        }).attachToRecyclerView(switcherGrid)
     }
 
-    private inner class TabAdapter(val dialog: BottomSheetDialog) : RecyclerView.Adapter<TabAdapter.Holder>() {
+    private fun showSwitcher() {
+        hideKeyboard()
+        captureThumbnail(current) {
+            switcher.isVisible = true
+            updateUi()
+            switcherGrid.scrollToPosition(tabs.indexOf(current))
+        }
+    }
+
+    private fun hideSwitcher() {
+        switcher.isVisible = false
+    }
+
+    /**
+     * Captures the top of a tab's page for the switcher, then runs [done].
+     *
+     * Copies the pixels on screen, which also works for GPU-drawn content;
+     * the tab must be the one shown.
+     */
+    private fun captureThumbnail(tab: Tab, done: () -> Unit = {}) {
+        val view = tab.webView
+        if (!view.isAttachedToWindow || view.width == 0 || view.height == 0 || tab.url.isEmpty() && tab.title.isEmpty()) {
+            if (tab.url.isEmpty()) tab.thumbnail = null
+            done()
+            return
+        }
+        // The card shows a 4:5 portrait of the top of the page, at a third of its size.
+        val height = minOf(view.height, view.width * 5 / 4)
+        val bitmap = Bitmap.createBitmap(view.width / 3, height / 3, Bitmap.Config.ARGB_8888)
+        val location = IntArray(2)
+        view.getLocationInWindow(location)
+        val source = Rect(location[0], location[1], location[0] + view.width, location[1] + height)
+        try {
+            PixelCopy.request(window, source, bitmap, { result ->
+                if (result == PixelCopy.SUCCESS) {
+                    tab.thumbnail = bitmap
+                } else {
+                    drawThumbnail(view, bitmap)?.let { tab.thumbnail = it }
+                }
+                done()
+            }, handler)
+        } catch (error: IllegalArgumentException) {
+            drawThumbnail(view, bitmap)?.let { tab.thumbnail = it }
+            done()
+        }
+    }
+
+    /** Draws the view in software, for when the pixels cannot be copied. */
+    private fun drawThumbnail(view: View, bitmap: Bitmap): Bitmap? = try {
+        val canvas = Canvas(bitmap)
+        canvas.scale(1 / 3f, 1 / 3f)
+        view.draw(canvas)
+        bitmap
+    } catch (error: Exception) {
+        null
+    }
+
+    private inner class TabAdapter : RecyclerView.Adapter<TabAdapter.Holder>() {
         inner class Holder(view: View) : RecyclerView.ViewHolder(view) {
+            val card: MaterialCardView = view.findViewById(R.id.card)
+            val favicon: ImageView = view.findViewById(R.id.favicon)
             val title: TextView = view.findViewById(R.id.title)
-            val subtitle: TextView = view.findViewById(R.id.subtitle)
             val close: View = view.findViewById(R.id.close)
+            val thumbnail: ImageView = view.findViewById(R.id.thumbnail)
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-            Holder(LayoutInflater.from(parent.context).inflate(R.layout.item_tab, parent, false))
+            Holder(LayoutInflater.from(parent.context).inflate(R.layout.item_tab_card, parent, false))
 
         override fun getItemCount() = tabs.size
 
         override fun onBindViewHolder(holder: Holder, position: Int) {
             val tab = tabs[position]
-            holder.title.text = tab.title.ifBlank { tab.url.ifBlank { getString(R.string.new_tab) } }
-            holder.subtitle.text = tab.url
-            holder.subtitle.isVisible = tab.url.isNotEmpty()
-            holder.title.setTypeface(null, if (tab === current) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            holder.title.text = tab.title.ifBlank {
+                Links.parse(tab.url)?.let { parsed ->
+                    if (parsed.kind != null) AddressFormat.shorten(parsed.label) else parsed.host
+                } ?: getString(R.string.new_tab)
+            }
+            holder.favicon.setImageBitmap(tab.favicon)
+            holder.favicon.isVisible = tab.favicon != null
+            holder.thumbnail.setImageBitmap(tab.thumbnail)
+            // Portrait cards: the image is 5/4 as tall as the card is wide.
+            // The grid may not be laid out yet on first show, so use the screen width.
+            val width = (resources.displayMetrics.widthPixels - switcherGrid.paddingLeft - switcherGrid.paddingRight) / spanCount()
+            holder.thumbnail.layoutParams.height = (width * 5 / 4).coerceAtLeast(1)
+            val selected = tab === current
+            holder.card.strokeWidth = if (selected) (3 * resources.displayMetrics.density).toInt() else 0
+            holder.card.strokeColor = MaterialColors.getColor(holder.card, com.google.android.material.R.attr.colorPrimary)
             holder.itemView.setOnClickListener {
                 selectTab(tab)
-                dialog.dismiss()
+                hideSwitcher()
             }
-            holder.close.setOnClickListener {
-                closeTab(tab)
-                notifyDataSetChanged()
-            }
+            holder.close.setOnClickListener { closeTab(tab, offerUndo = true) }
         }
     }
 
@@ -393,7 +548,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (urls.length() == 0) return
         for (i in 0 until urls.length()) {
-            openTab(null, blank = true).pendingUrl = urls.getString(i)
+            openTab(urls.getString(i), select = false)
         }
         if (select) selectTab(tabs[prefs.getInt(PREF_SELECTED, 0).coerceIn(0, tabs.size - 1)])
     }
@@ -402,12 +557,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUi() {
         tabCount.text = if (tabs.size > 99) ":D" else tabs.size.toString()
-        showUrl()
-        showProgress()
-    }
-
-    private fun showUrl() {
-        if (!urlBar.hasFocus()) urlBar.setText(current.url)
+        switcherTitle.text = if (tabs.size == 1) getString(R.string.one_tab) else getString(R.string.tab_count, tabs.size)
+        if (switcher.isVisible) switcherAdapter.notifyDataSetChanged()
+        if (::current.isInitialized) {
+            showUrl()
+            showProgress()
+        }
     }
 
     private fun showProgress() {
@@ -424,9 +579,7 @@ class MainActivity : AppCompatActivity() {
         popup.menu.apply {
             findItem(R.id.forward).isEnabled = current.webView.canGoForward()
             findItem(R.id.bookmark).setTitle(if (bookmarked) R.string.remove_bookmark else R.string.add_bookmark)
-            findItem(R.id.bookmark).isEnabled = url.isNotEmpty()
-            findItem(R.id.share).isEnabled = url.isNotEmpty()
-            findItem(R.id.copy_link).isEnabled = url.isNotEmpty()
+            for (id in listOf(R.id.bookmark, R.id.share, R.id.copy_link, R.id.pin)) findItem(id).isEnabled = url.isNotEmpty()
         }
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -436,8 +589,10 @@ class MainActivity : AppCompatActivity() {
                 R.id.bookmark -> toggleBookmark(url, bookmarked)
                 R.id.bookmarks -> pickEntry.launch(ListActivity.intent(this, ListActivity.MODE_BOOKMARKS))
                 R.id.history -> pickEntry.launch(ListActivity.intent(this, ListActivity.MODE_HISTORY))
-                R.id.share -> share(url)
-                R.id.copy_link -> copy(url)
+                R.id.downloads -> startActivity(Intent(this, DownloadsActivity::class.java))
+                R.id.pin -> WebApps.pin(this, current.webView, current.favicon)
+                R.id.share -> WebPages.share(this, url)
+                R.id.copy_link -> WebPages.copy(this, url)
                 R.id.open_by_default -> openByDefaultSettings()
                 R.id.status -> showStatus()
             }
@@ -453,18 +608,6 @@ class MainActivity : AppCompatActivity() {
         } else {
             store.addBookmark(url, current.title.ifBlank { url })
             Toast.makeText(this, R.string.bookmark_added, Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun share(url: String) {
-        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, url)
-        startActivity(Intent.createChooser(send, null))
-    }
-
-    private fun copy(url: String) {
-        getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("link", url))
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            Toast.makeText(this, R.string.link_copied, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -511,8 +654,6 @@ class MainActivity : AppCompatActivity() {
         handler.postDelayed(::watchGateway, 1000)
     }
 
-    // Keyboard, downloads, external apps
-
     private fun showKeyboard() {
         urlBar.post {
             getSystemService(InputMethodManager::class.java).showSoftInput(urlBar, InputMethodManager.SHOW_IMPLICIT)
@@ -522,47 +663,6 @@ class MainActivity : AppCompatActivity() {
     private fun hideKeyboard() {
         getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(urlBar.windowToken, 0)
         urlBar.clearFocus()
-    }
-
-    private fun download(url: String, userAgent: String, disposition: String?, mime: String?) {
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            Toast.makeText(this, R.string.download_unsupported, Toast.LENGTH_SHORT).show()
-            return
-        }
-        val name = URLUtil.guessFileName(url, disposition, mime)
-        val request = DownloadManager.Request(Uri.parse(Links.toPathUrl(url)))
-            .setMimeType(mime)
-            .addRequestHeader("User-Agent", userAgent)
-            .setTitle(name)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
-        CookieManager.getInstance().getCookie(url)?.let { request.addRequestHeader("Cookie", it) }
-        try {
-            getSystemService(DownloadManager::class.java).enqueue(request)
-            Toast.makeText(this, getString(R.string.downloading, name), Toast.LENGTH_SHORT).show()
-        } catch (error: Exception) {
-            Log.w(TAG, "download failed", error)
-            Toast.makeText(this, R.string.download_unsupported, Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun openExternal(url: String) {
-        try {
-            val intent = if (url.startsWith("intent:")) {
-                Intent.parseUri(url, Intent.URI_INTENT_SCHEME).apply {
-                    addCategory(Intent.CATEGORY_BROWSABLE)
-                    component = null
-                    selector = null
-                }
-            } else {
-                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
-            }
-            startActivity(intent)
-        } catch (error: ActivityNotFoundException) {
-            Toast.makeText(this, R.string.no_app, Toast.LENGTH_SHORT).show()
-        } catch (error: Exception) {
-            Log.w(TAG, "cannot open $url", error)
-        }
     }
 
     private fun hideCustomView() {
@@ -583,31 +683,25 @@ class MainActivity : AppCompatActivity() {
                 view.loadUrl(internal)
                 return true
             }
-            return when (request.url.scheme?.lowercase()) {
-                "http", "https", "about", "data", "blob", "javascript" -> false
-                else -> {
-                    if (request.hasGesture() || request.isForMainFrame) openExternal(url)
-                    true
-                }
-            }
+            if (WebPages.isWebScheme(request.url.scheme)) return false
+            if (request.hasGesture() || request.isForMainFrame) WebPages.openExternal(this@MainActivity, url)
+            return true
         }
 
-        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-            val url = request.url.toString()
-            val client = (application as IrohLinkApp).gatewayClient
-            // Absolute public URLs in a page: load them from the gateway under the public URL.
-            Links.toInternal(url)?.let { return client.load(it, request.method, request.requestHeaders, followRedirects = true) }
-            if (!Links.isInternal(url)) return null
-            return client.load(url, request.method, request.requestHeaders, followRedirects = false)
-        }
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+            WebPages.intercept(this@MainActivity, request)
 
         override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
             tab.title = ""
+            tab.favicon = favicon
             if (tab === current) updateUi()
         }
 
         override fun onPageFinished(view: WebView, url: String) {
-            if (tab === current) updateUi()
+            if (tab === current) {
+                swipeRefresh.isRefreshing = false
+                updateUi()
+            }
         }
 
         override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
@@ -631,6 +725,10 @@ class MainActivity : AppCompatActivity() {
             if (url.isNotEmpty() && title != null && title != view.url) store.setVisitTitle(url, title)
         }
 
+        override fun onReceivedIcon(view: WebView, icon: Bitmap?) {
+            tab.favicon = icon
+        }
+
         override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
             val child = openTab(null, parent = tab, blank = true)
             (resultMsg.obj as WebView.WebViewTransport).webView = child.webView
@@ -639,7 +737,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onCloseWindow(window: WebView) {
-            tabs.firstOrNull { it.webView === window }?.let(::closeTab)
+            tabs.firstOrNull { it.webView === window }?.let { closeTab(it) }
         }
 
         override fun onShowFileChooser(
@@ -652,7 +750,7 @@ class MainActivity : AppCompatActivity() {
             return try {
                 fileChooser.launch(fileChooserParams.createIntent())
                 true
-            } catch (error: ActivityNotFoundException) {
+            } catch (error: Exception) {
                 fileCallback = null
                 false
             }
@@ -681,7 +779,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
-        const val TAG = "iroh-link"
         const val TAG_WEB = "iroh-link-web"
         const val PREF_TABS = "tabs"
         const val PREF_SELECTED = "selected"

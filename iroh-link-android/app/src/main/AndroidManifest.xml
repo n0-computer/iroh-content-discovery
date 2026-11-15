@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- iroh reads the active network's DNS servers. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Lets the downloads view hand downloaded APKs to the package installer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- DownloadManager writes to the public Downloads folder before Android 10. -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
@@ -48,5 +50,19 @@
             android:name=".ListActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity" />
+
+        <activity
+            android:name=".DownloadsActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity" />
+
+        <!-- A site pinned to the home screen. Each start URL gets its own task,
+             so pinned sites show in recents like separate apps. -->
+        <activity
+            android:name=".WebAppActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density"
+            android:documentLaunchMode="intoExisting"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>

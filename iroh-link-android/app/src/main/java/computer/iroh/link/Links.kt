@@ -25,6 +25,31 @@ object Links {
         return Parts(scheme.lowercase(), host.lowercase(), port.ifEmpty { null }, rest)
     }
 
+    /** Content addressed by a BLAKE3 hash, or named by a Pkarr key. */
+    enum class Kind { BLAKE3, PKARR }
+
+    /** A URL split for display: a content link has a [kind] and [label], others a [host]. */
+    data class Parsed(val kind: Kind?, val label: String, val host: String, val path: String, val query: String)
+
+    /** Splits a public or gateway URL for display, or returns `null` for non-http(s) URLs. */
+    fun parse(url: String): Parsed? {
+        val parts = split(toDisplay(url)) ?: return null
+        if (parts.scheme != "https" && parts.scheme != "http") return null
+        val rest = parts.rest.substringBefore('#')
+        val path = rest.substringBefore('?')
+        val query = if (rest.contains('?')) "?" + rest.substringAfter('?') else ""
+        val match = PUBLIC_HOST.matchEntire(parts.host)
+        return if (match != null) {
+            val (label, kind) = match.destructured
+            Parsed(if (kind == "blake3") Kind.BLAKE3 else Kind.PKARR, label, parts.host, path, query)
+        } else {
+            Parsed(null, "", parts.host, path, query)
+        }
+    }
+
+    /** Returns the scheme, host and port of a URL, the part that makes up its origin. */
+    fun origin(url: String): String? = split(url)?.let { "${it.scheme}://${it.host}${it.port.orEmpty()}" }
+
     /** Returns whether [url] is an http(s) link under a `blake3.net` or `pkarr.net` subdomain. */
     fun isPublic(url: String): Boolean = toInternal(url) != null
 

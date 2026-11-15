@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="blake3_badge">#4DB6AC</color>
+    <color name="blake3_badge_text">#00251F</color>
+    <color name="blake3_body">#16413B</color>
+    <color name="blake3_body_text">#B2EBE2</color>
+    <color name="pkarr_badge">#FB923C</color>
+    <color name="pkarr_badge_text">#2E1000</color>
+    <color name="pkarr_body">#4A2810</color>
+    <color name="pkarr_body_text">#FED7B5</color>
+</resources>

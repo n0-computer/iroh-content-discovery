@@ -4,7 +4,11 @@ A small Android browser for `https://<hash>.blake3.net` and
 `https://<key>.pkarr.net` links. It runs the [iroh link gateway] inside the
 app, so you need no desktop gateway and no browser extension.
 
-The app has tabs, back and forward, history, and bookmarks. Pages run in a
+The app has tabs with a preview grid, back and forward, history, bookmarks, and
+a downloads list. The address bar shows a content link as a pill: `b3` for a
+BLAKE3 hash or `pk` for a Pkarr key, with the first and last three characters,
+then the path. Tap it to edit the full URL. Long-press a link or image to open
+it in a new tab, copy, share, or download it. Pages run in a
 full Chromium WebView with JavaScript, local storage, IndexedDB, and
 WebAssembly. Each hash and each key gets its own origin, which is a secure
 context.
@@ -48,6 +52,20 @@ low, and you can clear it in the app's system settings.
 The gateway finds index servers when the app starts, which takes a few
 seconds. A banner shows the progress. Requests made in that time wait for the
 gateway.
+
+## Offline sites and home screen apps
+
+**Add to home screen** in the menu pins the site as a standalone app. The app
+reads the site's web app manifest for the name, start URL and icon, prefers a
+maskable icon, and falls back to the page's icons or a generated one. A pinned
+site opens without browser controls, in its own entry in recents, and shares
+storage with the browser.
+
+Sites work offline from the cache: when the phone is offline or the gateway is
+not ready yet, cached pages load at once. Online, the app waits up to three
+seconds for revalidation, then serves the cached copy and finishes the update
+in the background. Service worker requests use the same cache, so sites with a
+service worker work as they do in other browsers.
 
 ## Open links in the app
 
