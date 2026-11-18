@@ -305,21 +305,25 @@ async fn servers_are_discovered_on_mainline_and_share_the_announced_socket() {
 #[tokio::test]
 async fn resolver_stream_yields_all_announced_endpoints() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        let network = n0_mainline::Testnet::new(3).await.unwrap();
-        let node = || {
-            Dht::builder()
-                .bootstrap(&network.bootstrap)
-                .port(0)
-                .build()
-                .unwrap()
-        };
+        // Each DHT store retains one peer per IP and infohash. Keep the two
+        // localhost publishers in independent stores, then query both stores.
+        let networks = [
+            n0_mainline::Testnet::new(1).await.unwrap(),
+            n0_mainline::Testnet::new(1).await.unwrap(),
+        ];
+        let bootstrap: Vec<_> = networks
+            .iter()
+            .flat_map(|network| network.bootstrap.clone())
+            .collect();
+        let node =
+            |bootstrap: &[String]| Dht::builder().bootstrap(bootstrap).port(0).build().unwrap();
         let server = Server::new(Limits::for_tests());
-        let handle = server.attach(node()).await.unwrap();
+        let handle = server.attach(node(&bootstrap)).await.unwrap();
         let server_addr = v4(loopback(handle.local_addr()));
         let infohash = n0_mainline::Id::from([71; 20]);
         let mut expected = Vec::new();
-        for _ in 0..2 {
-            let dht = node();
+        for network in &networks {
+            let dht = node(&network.bootstrap);
             let index = AddrIndex::udp(dht.clone(), server_addr).await.unwrap();
             let secret = SecretKey::generate();
             expected.push(secret.public());
@@ -327,7 +331,7 @@ async fn resolver_stream_yields_all_announced_endpoints() {
             dht.get_closest_nodes(infohash).await.unwrap();
             dht.announce_peer(infohash, None).await.unwrap();
         }
-        let reader = node();
+        let reader = node(&bootstrap);
         let resolver = Resolver::new(
             reader.clone(),
             AddrIndex::udp(reader, server_addr).await.unwrap(),

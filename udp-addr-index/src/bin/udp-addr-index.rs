@@ -1,6 +1,6 @@
 //! Address-index server command line interface.
 
-use n0_mainline::Dht;
+use n0_mainline::{Dht, Mode};
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
         None
     };
     let dht = Dht::builder()
-        .server_mode()
+        .mode(Mode::Client)
         .port(cli.dht_port)
         .build()
         .std_context("failed to bind the Mainline socket")?;

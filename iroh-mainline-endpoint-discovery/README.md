@@ -47,6 +47,11 @@ front of it. `Resolver::resolve_continuously` starts a new lookup whenever the
 consumer asks for more, and may yield an endpoint again.
 `Resolver::resolve` collects a sorted list.
 
+Mainline servers using n0-mainline 0.8 keep at most one peer per IP address for
+each infohash. Publishers behind the same public IPv4 address can replace each
+other's announcements even when they use different ports. Discovery therefore
+does not guarantee finding every publisher behind a shared NAT.
+
 ## Publishing
 
 A `Publisher` keeps its index record and its announcements on separate
