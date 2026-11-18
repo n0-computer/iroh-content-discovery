@@ -118,7 +118,7 @@ fn parse_query(query: Option<&str>) -> Result<Vec<EndpointId>, HttpError> {
             _ if pair == PARAM => "",
             _ => continue,
         };
-        let provider = parse_provider(value).ok_or(HttpError(
+        let provider = parse_provider(value).ok_or(HttpError::new(
             StatusCode::BAD_REQUEST,
             "invalid provider: expected an endpoint ID in z-base-32 or hex",
         ))?;
@@ -127,7 +127,7 @@ fn parse_query(query: Option<&str>) -> Result<Vec<EndpointId>, HttpError> {
         }
     }
     if providers.len() > MAX_PER_URL {
-        return Err(HttpError(
+        return Err(HttpError::new(
             StatusCode::BAD_REQUEST,
             "a URL may name at most four providers",
         ));

@@ -5,7 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
 use iroh_blobs::{BlobsProtocol, format::collection::Collection, store::mem::MemStore};
 use iroh_link_gateway::Gateway;
-use iroh_mainline_endpoint_discovery::{AddrIndex, BLAKE3_DOMAIN, Resolver, infohash_from_blake3};
+use iroh_mainline_endpoint_discovery::{
+    AddrIndex, BLAKE3_DOMAIN, Resolver, UdpClient, infohash_from_blake3,
+};
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use reqwest::{Client, StatusCode};
 use simple_dns::{
@@ -234,19 +236,46 @@ async fn run() {
             .status(),
         StatusCode::BAD_REQUEST
     );
+    // A key nobody published is asked for again before it is not found, and
+    // browsers get a page that tries again by itself.
     let missing = SigningKey::from_bytes(&[43; 32]);
-    assert_eq!(
-        client
-            .get(format!(
-                "{base}/{}",
-                z32::encode(missing.verifying_key().as_bytes())
-            ))
-            .send()
+    let missing_url = format!("{base}/{}", z32::encode(missing.verifying_key().as_bytes()));
+    let response = client.get(&missing_url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.headers()["retry-after"], "30");
+    assert!(
+        response
+            .text()
             .await
             .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
+            .starts_with("no Pkarr packet found for this key")
     );
+    let response = client
+        .get(&missing_url)
+        .header("accept", "text/html")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let html = response.text().await.unwrap();
+    assert!(html.contains(r#"<meta http-equiv="refresh" content="30">"#));
+    // A packet without a usable target is final, so it does not refresh.
+    publish(&publisher, &key, ".").await;
+    let response = client
+        .get(&url)
+        .header("accept", "text/html")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response.headers().get("retry-after").is_none());
+    assert!(!response.text().await.unwrap().contains("refresh"));
 
     // A valid BEP44 signature does not imply valid DNS data.
     publish_bytes(&publisher, &key, b"not a DNS packet").await;
@@ -280,4 +309,42 @@ async fn run() {
     task.await.unwrap();
     endpoint.close().await;
     provider_router.shutdown().await.unwrap();
+}
+
+/// A node without peers is not connected, which is not the same as a key
+/// nobody published.
+#[tokio::test]
+async fn a_node_without_peers_says_so() {
+    let lonely = Dht::builder().no_bootstrap().port(0).build().unwrap();
+    // Pkarr lookups do not use the index, so it need not reach a server.
+    let index = AddrIndex::from_udp(UdpClient::attach(lonely.clone()).await.unwrap());
+    let endpoint = Endpoint::builder(presets::Minimal).bind().await.unwrap();
+    let gateway = Gateway::new(endpoint.clone(), Resolver::new(lonely, index));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen_addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        gateway
+            .serve(listener, std::future::pending())
+            .await
+            .unwrap()
+    });
+    let key = z32::encode(&[42; 32]);
+    let response = client_builder()
+        .build()
+        .unwrap()
+        .get(format!("http://{listen_addr}/pkarr/{key}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["retry-after"], "5");
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .starts_with("not connected to the Mainline DHT yet")
+    );
+    task.abort();
+    endpoint.close().await;
 }
