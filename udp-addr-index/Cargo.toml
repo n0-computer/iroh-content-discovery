@@ -21,7 +21,7 @@ blake3.workspace = true
 clap = { workspace = true, optional = true }
 data-encoding = { workspace = true, optional = true }
 iroh-metrics = { version = "1.0.1", features = ["service"] }
-udp-addr-index-proto = { version = "0.1.0", path = "../udp-addr-index-proto" }
+udp-addr-index-proto = { version = "0.2.0", path = "../udp-addr-index-proto" }
 n0-error.workspace = true
 n0-mainline.workspace = true
 postcard.workspace = true
@@ -32,7 +32,7 @@ tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 iroh-base.workspace = true
-iroh-mainline-endpoint-discovery = { version = "0.1.0", path = "../iroh-mainline-endpoint-discovery" }
+iroh-mainline-endpoint-discovery = { version = "0.2.0", path = "../iroh-mainline-endpoint-discovery" }
 n0-future.workspace = true
 tokio = { workspace = true, features = ["full"] }
 

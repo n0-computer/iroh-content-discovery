@@ -52,7 +52,7 @@ clap = { workspace = true, optional = true }
 data-encoding = { workspace = true, optional = true }
 iroh.workspace = true
 iroh-blobs.workspace = true
-iroh-mainline-endpoint-discovery = { version = "0.1.0", path = "../iroh-mainline-endpoint-discovery" }
+iroh-mainline-endpoint-discovery = { version = "0.2.0", path = "../iroh-mainline-endpoint-discovery" }
 lru = "0.19"
 mime_classifier = "0.0.1"
 mime_guess = "2"
@@ -77,7 +77,7 @@ windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation
 
 [dev-dependencies]
 tempfile = "3"
-udp-addr-index = { version = "0.1.0", path = "../udp-addr-index" }
+udp-addr-index = { version = "0.2.0", path = "../udp-addr-index" }
 reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { workspace = true, features = ["full"] }
