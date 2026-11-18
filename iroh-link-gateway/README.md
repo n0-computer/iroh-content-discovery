@@ -184,9 +184,25 @@ in memory by public key (up to 1024 entries), for the minimum answer TTL capped 
 30 seconds. Cache hits do not extend expiry; zero-TTL records and errors are not
 cached. Paths and queries are applied separately on each request. Cache misses
 perform a DHT lookup with a 60-second timeout. The first response can be an older
-signed version; this favors latency over searching for the newest available version. Invalid keys return `400`, missing packets `404`,
+signed version; this favors latency over searching for the newest available version.
+
+A lookup only means something if the Mainline node knows peers. When its
+routing table is empty (outbound UDP blocked, an IPv6-only network, or just
+after a sleep or a network change), the gateway waits up to 10 seconds for it
+to bootstrap, and otherwise answers `503` "not connected to the Mainline DHT
+yet". A lookup that ends without an answer is repeated twice, after 1 and 2
+seconds, before the gateway answers `404`. With `--pkarr-relay URL`
+(`IROH_PKARR_RELAYS`, comma separated), for example `https://relay.pkarr.org`,
+HTTP Pkarr relays are asked when Mainline has no packet or is out of reach; a
+relay's packet is verified like one from Mainline. No relay is asked by
+default, since a relay learns which keys the gateway resolves.
+
+Invalid keys return `400`, missing packets `404`, a node without peers `503`,
 packets without a supported HTTPS target `422`, invalid packets or failed
-lookups `502`, and lookup timeouts `504`.
+lookups `502`, and lookup timeouts `504`. Failures likely to pass carry
+`Retry-After`; a browser (a request that accepts `text/html`) gets a page that
+says what failed and reloads itself after that delay. Other clients get the
+plain text reason.
 
 Content targets are served inline, so the key stays in the address bar, the
 bytes stay verified against the hash, and collections are served in place with
@@ -205,7 +221,9 @@ providers, and resolves signed endpoint records through the address index. The o
 `filter_verified_providers(endpoint, hash, stream)` stage validates each distinct
 candidate with an iroh-blobs size request backed by a Bao proof. The gateway uses
 this filter with three concurrent probes and a ten-second deadline per probe,
-skipping failed candidates. It reconnects to the first validated endpoint to
+skipping failed candidates. A lookup that finds no verified provider is
+repeated for up to ten seconds, since a publisher that just restarted has not
+announced itself yet; the `404` then names the hash. It reconnects to the first validated endpoint to
 stream the blob. The provider must have
 published its signed endpoint record and announced the content infohash, as in
 the workspace's `Publisher` and blobs example.
@@ -227,6 +245,12 @@ Rendezvous is used only if the curated list yields no addresses. With
 when the record does not resolve. Public keys are z-base-32 or 64 hex digits;
 infohashes are 40 hex digits. `--dht-port` controls the local Mainline UDP port
 (default: an available port).
+
+The command resolves the Mainline bootstrap nodes itself and waits until one
+resolves, since a node started offline would never find a peer. It checks the
+routing table every 30 seconds and starts a new node, with a new index
+connection, after three empty checks in a row. Library users can do the same
+with `Gateway::set_resolver`.
 
 ## Streaming and HTTP
 

@@ -21,13 +21,14 @@ use simple_dns::{
 use percent_encoding::percent_decode_str;
 
 use crate::{
-    Caching, Gateway, HttpError, LOOKUP_TIMEOUT, Root, Subdomain, parse_hash, parse_z32_bytes,
-    serve_path, serve_root,
+    Caching, Gateway, HttpError, LOOKUP_TIMEOUT, Root, Subdomain, error_page::RETRY_SOON,
+    parse_hash, parse_z32_bytes, serve_path, serve_root,
 };
 
 /// Targets under this domain name content this gateway can serve itself.
 use iroh_mainline_endpoint_discovery::{BLAKE3_DOMAIN, is_hostname};
-use tracing::{debug, warn};
+use n0_mainline::{Dht, MutableItem};
+use tracing::{debug, info, warn};
 
 // Bound both memory use and how long changed names can remain stale.
 const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -38,6 +39,21 @@ const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
 /// first answer lets one stale node roll a name back. Waiting for the whole
 /// lookup would cost seconds, so we take the newest answer within this window.
 const NEWEST_GRACE: Duration = Duration::from_millis(300);
+
+/// How long a lookup waits for a Mainline node without peers to find some.
+const BOOTSTRAP_WAIT: Duration = Duration::from_secs(10);
+
+/// Mainline lookups per request while they end without an answer.
+const QUERY_ATTEMPTS: u32 = 3;
+
+/// Pause before the second lookup; doubled before each one after.
+const QUERY_BACKOFF: Duration = Duration::from_secs(1);
+
+/// When a browser tries again while the node has no peers.
+const RETRY_NOT_CONNECTED: Duration = Duration::from_secs(5);
+
+/// When a browser tries again after Mainline had no packet.
+const RETRY_NOT_FOUND: Duration = Duration::from_secs(30);
 
 /// Verified packets kept between requests for the same key.
 const PACKET_SLOTS: NonZeroUsize = NonZeroUsize::new(1024).expect("nonzero");
@@ -120,20 +136,24 @@ pub(crate) async fn redirect(
         debug!(key = encoded, "Pkarr cache hit");
         item
     } else {
-        tokio::time::timeout(LOOKUP_TIMEOUT, resolve(gateway.0.resolver.dht(), &key))
+        tokio::time::timeout(LOOKUP_TIMEOUT, resolve(&gateway, &key))
             .await
             .map_err(|_| {
-                debug!(
+                warn!(
                     key = encoded,
                     elapsed_ms = started.elapsed().as_millis(),
                     "Pkarr lookup timed out"
                 );
-                HttpError(StatusCode::GATEWAY_TIMEOUT, "Pkarr lookup timed out")
+                HttpError::transient(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "Pkarr lookup timed out: Mainline nodes did not answer in time; retrying",
+                    RETRY_SOON,
+                )
             })??
     };
     let packet = Packet::parse(item.value()).map_err(|error| {
         warn!(%error, "invalid Pkarr DNS packet");
-        HttpError(StatusCode::BAD_GATEWAY, "invalid Pkarr DNS packet")
+        HttpError::new(StatusCode::BAD_GATEWAY, "invalid Pkarr DNS packet")
     })?;
     debug!(
         key = encoded,
@@ -150,10 +170,13 @@ pub(crate) async fn redirect(
             Instant::now(),
         );
     }
-    let authority = target(&packet, encoded).ok_or(HttpError(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "no supported apex HTTPS target",
-    ))?;
+    let authority = target(&packet, encoded).ok_or_else(|| {
+        info!(key = encoded, "Pkarr packet has no usable target");
+        HttpError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the Pkarr packet for this key has no usable target: no supported apex HTTPS record",
+        )
+    })?;
     // A content-addressed target is served here instead of being handed back
     // to the browser, so the key stays in the address bar and the bytes stay
     // verified.
@@ -167,7 +190,7 @@ pub(crate) async fn redirect(
         let query = uri.query().map(str::to_owned);
         let path = percent_decode_str(path.trim_start_matches('/'))
             .decode_utf8()
-            .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "path is not valid UTF-8"))?
+            .map_err(|_| HttpError::new(StatusCode::BAD_REQUEST, "path is not valid UTF-8"))?
             .into_owned();
         return if path.is_empty() {
             // `/pkarr/{key}` has no slash; a subdomain's root is always `/`.
@@ -201,36 +224,116 @@ pub(crate) fn content_hash(authority: &str) -> Option<iroh_blobs::Hash> {
 
 fn parse_key(encoded: &str) -> Result<[u8; 32], HttpError> {
     parse_z32_bytes(encoded).map_err(|_| {
-        HttpError(
+        HttpError::new(
             StatusCode::BAD_REQUEST,
             "invalid z-base-32 Pkarr public key",
         )
     })
 }
 
-async fn resolve(
-    dht: &n0_mainline::Dht,
-    key: &[u8; 32],
-) -> Result<n0_mainline::MutableItem, HttpError> {
-    let mut items = dht.get_mutable(key, None, None).await.map_err(|error| {
-        warn!(%error, "Pkarr lookup failed");
-        HttpError(StatusCode::BAD_GATEWAY, "Pkarr lookup failed")
-    })?;
-    newest_verified(&mut items, key).await
+/// Finds the newest packet for `key`, trying again while it looks transient.
+///
+/// An empty answer from a node with no peers says nothing about the key, so
+/// it waits for the node to find peers first. A lookup that ends without an
+/// answer is repeated, since one lookup can miss the nodes that hold the
+/// packet. HTTP relays, if any, are asked last, also when Mainline is out of
+/// reach.
+async fn resolve(gateway: &Gateway, key: &[u8; 32]) -> Result<MutableItem, HttpError> {
+    let encoded = z32::encode(key);
+    let mainline = mainline(gateway.resolver().dht(), key).await;
+    if let Ok(Some(item)) = mainline {
+        return Ok(item);
+    }
+    // Relays also help when Mainline is out of reach, as with UDP blocked.
+    let relays = gateway.0.pkarr_relays.lock().expect("poisoned").clone();
+    if let Some(relays) = relays
+        && let Some(item) = relays.resolve(key).await
+    {
+        info!(
+            key = encoded,
+            "Pkarr packet found on a relay, not on Mainline"
+        );
+        return Ok(item);
+    }
+    mainline?;
+    info!(
+        key = encoded,
+        lookups = QUERY_ATTEMPTS,
+        "no Pkarr packet found on Mainline"
+    );
+    Err(HttpError::transient(
+        StatusCode::NOT_FOUND,
+        "no Pkarr packet found for this key: Mainline answered, but no node holds a record; \
+         the publisher may be offline or its record may have expired; retrying",
+        RETRY_NOT_FOUND,
+    ))
+}
+
+/// Asks Mainline up to [`QUERY_ATTEMPTS`] times while lookups end empty.
+async fn mainline(dht: &Dht, key: &[u8; 32]) -> Result<Option<MutableItem>, HttpError> {
+    let mut backoff = QUERY_BACKOFF;
+    for attempt in 1..=QUERY_ATTEMPTS {
+        connected(dht).await?;
+        let mut items = dht.get_mutable(key, None, None).await.map_err(|error| {
+            warn!(%error, "Pkarr lookup failed");
+            HttpError::new(StatusCode::BAD_GATEWAY, "Pkarr lookup failed")
+        })?;
+        if let Some(item) = newest_verified(&mut items, key).await? {
+            return Ok(Some(item));
+        }
+        debug!(attempt, "Mainline lookup found no Pkarr packet");
+        if attempt < QUERY_ATTEMPTS {
+            tokio::time::sleep(backoff).await;
+            backoff *= 2;
+        }
+    }
+    // The node may have lost its peers during the last lookup.
+    connected(dht).await?;
+    Ok(None)
+}
+
+/// Waits up to [`BOOTSTRAP_WAIT`] for the Mainline node to know some peers.
+async fn connected(dht: &Dht) -> Result<(), HttpError> {
+    let peers = async || dht.info().await.map_or(0, |info| info.routing_table_size());
+    if peers().await > 0 {
+        return Ok(());
+    }
+    debug!("Mainline routing table is empty; waiting for bootstrap");
+    let bootstrap = async {
+        // Each round asks the bootstrap nodes again.
+        while !dht.bootstrapped().await.unwrap_or(false) {
+            tokio::time::sleep(QUERY_BACKOFF).await;
+        }
+    };
+    if tokio::time::timeout(BOOTSTRAP_WAIT, bootstrap)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    warn!(
+        "not connected to Mainline: the routing table is empty; \
+         outbound UDP may be blocked, the network may be IPv6 only, or it just changed"
+    );
+    Err(HttpError::transient(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "not connected to the Mainline DHT yet: the gateway knows no DHT nodes; retrying",
+        RETRY_NOT_CONNECTED,
+    ))
 }
 
 /// Takes the newest answer, waiting [`NEWEST_GRACE`] after the first one.
 ///
 /// Every answer is signature-checked by `get_mutable`, but an old packet
 /// verifies just as well as a current one, so the sequence number decides.
+/// Returns `None` if the lookup ends without an answer.
 async fn newest_verified(
-    items: &mut (impl n0_future::Stream<Item = n0_mainline::MutableItem> + Unpin),
+    items: &mut (impl n0_future::Stream<Item = MutableItem> + Unpin),
     key: &[u8; 32],
-) -> Result<n0_mainline::MutableItem, HttpError> {
-    let first = items
-        .next()
-        .await
-        .ok_or(HttpError(StatusCode::NOT_FOUND, "no Pkarr packet found"))?;
+) -> Result<Option<MutableItem>, HttpError> {
+    let Some(first) = items.next().await else {
+        return Ok(None);
+    };
     let mut newest = verified(first, key)?;
     let deadline = tokio::time::sleep(NEWEST_GRACE);
     tokio::pin!(deadline);
@@ -251,7 +354,7 @@ async fn newest_verified(
         bytes = newest.value().len(),
         "using newest verified Pkarr item"
     );
-    Ok(newest)
+    Ok(Some(newest))
 }
 
 /// Rejects an item that is not a well-formed answer for `key`.
@@ -262,7 +365,7 @@ fn verified(
     // get_mutable verifies BEP44 signatures and binds each item to the requested
     // key. Its value is the DNS wire packet; no Pkarr envelope is needed.
     if item.seq() < 0 || item.key() != key {
-        return Err(HttpError(
+        return Err(HttpError::new(
             StatusCode::BAD_GATEWAY,
             "invalid Pkarr key or timestamp",
         ));
@@ -351,7 +454,7 @@ mod tests {
             newest_verified(&mut stream, &key),
         )
         .await;
-        assert!(result.is_ok_and(|item| item.is_ok()));
+        assert!(result.is_ok_and(|item| item.is_ok_and(|item| item.is_some())));
     }
 
     #[tokio::test]
@@ -367,10 +470,19 @@ mod tests {
             std::future::pending::<()>().await;
         };
         let mut stream = Box::pin(stream);
-        let Ok(newest) = newest_verified(&mut stream, &key).await else {
+        let Ok(Some(newest)) = newest_verified(&mut stream, &key).await else {
             panic!("newest lookup failed")
         };
         assert_eq!(newest.seq(), 200);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_without_answers_is_no_packet() {
+        let mut stream = Box::pin(n0_future::stream::empty());
+        assert!(matches!(
+            newest_verified(&mut stream, &[1; 32]).await,
+            Ok(None)
+        ));
     }
 
     #[test]

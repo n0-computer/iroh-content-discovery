@@ -1777,6 +1777,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "udp-addr-index",
+ "webpki-roots",
  "windows-sys 0.61.2",
  "z32",
 ]

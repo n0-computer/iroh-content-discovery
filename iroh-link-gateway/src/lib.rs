@@ -5,6 +5,7 @@
 //! from that provider, without downloading a whole blob into memory or a store.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap},
     net::SocketAddr,
     num::NonZeroUsize,
@@ -41,11 +42,13 @@ use n0_error::{StdResultExt, anyerr, bail_any, e, ensure, ensure_any};
 use n0_future::{BufferedStreamExt, StreamExt, stream};
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{Instrument, debug, debug_span, warn};
+use tracing::{Instrument, debug, debug_span, info, warn};
 
 mod debug_page;
+mod error_page;
 mod hints;
 mod pkarr_redirect;
+mod pkarr_relay;
 mod provider_cache;
 mod providers;
 mod ranges;
@@ -66,6 +69,10 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 /// still usually wins, since Mainline peers need DHT round trips and probes of
 /// their own.
 const HINT_HEAD_START: Duration = Duration::from_secs(1);
+/// How long an empty provider lookup is retried before the request fails.
+const PROVIDER_RETRY: Duration = Duration::from_secs(10);
+/// Pause before the second provider lookup; doubled before each one after.
+const PROVIDER_BACKOFF: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SNIFF_BYTES: u64 = 8192;
 /// Maximum HashSeq size: one metadata hash and at most 32,767 file hashes.
@@ -125,7 +132,10 @@ pub struct Gateway(Arc<Inner>);
 
 struct Inner {
     endpoint: Endpoint,
-    resolver: Resolver,
+    /// Replaced when the caller starts a new Mainline node.
+    resolver: Mutex<Resolver>,
+    /// HTTP relays asked when Mainline has no Pkarr packet for a key.
+    pkarr_relays: Mutex<Option<pkarr_relay::Relays>>,
     classifier: MimeClassifier,
     pkarr: Mutex<pkarr_redirect::Cache>,
     /// Recently verified providers and recently failed lookups, per hash.
@@ -158,7 +168,8 @@ impl Gateway {
     pub fn new(endpoint: Endpoint, resolver: Resolver) -> Self {
         Self(Arc::new(Inner {
             endpoint,
-            resolver,
+            resolver: Mutex::new(resolver),
+            pkarr_relays: Mutex::default(),
             classifier: MimeClassifier::new(),
             pkarr: Mutex::new(pkarr_redirect::Cache::default()),
             providers: Arc::default(),
@@ -167,6 +178,37 @@ impl Gateway {
             collections: Mutex::new(LruCache::new(SOURCE_SLOTS)),
             sizes: Mutex::new(LruCache::new(SIZE_SLOTS)),
         }))
+    }
+
+    /// Replaces the resolver, for example with one on a new Mainline node.
+    ///
+    /// Lookups that already started finish on the old one.
+    pub fn set_resolver(&self, resolver: Resolver) {
+        *self.0.resolver.lock().expect("poisoned") = resolver;
+    }
+
+    /// Sets the HTTP Pkarr relays asked when Mainline has no packet for a key.
+    ///
+    /// Each is a base URL such as `https://relay.pkarr.org`; the key is
+    /// appended as a path segment. A packet from a relay must verify like one
+    /// from Mainline. None are asked by default, since a relay learns which
+    /// keys this gateway resolves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn set_pkarr_relays(
+        &self,
+        relays: impl IntoIterator<Item = String>,
+    ) -> n0_error::Result<()> {
+        let relays = pkarr_relay::Relays::new(relays.into_iter().collect())?;
+        *self.0.pkarr_relays.lock().expect("poisoned") = relays;
+        Ok(())
+    }
+
+    /// Returns the resolver lookups use now.
+    fn resolver(&self) -> Resolver {
+        self.0.resolver.lock().expect("poisoned").clone()
     }
 
     /// Returns the routes for blobs and paths inside collections, plus CORS preflight.
@@ -202,6 +244,8 @@ impl Gateway {
             .fallback_service(routes)
             // Inside the rewrite, so it sees which requests came by subdomain.
             .layer(from_fn(sandbox_path_routes))
+            // Outside the sandbox, which would stop an error page's refresh.
+            .layer(from_fn(error_page::html))
             .layer(map_request(rewrite_subdomain))
             .layer(
                 CorsLayer::new()
@@ -262,10 +306,6 @@ impl Gateway {
         use provider_cache::Miss;
         use providers::{Provenance, verified_providers};
 
-        const NOT_FOUND: HttpError = HttpError(
-            StatusCode::NOT_FOUND,
-            "no verified provider found for this hash",
-        );
         // A page asking for the same unavailable hash many times costs one
         // lookup. Other failures, like a blob that is not a collection, are
         // not remembered, so they cannot poison valid requests.
@@ -278,28 +318,20 @@ impl Gateway {
         {
             Some(Miss::NotFound) => {
                 debug!("no provider found recently; not looking again yet");
-                return Err(NOT_FOUND);
+                return Err(not_found(hash));
             }
             Some(Miss::TimedOut) => {
                 debug!("provider lookup timed out recently; not looking again yet");
-                return Err(HttpError(
+                return Err(HttpError::transient(
                     StatusCode::GATEWAY_TIMEOUT,
-                    "provider lookup or transfer timed out",
+                    "provider lookup timed out",
+                    error_page::RETRY_SOON,
                 ));
             }
             None => {}
         }
         let infohash = infohash_from_blake3(&blake3::Hash::from_bytes(*hash.as_bytes()));
         let started = Instant::now();
-        // Providers that recently served this hash go first, so their probes
-        // start before the lookup has found anyone; the fastest probe wins.
-        let known = self.0.providers.providers(hash);
-        debug!(
-            infohash = %iroh_mainline_endpoint_discovery::infohash_hex(&infohash),
-            hinted = hinted.len(),
-            known = known.len(),
-            "looking up content provider"
-        );
         // Providers named by links go first and get a head start: if one
         // answers in time, the lookup ends before Mainline is asked.
         let head_start = if hinted.is_empty() {
@@ -307,38 +339,71 @@ impl Gateway {
         } else {
             HINT_HEAD_START
         };
-        let resolver = self.0.resolver.clone();
-        let discovered = stream::once_future(tokio::time::sleep(head_start)).flat_map(move |()| {
-            resolver
-                .resolve_stream(infohash.into())
-                .map(|provider| (provider, Provenance::Discovered))
-        });
-        let candidates = stream::iter(
-            hinted
-                .into_iter()
-                .map(|provider| (provider, Provenance::Linked)),
-        )
-        .chain(stream::iter(known.into_iter().map(|(provider, probed)| {
-            (provider, Provenance::Verified(probed))
-        })))
-        .chain(discovered);
-        let mut verified = verified_providers(
-            self.0.endpoint.clone(),
-            hash,
-            candidates,
-            Some(self.0.providers.clone()),
-        );
-        let provider = match tokio::time::timeout(DISCOVERY_TIMEOUT, verified.next()).await {
+        // A lookup that ends empty is tried again for a short while: a
+        // publisher that just restarted has not announced itself yet, and a
+        // single Mainline lookup can miss a provider that is there.
+        let lookups = async {
+            let mut backoff = PROVIDER_BACKOFF;
+            for attempt in 1.. {
+                // Providers that recently served this hash go first, so their
+                // probes start before the lookup has found anyone; the fastest
+                // probe wins. A failed probe removes a provider from this list.
+                let known = self.0.providers.providers(hash);
+                debug!(
+                    infohash = %iroh_mainline_endpoint_discovery::infohash_hex(&infohash),
+                    attempt,
+                    hinted = hinted.len(),
+                    known = known.len(),
+                    "looking up content provider"
+                );
+                let resolver = self.resolver();
+                let discovered =
+                    stream::once_future(tokio::time::sleep(head_start)).flat_map(move |()| {
+                        resolver
+                            .resolve_stream(infohash.into())
+                            .map(|provider| (provider, Provenance::Discovered))
+                    });
+                let candidates = stream::iter(
+                    hinted
+                        .clone()
+                        .into_iter()
+                        .map(|provider| (provider, Provenance::Linked)),
+                )
+                .chain(stream::iter(known.into_iter().map(|(provider, probed)| {
+                    (provider, Provenance::Verified(probed))
+                })))
+                .chain(discovered);
+                let mut verified = verified_providers(
+                    self.0.endpoint.clone(),
+                    hash,
+                    candidates,
+                    Some(self.0.providers.clone()),
+                );
+                if let Some(provider) = verified.next().await {
+                    return Some(provider);
+                }
+                if started.elapsed() + backoff > PROVIDER_RETRY {
+                    return None;
+                }
+                info!(%hash, attempt, "no verified provider found; the publisher may have restarted, retrying");
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+            None
+        };
+        let provider = match tokio::time::timeout(DISCOVERY_TIMEOUT, lookups).await {
             Ok(Some(provider)) => {
                 // Only a provider that passed its probe renews its hint.
                 self.0.hints.confirm(hash, provider);
                 provider
             }
             Ok(None) => {
+                info!(%hash, elapsed_ms = started.elapsed().as_millis(), "no verified provider found");
                 self.0.providers.record_missing(hash, Miss::NotFound);
-                return Err(NOT_FOUND);
+                return Err(not_found(hash));
             }
             Err(elapsed) => {
+                info!(%hash, "provider lookup timed out");
                 self.0.providers.record_missing(hash, Miss::TimedOut);
                 return Err(HttpError::timeout(elapsed));
             }
@@ -474,7 +539,7 @@ impl Gateway {
         debug!(%hash, "reading collection");
         let collection = read_collection(&connection, hash).await.map_err(|error| {
             debug!(%hash, ?error, "read collection failed");
-            HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
+            HttpError::new(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
         })?;
         debug!(%hash, entries = collection.iter().count(), "collection ready");
         let source = CollectionSource {
@@ -574,32 +639,90 @@ pub enum ServeError {
     },
 }
 
+/// No provider of `hash` passed its probe.
+fn not_found(hash: Hash) -> HttpError {
+    HttpError::transient(
+        StatusCode::NOT_FOUND,
+        format!(
+            "no verified provider found for BLAKE3 hash {}; the publisher may have restarted, retrying",
+            z32::encode(hash.as_bytes())
+        ),
+        error_page::RETRY_SOON,
+    )
+}
+
+/// A failed request, with the reason given to the client.
 #[derive(Debug)]
-struct HttpError(StatusCode, &'static str);
+struct HttpError {
+    status: StatusCode,
+    message: Cow<'static, str>,
+    /// For a failure likely to pass, how long the client should wait before
+    /// it tries again.
+    retry: Option<Duration>,
+}
 
 impl HttpError {
+    const fn new(status: StatusCode, message: &'static str) -> Self {
+        Self {
+            status,
+            message: Cow::Borrowed(message),
+            retry: None,
+        }
+    }
+
+    /// A failure likely to pass, which a browser retries after `retry`.
+    fn transient(
+        status: StatusCode,
+        message: impl Into<Cow<'static, str>>,
+        retry: Duration,
+    ) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            retry: Some(retry),
+        }
+    }
+
     fn upstream(error: impl std::fmt::Display + std::fmt::Debug) -> Self {
         debug!(?error, "gateway upstream error details");
         warn!(%error, "gateway upstream failed");
-        Self(
+        Self::transient(
             StatusCode::BAD_GATEWAY,
             "provider lookup or transfer failed",
+            error_page::RETRY_SOON,
         )
     }
 
     fn timeout(_: tokio::time::error::Elapsed) -> Self {
         debug!("gateway operation deadline exceeded");
-        Self(
+        Self::transient(
             StatusCode::GATEWAY_TIMEOUT,
             "provider lookup or transfer timed out",
+            error_page::RETRY_SOON,
         )
     }
 }
 
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
-        debug!(status = %self.0, reason = self.1, "returning gateway error");
-        (self.0, [(header::CACHE_CONTROL, "no-store")], self.1).into_response()
+        debug!(status = %self.status, reason = %self.message, "returning gateway error");
+        let mut response = (
+            self.status,
+            [(header::CACHE_CONTROL, "no-store")],
+            self.message.to_string(),
+        )
+            .into_response();
+        if let Some(retry) = self.retry {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, retry.as_secs().into());
+        }
+        // Browsers get the failure as a page, see `error_page::html`.
+        response.extensions_mut().insert(error_page::Failure {
+            message: self.message,
+            retry: self.retry,
+        });
+        response
     }
 }
 
@@ -807,7 +930,7 @@ impl Root {
 /// Parses a hash from a path segment, reporting a bad request if invalid.
 fn parse_path_hash(encoded: &str) -> Result<Hash, HttpError> {
     parse_hash(encoded)
-        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))
+        .map_err(|_| HttpError::new(StatusCode::BAD_REQUEST, "invalid z-base-32 BLAKE3 hash"))
 }
 
 async fn blob(
@@ -1002,7 +1125,7 @@ async fn collection_entry(
     } else {
         format!("{path}/")
     };
-    let entries = Entries::new(&dir, &collection).ok_or(HttpError(
+    let entries = Entries::new(&dir, &collection).ok_or(HttpError::new(
         StatusCode::NOT_FOUND,
         "path not found in collection",
     ))?;
@@ -1300,7 +1423,7 @@ async fn serve_blob(
                 .expect("valid response")
                 .remove(header::CONTENT_TYPE);
             let boundary = format!("iroh-{:032x}", rand::random::<u128>());
-            let length = multipart_length(&source, &ranges, &boundary).ok_or(HttpError(
+            let length = multipart_length(&source, &ranges, &boundary).ok_or(HttpError::new(
                 StatusCode::BAD_REQUEST,
                 "multipart response too large",
             ))?;
@@ -1337,7 +1460,7 @@ async fn serve_blob(
         .map_err(HttpError::timeout)?
         .map_err(HttpError::upstream)?;
         if size != source.size {
-            return Err(HttpError(
+            return Err(HttpError::new(
                 StatusCode::BAD_GATEWAY,
                 "provider changed blob size",
             ));
