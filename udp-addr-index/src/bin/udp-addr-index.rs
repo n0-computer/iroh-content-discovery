@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
         None
     };
     let dht = Dht::builder()
-        .mode(Mode::Server)
+        .mode(Mode::Client)
         .port(cli.dht_port)
         .build()
         .std_context("failed to bind the Mainline socket")?;
