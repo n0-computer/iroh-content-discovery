@@ -61,7 +61,7 @@ n0-future.workspace = true
 n0-mainline.workspace = true
 percent-encoding = "2"
 postcard.workspace = true
-simple-dns = "0.12"
+simple-dns = "0.13"
 rand.workspace = true
 tokio.workspace = true
 tower-http = { version = "0.7", features = ["cors"] }
