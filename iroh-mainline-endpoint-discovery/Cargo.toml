@@ -32,7 +32,7 @@ udp-addr-index-proto = { version = "0.2.0", path = "../udp-addr-index-proto" }
 n0-error.workspace = true
 n0-future.workspace = true
 rand.workspace = true
-simple-dns = "0.12"
+simple-dns = "0.13"
 n0-mainline.workspace = true
 postcard.workspace = true
 serde.workspace = true
