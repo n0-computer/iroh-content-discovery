@@ -120,16 +120,35 @@ pub(crate) async fn redirect(
         debug!(key = encoded, "Pkarr cache hit");
         item
     } else {
-        tokio::time::timeout(LOOKUP_TIMEOUT, resolve(gateway.0.resolver.dht(), &key))
-            .await
-            .map_err(|_| {
-                debug!(
-                    key = encoded,
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "Pkarr lookup timed out"
-                );
-                HttpError(StatusCode::GATEWAY_TIMEOUT, "Pkarr lookup timed out")
-            })??
+        let resolved =
+            tokio::time::timeout(LOOKUP_TIMEOUT, resolve(gateway.0.resolver.dht(), &key))
+                .await
+                .map_err(|_| {
+                    debug!(
+                        key = encoded,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "Pkarr lookup timed out"
+                    );
+                    HttpError(StatusCode::GATEWAY_TIMEOUT, "Pkarr lookup timed out")
+                })
+                .and_then(|resolved| resolved);
+        match (resolved, &gateway.0.local) {
+            (Ok(item), Some(local)) => {
+                local.keep_packet(&key, &item).await;
+                item
+            }
+            (Ok(item), None) => item,
+            // Offline, or the name is not on Mainline right now: the last
+            // verified record still names content the store may have.
+            (Err(error), Some(local)) => match local.packet(&key).await {
+                Some(item) => {
+                    warn!(key = encoded, "Pkarr lookup failed; using the kept record");
+                    item
+                }
+                None => return Err(error),
+            },
+            (Err(error), None) => return Err(error),
+        }
     };
     let packet = Packet::parse(item.value()).map_err(|error| {
         warn!(%error, "invalid Pkarr DNS packet");

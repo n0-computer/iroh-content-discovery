@@ -42,6 +42,10 @@ struct Args {
     /// Local Mainline UDP port; zero selects an available port.
     #[arg(long, default_value_t = 0)]
     dht_port: u16,
+    /// Keeps verified content and Pkarr records in an iroh-blobs store in
+    /// this directory, and serves them from there, also offline.
+    #[arg(long)]
+    store: Option<PathBuf>,
 }
 
 impl Args {
@@ -143,7 +147,15 @@ async fn serve(
         warn!(%error, "cannot store the signed index list");
     }
     let resolver = Resolver::new(dht, index);
-    let gateway = Gateway::new(endpoint, resolver);
+    // Lives as long as the gateway serves.
+    let store = match &args.store {
+        Some(dir) => Some(iroh_blobs::store::fs::FsStore::load(dir).await.anyerr()?),
+        None => None,
+    };
+    let gateway = match &store {
+        Some(store) => Gateway::with_store(endpoint, resolver, (**store).clone()),
+        None => Gateway::new(endpoint, resolver),
+    };
     info!(listen = %listener.local_addr()?, "gateway ready");
     Ok(gateway.serve(listener, std::future::pending()).await?)
 }

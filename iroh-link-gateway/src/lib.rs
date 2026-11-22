@@ -2,7 +2,8 @@
 //!
 //! Adapted from the streaming approach in `iroh-examples/iroh-gateway`.
 //! Each content lookup validates providers before choosing an endpoint. Data is streamed directly
-//! from that provider, without downloading a whole blob into memory or a store.
+//! from that provider, without downloading a whole blob into memory or a store, unless the gateway
+//! has a store (see [`Gateway::with_store`]).
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -45,6 +46,7 @@ use tracing::{Instrument, debug, debug_span, warn};
 
 mod debug_page;
 mod hints;
+mod local;
 mod pkarr_redirect;
 mod provider_cache;
 mod providers;
@@ -136,18 +138,31 @@ struct Inner {
     cache: Mutex<LruCache<Hash, Source>>,
     collections: Mutex<LruCache<Hash, CollectionSource>>,
     sizes: Mutex<LruCache<Hash, u64>>,
+    /// Keeps verified content and Pkarr records, if set.
+    local: Option<local::Local>,
 }
 
 #[derive(Clone)]
 struct Source {
-    connection: Connection,
+    /// The provider, or `None` when the store has what is needed so far.
+    connection: Option<Connection>,
     size: u64,
     mime: String,
 }
 
+impl Source {
+    /// Whether this source can still be used for a later request.
+    fn usable(&self) -> bool {
+        self.connection
+            .as_ref()
+            .is_none_or(|connection| connection.close_reason().is_none())
+    }
+}
+
 #[derive(Clone)]
 struct CollectionSource {
-    connection: Connection,
+    /// The provider, or `None` when the collection came from the store.
+    connection: Option<Connection>,
     collection: Collection,
 }
 
@@ -156,6 +171,24 @@ impl Gateway {
     ///
     /// The endpoint is used to dial resolved endpoint IDs.
     pub fn new(endpoint: Endpoint, resolver: Resolver) -> Self {
+        Self::build(endpoint, resolver, None)
+    }
+
+    /// Constructs a gateway that keeps verified content in `store`.
+    ///
+    /// Requests are served from the store, and only chunks it lacks are
+    /// fetched from a provider, into the store. Content that is fully in the
+    /// store needs no provider. The newest verified Pkarr record of each name
+    /// is kept too, and used when a lookup fails.
+    pub fn with_store(
+        endpoint: Endpoint,
+        resolver: Resolver,
+        store: iroh_blobs::api::Store,
+    ) -> Self {
+        Self::build(endpoint, resolver, Some(local::Local::new(store)))
+    }
+
+    fn build(endpoint: Endpoint, resolver: Resolver, local: Option<local::Local>) -> Self {
         Self(Arc::new(Inner {
             endpoint,
             resolver,
@@ -166,6 +199,7 @@ impl Gateway {
             cache: Mutex::new(LruCache::new(SOURCE_SLOTS)),
             collections: Mutex::new(LruCache::new(SOURCE_SLOTS)),
             sizes: Mutex::new(LruCache::new(SIZE_SLOTS)),
+            local,
         }))
     }
 
@@ -241,14 +275,13 @@ impl Gateway {
     async fn source(&self, hash: Hash) -> Result<Source, HttpError> {
         let cached = self.0.cache.lock().expect("poisoned").get(&hash).cloned();
         if let Some(source) = cached
-            && source.connection.close_reason().is_none()
+            && source.usable()
         {
             debug!(%hash, size = source.size, "reusing cached blob source");
             return Ok(source);
         }
         debug!(%hash, "blob source cache miss or closed connection");
-        let connection = self.connection(hash).await?;
-        let source = self.source_on_connection(connection, hash, None).await?;
+        let source = self.file_source(None, hash, hash, None).await?;
         self.0
             .cache
             .lock()
@@ -357,20 +390,40 @@ impl Gateway {
         Ok(connection)
     }
 
-    async fn source_on_connection(
+    /// Returns the size and MIME type of `hash`, a file of the content `root`.
+    ///
+    /// Reads from the store if it has the start of the file, and from
+    /// `connection` or a provider of `root` otherwise.
+    async fn file_source(
         &self,
-        connection: Connection,
+        connection: Option<Connection>,
+        root: Hash,
         hash: Hash,
         name: Option<&str>,
     ) -> Result<Source, HttpError> {
         let started = Instant::now();
-        debug!(%hash, provider = %connection.remote_id(), "reading blob size and MIME prefix");
-        let (size, prefix) = sniff(&connection, hash)
-            .await
-            .map_err(|error| {
-                debug!(%hash, ?error, elapsed_ms = started.elapsed().as_millis(), "blob metadata read failed");
-                HttpError::upstream(error)
-            })?;
+        let local = match &self.0.local {
+            Some(local) => local.prefix(hash, SNIFF_BYTES).await,
+            None => None,
+        };
+        let (connection, (size, prefix)) = match local {
+            Some(found) => {
+                debug!(%hash, "blob size and MIME prefix from the store");
+                (connection, found)
+            }
+            None => {
+                let connection = match connection {
+                    Some(connection) => connection,
+                    None => self.connection(root).await?,
+                };
+                debug!(%hash, provider = %connection.remote_id(), "reading blob size and MIME prefix");
+                let found = sniff(&connection, hash).await.map_err(|error| {
+                    debug!(%hash, ?error, elapsed_ms = started.elapsed().as_millis(), "blob metadata read failed");
+                    HttpError::upstream(error)
+                })?;
+                (Some(connection), found)
+            }
+        };
         let supplied_type = name
             .and_then(|name| std::path::Path::new(name).extension())
             .and_then(|extension| extension.to_str())
@@ -399,14 +452,23 @@ impl Gateway {
         Ok(source)
     }
 
-    /// Returns the verified size of `hash`, fetched over `connection` if not cached.
-    async fn size(&self, hash: Hash, connection: &Connection) -> n0_error::Result<u64> {
+    /// Returns the verified size of `hash`, fetched over `connection` if not
+    /// cached or in the store.
+    async fn size(&self, hash: Hash, connection: Option<&Connection>) -> n0_error::Result<u64> {
         if let Some(source) = self.0.cache.lock().expect("poisoned").peek(&hash) {
             return Ok(source.size);
         }
         if let Some(size) = self.0.sizes.lock().expect("poisoned").get(&hash) {
             return Ok(*size);
         }
+        if let Some(local) = &self.0.local
+            && let Some(size) = local.size(hash).await
+        {
+            return Ok(size);
+        }
+        let Some(connection) = connection else {
+            bail_any!("size not in the store and no provider");
+        };
         let size = verified_size(connection, hash).await?;
         self.0.sizes.lock().expect("poisoned").put(hash, size);
         Ok(size)
@@ -415,13 +477,13 @@ impl Gateway {
     /// Returns the sizes of `hashes`, fetching up to [`SIZE_REQUESTS`] at a time.
     ///
     /// Hashes whose size could not be fetched are missing from the result.
-    async fn sizes(&self, hashes: Vec<Hash>, connection: Connection) -> HashMap<Hash, u64> {
+    async fn sizes(&self, hashes: Vec<Hash>, connection: Option<Connection>) -> HashMap<Hash, u64> {
         n0_future::stream::iter(hashes)
             .map(|hash| {
                 let gateway = self.clone();
                 let connection = connection.clone();
                 async move {
-                    match gateway.size(hash, &connection).await {
+                    match gateway.size(hash, connection.as_ref()).await {
                         Ok(size) => Some((hash, size)),
                         Err(error) => {
                             debug!(%error, %hash, "fetch size");
@@ -445,13 +507,35 @@ impl Gateway {
             .get(&hash)
             .cloned();
         if let Some(source) = cached
-            && source.connection.close_reason().is_none()
+            && source
+                .connection
+                .as_ref()
+                .is_none_or(|c| c.close_reason().is_none())
         {
             debug!(%hash, "reusing cached collection");
             return Ok(source);
         }
+        if let Some(source) = self.local_collection(hash).await {
+            return Ok(source);
+        }
         let connection = self.connection(hash).await?;
         self.collection_on_connection(hash, connection).await
+    }
+
+    /// Returns the collection at `hash` from the store, if it is there.
+    async fn local_collection(&self, hash: Hash) -> Option<CollectionSource> {
+        let collection = self.0.local.as_ref()?.collection(hash).await?;
+        debug!(%hash, "collection from the store");
+        let source = CollectionSource {
+            connection: None,
+            collection,
+        };
+        self.0
+            .collections
+            .lock()
+            .expect("poisoned")
+            .put(hash, source.clone());
+        Some(source)
     }
 
     async fn collection_on_connection(
@@ -467,7 +551,10 @@ impl Gateway {
             .get(&hash)
             .cloned();
         if let Some(source) = cached
-            && source.connection.close_reason().is_none()
+            && source
+                .connection
+                .as_ref()
+                .is_none_or(|c| c.close_reason().is_none())
         {
             return Ok(source);
         }
@@ -477,8 +564,11 @@ impl Gateway {
             HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
         })?;
         debug!(%hash, entries = collection.iter().count(), "collection ready");
+        if let Some(local) = &self.0.local {
+            local.keep_collection(hash, &collection).await;
+        }
         let source = CollectionSource {
-            connection,
+            connection: Some(connection),
             collection,
         };
         self.0
@@ -850,8 +940,10 @@ pub(crate) async fn serve_root(
         let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
             .await
             .map_err(HttpError::timeout)??;
-        return collection_entry(gateway, &root, collection, url_path, query, method, headers)
-            .await;
+        return collection_entry(
+            gateway, &root, hash, collection, url_path, query, method, headers,
+        )
+        .await;
     }
     let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
@@ -861,19 +953,19 @@ pub(crate) async fn serve_root(
         && source.size >= 32
         && source.size.is_multiple_of(32)
         && source.size <= MAX_COLLECTION_ROOT_BYTES
-        && let Ok(Ok(collection)) = tokio::time::timeout(
-            COLLECTION_PROBE_TIMEOUT,
-            gateway.collection_on_connection(hash, source.connection.clone()),
-        )
-        .await
+        && let Some(collection) = probe_collection(gateway, hash, source.connection.clone()).await
     {
-        return collection_entry(gateway, &root, collection, url_path, query, method, headers)
-            .await;
+        return collection_entry(
+            gateway, &root, hash, collection, url_path, query, method, headers,
+        )
+        .await;
     }
     let encoded = z32::encode(hash.as_bytes());
     let download = download.then(|| encoded.clone());
     serve_blob(
+        gateway,
         source,
+        hash,
         hash,
         &encoded,
         download,
@@ -935,7 +1027,29 @@ pub(crate) async fn serve_path(
         .await
         .map_err(HttpError::timeout)??;
     let path = format!("/{}", path.strip_prefix('/').unwrap_or(&path));
-    collection_entry(&gateway, &root, collection, &path, query, method, headers).await
+    collection_entry(
+        &gateway, &root, hash, collection, &path, query, method, headers,
+    )
+    .await
+}
+
+/// Returns the collection at `hash` if it is one, from the store or over `connection`.
+async fn probe_collection(
+    gateway: &Gateway,
+    hash: Hash,
+    connection: Option<Connection>,
+) -> Option<CollectionSource> {
+    if let Some(source) = gateway.local_collection(hash).await {
+        return Some(source);
+    }
+    let connection = connection?;
+    tokio::time::timeout(
+        COLLECTION_PROBE_TIMEOUT,
+        gateway.collection_on_connection(hash, connection),
+    )
+    .await
+    .ok()?
+    .ok()
 }
 
 /// Serves the file at `url_path` in a collection, or the directory there.
@@ -943,9 +1057,11 @@ pub(crate) async fn serve_path(
 /// `url_path` is the requested URL path after the root's base: empty for the
 /// bare root, then `/`, `/dir`, `/dir/`, or `/dir/file`. A directory serves
 /// its `index.html` unless `?listing` asks for its listing, or it has none.
+#[allow(clippy::too_many_arguments)]
 async fn collection_entry(
     gateway: &Gateway,
     root: &Root,
+    root_hash: Hash,
     source: CollectionSource,
     url_path: &str,
     query: Option<String>,
@@ -976,7 +1092,7 @@ async fn collection_entry(
     if let Some(hash) = file {
         let source = tokio::time::timeout(
             LOOKUP_TIMEOUT,
-            gateway.source_on_connection(connection, hash, Some(&path)),
+            gateway.file_source(connection, root_hash, hash, Some(&path)),
         )
         .await
         .map_err(HttpError::timeout)??;
@@ -987,7 +1103,9 @@ async fn collection_entry(
                 .to_owned()
         });
         return serve_blob(
+            gateway,
             source,
+            root_hash,
             hash,
             &z32::encode(hash.as_bytes()),
             download,
@@ -1026,13 +1144,15 @@ async fn collection_entry(
         let name = format!("{dir}{INDEX_FILE}");
         let source = tokio::time::timeout(
             LOOKUP_TIMEOUT,
-            gateway.source_on_connection(connection, hash, Some(&name)),
+            gateway.file_source(connection, root_hash, hash, Some(&name)),
         )
         .await
         .map_err(HttpError::timeout)??;
         let download = has_flag(query.as_deref(), "download").then(|| INDEX_FILE.to_owned());
         return serve_blob(
+            gateway,
             source,
+            root_hash,
             hash,
             &z32::encode(hash.as_bytes()),
             download,
@@ -1235,8 +1355,12 @@ fn html_escape(value: &str) -> String {
     out
 }
 
+/// Serves `hash`, a file of the content `root` (or `root` itself).
+#[allow(clippy::too_many_arguments)]
 async fn serve_blob(
+    gateway: &Gateway,
     source: Source,
+    root: Hash,
     hash: Hash,
     encoded: &str,
     download: Option<String>,
@@ -1312,7 +1436,12 @@ async fn serve_blob(
                 )
                 .header(header::CONTENT_LENGTH, length)
                 .body(Body::from_stream(multipart_content(
-                    source, hash, ranges, boundary,
+                    gateway.clone(),
+                    source,
+                    root,
+                    hash,
+                    ranges,
+                    boundary,
                 )))
                 .expect("valid response"));
         }
@@ -1328,21 +1457,24 @@ async fn serve_blob(
     let builder = builder.header(header::CONTENT_LENGTH, range.end - range.start);
     let body = if method == Method::HEAD || range.is_empty() {
         Body::empty()
+    } else if let Some(local) = gateway.0.local.clone() {
+        Body::from_stream(local.stream(gateway.clone(), root, hash, source.connection, range))
     } else {
-        let (content, size) = tokio::time::timeout(
-            READ_TIMEOUT,
-            start(&source.connection, hash, chunks_for(&range)),
-        )
-        .await
-        .map_err(HttpError::timeout)?
-        .map_err(HttpError::upstream)?;
+        let connection = source
+            .connection
+            .expect("without a store, every source has a provider");
+        let (content, size) =
+            tokio::time::timeout(READ_TIMEOUT, start(&connection, hash, chunks_for(&range)))
+                .await
+                .map_err(HttpError::timeout)?
+                .map_err(HttpError::upstream)?;
         if size != source.size {
             return Err(HttpError(
                 StatusCode::BAD_GATEWAY,
                 "provider changed blob size",
             ));
         }
-        Body::from_stream(stream_content(content, source.connection, range, hash))
+        Body::from_stream(stream_content(content, connection, range, hash))
     };
     Ok(builder.body(body).expect("valid response"))
 }
@@ -1370,19 +1502,27 @@ fn multipart_length(source: &Source, ranges: &[Range<u64>], boundary: &str) -> O
 }
 
 fn multipart_content(
+    gateway: Gateway,
     source: Source,
+    root: Hash,
     hash: Hash,
     ranges: Vec<Range<u64>>,
     boundary: String,
 ) -> impl n0_future::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::try_stream! {
         for range in ranges {
-            let (content, size) = tokio::time::timeout(READ_TIMEOUT, start(&source.connection, hash, chunks_for(&range))).await
-                .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
-            if size != source.size { Err(std::io::Error::other("provider changed blob size"))?; }
             yield Bytes::from(part_header(&source, &range, &boundary));
-            let mut data = Box::pin(stream_content(content, source.connection.clone(), range, hash));
-            while let Some(bytes) = data.next().await { yield bytes?; }
+            if let Some(local) = gateway.0.local.clone() {
+                let mut data = Box::pin(local.stream(gateway.clone(), root, hash, source.connection.clone(), range));
+                while let Some(bytes) = data.next().await { yield bytes?; }
+            } else {
+                let connection = source.connection.clone().ok_or_else(|| std::io::Error::other("no provider"))?;
+                let (content, size) = tokio::time::timeout(READ_TIMEOUT, start(&connection, hash, chunks_for(&range))).await
+                    .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
+                if size != source.size { Err(std::io::Error::other("provider changed blob size"))?; }
+                let mut data = Box::pin(stream_content(content, connection, range, hash));
+                while let Some(bytes) = data.next().await { yield bytes?; }
+            }
             yield Bytes::from_static(b"\r\n");
         }
         yield Bytes::from(format!("--{boundary}--\r\n"));

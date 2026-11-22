@@ -257,6 +257,35 @@ dropping the HTTP body drops the upstream request.
   `application/octet-stream`; no filename extension is necessary.
 - CORS permits GET/HEAD from browser pages and exposes range metadata.
 
+## Store
+
+Without a store, the gateway keeps no content: every request asks a provider.
+`Gateway::with_store` (or `--store <DIR>` on the command line) adds an
+iroh-blobs store:
+
+- Requests are served from the store. Chunks it lacks are fetched from a
+  provider, Bao-verified into the store, then served, 4 MiB at a time, so
+  large files stream while they arrive.
+- A provider is dialled only when something is missing. Content that is fully
+  in the store works offline and after a restart.
+- It is keyed by hash, so the same file under different names or Pkarr keys
+  is stored once, and a transfer that broke off continues where it stopped.
+- Collections are kept as the blobs they are, and the newest verified Pkarr
+  record of each name is kept under a `pkarr/<key>` tag, used when a lookup
+  fails.
+
+Not done yet:
+
+- No size limit or eviction. Garbage collection is off, so the store grows.
+  Least-recently-used eviction could tag each root with its last use and let
+  iroh-blobs garbage-collect what loses its tag.
+- Each 4 MiB window that is missing is a separate request to the provider.
+  One request for the whole missing range, with the response streamed as the
+  store's bitfield grows, would save a round trip per window.
+- With this in place, the offline caches in front of the gateway (the
+  desktop's `iroh-link-embedded` cache and Android's `GatewayClient`) could
+  go: they exist because the gateway kept nothing.
+
 ## Collections
 
 iroh-blobs collections are browsed under the root hash:
