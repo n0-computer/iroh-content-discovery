@@ -30,7 +30,10 @@ use std::{
     collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -126,6 +129,8 @@ struct Inner {
     store: FsStore,
     dir: PathBuf,
     config: CacheConfig,
+    /// [`CacheConfig::max_bytes`], changeable at runtime.
+    max_bytes: AtomicU64,
     state: Mutex<State>,
     /// Wakes the eviction task early.
     wake: Notify,
@@ -188,6 +193,7 @@ impl BlobCache {
         let inner = Arc::new(Inner {
             store,
             dir,
+            max_bytes: AtomicU64::new(config.max_bytes),
             config,
             state: Mutex::new(state),
             wake: Notify::new(),
@@ -284,6 +290,18 @@ impl BlobCache {
         Ok(())
     }
 
+    /// Returns the upper bound for the store's footprint.
+    pub fn max_bytes(&self) -> u64 {
+        self.inner.max_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Changes the upper bound for the store's footprint. A smaller bound
+    /// starts an eviction pass.
+    pub fn set_max_bytes(&self, max_bytes: u64) {
+        self.inner.max_bytes.store(max_bytes, Ordering::Relaxed);
+        self.inner.wake.notify_one();
+    }
+
     /// Returns the state after the last eviction pass.
     pub fn usage(&self) -> Usage {
         self.inner.state.lock().expect("poisoned").usage
@@ -309,8 +327,8 @@ impl Inner {
         let footprint = footprint(self.dir.clone()).await?;
         let free = fs4::available_space(&self.dir).unwrap_or(u64::MAX);
         let budget = self
-            .config
             .max_bytes
+            .load(Ordering::Relaxed)
             .min(footprint.saturating_add(free.saturating_sub(self.config.min_free_bytes)));
         let (pending, candidates) = {
             let mut state = self.state.lock().expect("poisoned");

@@ -137,3 +137,19 @@ async fn the_use_order_survives_a_restart() {
     assert!(cache.store().has(old).await.unwrap());
     cache.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_smaller_limit_evicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::load(dir.path(), config(64 * MIB)).await.unwrap();
+    let old = add(&cache, 1).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let new = add(&cache, 2).await;
+    assert_eq!(cache.evict().await.unwrap().blobs, 2);
+    cache.set_max_bytes(2 * MIB);
+    assert_eq!(cache.max_bytes(), 2 * MIB);
+    assert_eq!(cache.evict().await.unwrap().blobs, 1);
+    wait_gone(&cache, old).await;
+    assert!(cache.store().has(new).await.unwrap());
+    cache.shutdown().await.unwrap();
+}
