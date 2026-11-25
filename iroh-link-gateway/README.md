@@ -277,8 +277,7 @@ iroh-blobs store:
 Not done yet:
 
 - No size limit or eviction. Garbage collection is off, so the store grows.
-  Least-recently-used eviction could tag each root with its last use and let
-  iroh-blobs garbage-collect what loses its tag.
+  See [docs/store-cache.md](docs/store-cache.md) for how to bound it.
 - Each 4 MiB window that is missing is a separate request to the provider.
   One request for the whole missing range, with the response streamed as the
   store's bitfield grows, would save a round trip per window.
