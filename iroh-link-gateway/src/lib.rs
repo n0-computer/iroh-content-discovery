@@ -3,7 +3,7 @@
 //! Adapted from the streaming approach in `iroh-examples/iroh-gateway`.
 //! Each content lookup validates providers before choosing an endpoint. Data is streamed directly
 //! from that provider, without downloading a whole blob into memory or a store, unless the gateway
-//! has a store (see [`Gateway::with_store`]).
+//! has a store (see [`Gateway::with_cache`]).
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -174,18 +174,19 @@ impl Gateway {
         Self::build(endpoint, resolver, None)
     }
 
-    /// Constructs a gateway that keeps verified content in `store`.
+    /// Constructs a gateway that keeps verified content in `cache`'s store.
     ///
     /// Requests are served from the store, and only chunks it lacks are
     /// fetched from a provider, into the store. Content that is fully in the
     /// store needs no provider. The newest verified Pkarr record of each name
-    /// is kept too, and used when a lookup fails.
-    pub fn with_store(
+    /// is kept too, and used when a lookup fails. The cache evicts the least
+    /// recently used blobs once the store is over its budget.
+    pub fn with_cache(
         endpoint: Endpoint,
         resolver: Resolver,
-        store: iroh_blobs::api::Store,
+        cache: iroh_blobs_cache::BlobCache,
     ) -> Self {
-        Self::build(endpoint, resolver, Some(local::Local::new(store)))
+        Self::build(endpoint, resolver, Some(local::Local::new(cache)))
     }
 
     fn build(endpoint: Endpoint, resolver: Resolver, local: Option<local::Local>) -> Self {

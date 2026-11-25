@@ -6,11 +6,8 @@ use std::{
 };
 
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
-use iroh_blobs::{
-    BlobsProtocol,
-    format::collection::Collection,
-    store::{fs::FsStore, mem::MemStore},
-};
+use iroh_blobs::{BlobsProtocol, format::collection::Collection, store::mem::MemStore};
+use iroh_blobs_cache::{BlobCache, CacheConfig};
 use iroh_link_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{AddrIndex, Resolver};
 use n0_mainline::Dht;
@@ -64,7 +61,9 @@ async fn run() {
         .spawn();
 
     let dir = tempfile::tempdir().unwrap();
-    let store = FsStore::load(dir.path()).await.unwrap();
+    let cache = BlobCache::load(dir.path(), CacheConfig::new(1 << 30))
+        .await
+        .unwrap();
     let client_endpoint = Endpoint::builder(presets::Minimal)
         .address_lookup(MemoryLookup::from_endpoint_info([provider.addr()]))
         .bind()
@@ -90,10 +89,10 @@ async fn run() {
     let id = z32::encode(provider.id().as_bytes());
 
     // Online: a range first, then the whole file, which only needs the rest.
-    let base = serve(Gateway::with_store(
+    let base = serve(Gateway::with_cache(
         client_endpoint.clone(),
         resolver.clone(),
-        (*store).clone(),
+        cache.clone(),
     ))
     .await;
     let res = client
@@ -122,13 +121,17 @@ async fn run() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.bytes().await.unwrap().as_ref(), big.as_slice());
 
+    // Served blobs are cached: the collection root, its names, both files.
+    let usage = cache.evict().await.unwrap();
+    assert_eq!(usage.blobs, 4, "{usage:?}");
+
     // Offline: the provider is gone, and a new gateway has no memory of it.
     provider_router.shutdown().await.unwrap();
     provider.close().await;
-    let base = serve(Gateway::with_store(
+    let base = serve(Gateway::with_cache(
         client_endpoint.clone(),
         resolver,
-        (*store).clone(),
+        cache.clone(),
     ))
     .await;
     let res = client
@@ -152,5 +155,5 @@ async fn run() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    store.shutdown().await.unwrap();
+    cache.shutdown().await.unwrap();
 }

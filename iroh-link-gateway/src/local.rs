@@ -1,4 +1,5 @@
-//! An optional iroh-blobs store behind the gateway.
+//! An optional iroh-blobs store behind the gateway, bounded by an
+//! [`iroh_blobs_cache::BlobCache`].
 //!
 //! With a store, verified content is kept: requests are served from the
 //! store, and only chunks it lacks are fetched from a provider, Bao-verified
@@ -10,17 +11,24 @@
 //! The store is keyed by hash, not URL, so the same file under different
 //! names or hosts is stored once, and a transfer that broke off continues
 //! where it stopped: the store knows which chunks it has.
+//!
+//! Every blob the gateway stores or serves is recorded as used, so the cache
+//! evicts the least recently used ones once the store is over its budget.
+//! Fetches and responses hold their blob, so garbage collection cannot delete
+//! a partial download.
 
 use std::ops::Range;
 
 use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh_blobs::{
-    Hash, HashAndFormat,
+    Hash,
     api::{Store, proto::ExportRangesItem},
     format::collection::Collection,
+    hashseq::HashSeq,
     protocol::GetRequest,
 };
+use iroh_blobs_cache::BlobCache;
 use iroh_mainline_endpoint_discovery::{decode_signed_packet, encode_signed_packet};
 use n0_future::{Stream, StreamExt};
 use tracing::{debug, warn};
@@ -34,12 +42,21 @@ const WINDOW: u64 = 4 * 1024 * 1024;
 /// The gateway's store.
 #[derive(Clone)]
 pub(crate) struct Local {
+    cache: BlobCache,
     store: Store,
 }
 
 impl Local {
-    pub(crate) fn new(store: Store) -> Self {
-        Self { store }
+    pub(crate) fn new(cache: BlobCache) -> Self {
+        let store = cache.store().clone();
+        Self { cache, store }
+    }
+
+    /// Records a use of `hash`, so the cache keeps it over older blobs.
+    async fn touch(&self, hash: Hash) {
+        if let Err(error) = self.cache.touch(hash).await {
+            warn!(%error, %hash, "cannot record blob use");
+        }
     }
 
     /// Returns the verified size of `hash` if the store can prove it.
@@ -70,24 +87,25 @@ impl Local {
         if !self.store.observe(hash).await.ok()?.is_complete() {
             return None;
         }
-        Collection::load(hash, &self.store).await.ok()
+        let collection = Collection::load(hash, &self.store).await.ok()?;
+        self.touch(hash).await;
+        Some(collection)
     }
 
     /// Keeps a collection read from a provider.
     ///
     /// Storing it again yields the same blobs, so the hash is checked: a
-    /// collection that encodes differently is not kept.
+    /// collection that encodes differently is not kept. Its root and name
+    /// list are cached like other blobs, without keeping its files: those
+    /// are cached as they are served, and evicted on their own.
     pub(crate) async fn keep_collection(&self, hash: Hash, collection: &Collection) {
         match collection.clone().store(&self.store).await {
             Ok(tag) if tag.hash() == hash => {
-                let name = format!("collection/{hash}");
-                if let Err(error) = self
-                    .store
-                    .tags()
-                    .set(name, HashAndFormat::hash_seq(hash))
-                    .await
+                self.touch(hash).await;
+                if let Ok(bytes) = self.store.get_bytes(hash).await
+                    && let Some(meta) = HashSeq::new(bytes).and_then(|seq| seq.into_iter().next())
                 {
-                    warn!(%error, %hash, "cannot tag collection");
+                    self.touch(meta).await;
                 }
             }
             Ok(tag) => {
@@ -110,6 +128,10 @@ impl Local {
         range: Range<u64>,
     ) -> impl Stream<Item = std::io::Result<Bytes>> + Send {
         async_stream::try_stream! {
+            // Keeps a partial download through garbage collection, and the
+            // blob out of eviction while it is read.
+            let _hold = self.cache.hold(hash).await.map_err(std::io::Error::other)?;
+            self.touch(hash).await;
             let mut start = range.start;
             while start < range.end {
                 let window = start..(start + WINDOW).min(range.end);

@@ -260,8 +260,9 @@ dropping the HTTP body drops the upstream request.
 ## Store
 
 Without a store, the gateway keeps no content: every request asks a provider.
-`Gateway::with_store` (or `--store <DIR>` on the command line) adds an
-iroh-blobs store:
+`Gateway::with_cache` (or `--store <DIR>` and `--store-max-mib`, default
+1024, on the command line) adds an iroh-blobs store, bounded by
+[`iroh-blobs-cache`](../iroh-blobs-cache):
 
 - Requests are served from the store. Chunks it lacks are fetched from a
   provider, Bao-verified into the store, then served, 4 MiB at a time, so
@@ -273,11 +274,12 @@ iroh-blobs store:
 - Collections are kept as the blobs they are, and the newest verified Pkarr
   record of each name is kept under a `pkarr/<key>` tag, used when a lookup
   fails.
+- Over its budget, the store drops the least recently used blobs, each file
+  on its own. Fetches and responses hold their blob meanwhile. See
+  [docs/store-cache.md](docs/store-cache.md).
 
 Not done yet:
 
-- No size limit or eviction. Garbage collection is off, so the store grows.
-  See [docs/store-cache.md](docs/store-cache.md) for how to bound it.
 - Each 4 MiB window that is missing is a separate request to the provider.
   One request for the whole missing range, with the response streamed as the
   store's bitfield grows, would save a round trip per window.

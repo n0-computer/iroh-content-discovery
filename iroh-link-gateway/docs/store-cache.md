@@ -74,6 +74,9 @@ we measured, and a proposal.
 
 ## Proposal for the gateway
 
+Implemented in [`iroh-blobs-cache`](../../iroh-blobs-cache), as below, except
+that the gateway does not pin anything yet.
+
 **Unit: one blob, with a raw tag `cache/<hash>`.**
 - That covers every blob the gateway stores: files, collection roots and
   their name lists.

@@ -46,6 +46,10 @@ struct Args {
     /// this directory, and serves them from there, also offline.
     #[arg(long)]
     store: Option<PathBuf>,
+    /// Upper bound for the store on disk, in MiB. The least recently used
+    /// content goes first.
+    #[arg(long, default_value_t = 1024)]
+    store_max_mib: u64,
 }
 
 impl Args {
@@ -147,13 +151,12 @@ async fn serve(
         warn!(%error, "cannot store the signed index list");
     }
     let resolver = Resolver::new(dht, index);
-    // Lives as long as the gateway serves.
-    let store = match &args.store {
-        Some(dir) => Some(iroh_blobs::store::fs::FsStore::load(dir).await.anyerr()?),
-        None => None,
-    };
-    let gateway = match &store {
-        Some(store) => Gateway::with_store(endpoint, resolver, (**store).clone()),
+    let gateway = match &args.store {
+        Some(dir) => {
+            let config = iroh_blobs_cache::CacheConfig::new(args.store_max_mib * 1024 * 1024);
+            let cache = iroh_blobs_cache::BlobCache::load(dir, config).await?;
+            Gateway::with_cache(endpoint, resolver, cache)
+        }
         None => Gateway::new(endpoint, resolver),
     };
     info!(listen = %listener.local_addr()?, "gateway ready");
