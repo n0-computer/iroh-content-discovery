@@ -155,7 +155,7 @@ async fn serve(
         Some(dir) => {
             let config = iroh_blobs_cache::CacheConfig::new(args.store_max_mib * 1024 * 1024);
             let cache = iroh_blobs_cache::BlobCache::load(dir, config).await?;
-            Gateway::with_cache(endpoint, resolver, cache)
+            Gateway::with_cache(endpoint, Some(resolver), cache)
         }
         None => Gateway::new(endpoint, resolver),
     };

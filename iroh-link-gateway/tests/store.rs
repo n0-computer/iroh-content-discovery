@@ -91,7 +91,7 @@ async fn run() {
     // Online: a range first, then the whole file, which only needs the rest.
     let base = serve(Gateway::with_cache(
         client_endpoint.clone(),
-        resolver.clone(),
+        Some(resolver.clone()),
         cache.clone(),
     ))
     .await;
@@ -130,7 +130,7 @@ async fn run() {
     provider.close().await;
     let base = serve(Gateway::with_cache(
         client_endpoint.clone(),
-        resolver,
+        Some(resolver),
         cache.clone(),
     ))
     .await;
@@ -155,5 +155,20 @@ async fn run() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+
+    // Before any network: no resolver yet, and the stored site still loads.
+    let base = serve(Gateway::with_cache(
+        client_endpoint.clone(),
+        None,
+        cache.clone(),
+    ))
+    .await;
+    let res = client
+        .get(format!("{base}/blake3/{hash}/app.wasm"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), big.as_slice());
     cache.shutdown().await.unwrap();
 }

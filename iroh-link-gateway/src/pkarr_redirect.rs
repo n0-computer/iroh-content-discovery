@@ -39,6 +39,9 @@ const MAX_CACHE_TTL: Duration = Duration::from_secs(30);
 /// lookup would cost seconds, so we take the newest answer within this window.
 const NEWEST_GRACE: Duration = Duration::from_millis(300);
 
+/// How long a lookup may take before a kept record is used instead.
+const KEPT_RECORD_WAIT: Duration = Duration::from_secs(3);
+
 /// Verified packets kept between requests for the same key.
 const PACKET_SLOTS: NonZeroUsize = NonZeroUsize::new(1024).expect("nonzero");
 
@@ -109,47 +112,34 @@ pub(crate) async fn redirect(
     }
     let started = std::time::Instant::now();
     debug!(key = encoded, "resolving Pkarr record");
-    let cached = gateway
-        .0
-        .pkarr
-        .lock()
-        .expect("poisoned")
-        .get(&key, Instant::now());
+    // `Cache-Control: no-cache`, as a hard reload sends it, asks for the name
+    // as it is now rather than as it was up to MAX_CACHE_TTL ago.
+    let fresh = headers
+        .get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("no-cache"));
+    let cached = if fresh {
+        None
+    } else {
+        gateway
+            .0
+            .pkarr
+            .lock()
+            .expect("poisoned")
+            .get(&key, Instant::now())
+    };
     let cache_hit = cached.is_some();
     let item = if let Some(item) = cached {
         debug!(key = encoded, "Pkarr cache hit");
         item
     } else {
-        let resolved =
-            tokio::time::timeout(LOOKUP_TIMEOUT, resolve(gateway.0.resolver.dht(), &key))
-                .await
-                .map_err(|_| {
-                    debug!(
-                        key = encoded,
-                        elapsed_ms = started.elapsed().as_millis(),
-                        "Pkarr lookup timed out"
-                    );
-                    HttpError(StatusCode::GATEWAY_TIMEOUT, "Pkarr lookup timed out")
-                })
-                .and_then(|resolved| resolved);
-        match (resolved, &gateway.0.local) {
-            (Ok(item), Some(local)) => {
-                local.keep_packet(&key, &item).await;
-                item
-            }
-            (Ok(item), None) => item,
-            // Offline, or the name is not on Mainline right now: the last
-            // verified record still names content the store may have.
-            (Err(error), Some(local)) => match local.packet(&key).await {
-                Some(item) => {
-                    warn!(key = encoded, "Pkarr lookup failed; using the kept record");
-                    item
-                }
-                None => return Err(error),
-            },
-            (Err(error), None) => return Err(error),
-        }
+        lookup(&gateway, key, encoded).await?
     };
+    debug!(
+        key = encoded,
+        elapsed_ms = started.elapsed().as_millis(),
+        "Pkarr record ready"
+    );
     let packet = Packet::parse(item.value()).map_err(|error| {
         warn!(%error, "invalid Pkarr DNS packet");
         HttpError(StatusCode::BAD_GATEWAY, "invalid Pkarr DNS packet")
@@ -210,6 +200,68 @@ pub(crate) async fn redirect(
         ],
     )
         .into_response())
+}
+
+/// Looks up the newest record of `key` on Mainline.
+///
+/// With a store, the newest verified record is kept, and used if the lookup
+/// fails. If one is kept, the lookup only gets [`KEPT_RECORD_WAIT`]: offline,
+/// or with a slow DHT, the page loads from the kept record, and the lookup
+/// finishes in the background for later requests.
+async fn lookup(
+    gateway: &Gateway,
+    key: [u8; 32],
+    encoded: &str,
+) -> Result<n0_mainline::MutableItem, HttpError> {
+    let kept = match &gateway.0.local {
+        Some(local) => local.packet(&key).await,
+        None => None,
+    };
+    let resolving = {
+        let gateway = gateway.clone();
+        async move {
+            let resolver = gateway.resolver().await?;
+            let item = tokio::time::timeout(LOOKUP_TIMEOUT, resolve(resolver.dht(), &key))
+                .await
+                .map_err(|_| HttpError(StatusCode::GATEWAY_TIMEOUT, "Pkarr lookup timed out"))??;
+            if let Some(local) = &gateway.0.local {
+                local.keep_packet(&key, &item).await;
+            }
+            if let Ok(packet) = Packet::parse(item.value()) {
+                gateway.0.pkarr.lock().expect("poisoned").insert(
+                    key,
+                    item.clone(),
+                    &packet,
+                    Instant::now(),
+                );
+            }
+            Ok(item)
+        }
+    };
+    let Some(kept) = kept else {
+        return resolving.await;
+    };
+    let mut task = tokio::spawn(resolving);
+    match tokio::time::timeout(KEPT_RECORD_WAIT, &mut task).await {
+        Ok(Ok(Ok(item))) => Ok(item),
+        Ok(Ok(Err(error))) => {
+            warn!(
+                key = encoded,
+                error = error.1,
+                "Pkarr lookup failed; using the kept record"
+            );
+            Ok(kept)
+        }
+        Ok(Err(_)) => Ok(kept),
+        Err(_) => {
+            // Dropping the handle leaves the lookup running.
+            debug!(
+                key = encoded,
+                "Pkarr lookup is slow; using the kept record meanwhile"
+            );
+            Ok(kept)
+        }
+    }
 }
 
 /// Returns the hash when a target names content, as `<z32>.blake3.net`.

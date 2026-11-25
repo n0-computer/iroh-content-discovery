@@ -153,3 +153,17 @@ async fn a_smaller_limit_evicts() {
     assert!(cache.store().has(new).await.unwrap());
     cache.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn clear_drops_everything_but_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::load(dir.path(), config(64 * MIB)).await.unwrap();
+    let pinned = add(&cache, 1).await;
+    let plain = add(&cache, 2).await;
+    cache.pin("keep", HashAndFormat::raw(pinned)).await.unwrap();
+    cache.clear().await.unwrap();
+    wait_gone(&cache, plain).await;
+    assert!(cache.store().has(pinned).await.unwrap());
+    assert_eq!(cache.evict().await.unwrap().blobs, 0);
+    cache.shutdown().await.unwrap();
+}

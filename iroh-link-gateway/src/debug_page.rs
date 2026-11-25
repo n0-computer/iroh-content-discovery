@@ -137,8 +137,8 @@ pub(crate) async fn pkarr(
             let mut items = Vec::new();
             let lookup = async {
                 let mut answers = gateway
-                    .0
-                    .resolver
+                    .resolver_now()
+                    .ok_or_else(|| crate::NOT_CONNECTED.1.to_owned())?
                     .dht()
                     .get_mutable(&key, None, None)
                     .await
@@ -314,8 +314,8 @@ async fn providers_section(
     let mut peers = BTreeSet::new();
     let lookup = async {
         let mut batches = gateway
-            .0
-            .resolver
+            .resolver_now()
+            .ok_or_else(|| crate::NOT_CONNECTED.1.to_owned())?
             .dht()
             .get_peers(infohash.into())
             .await
@@ -348,8 +348,14 @@ async fn providers_section(
                 peer
             })
             .map(|peer| {
-                let index = gateway.0.resolver.index().clone();
+                let index = gateway
+                    .resolver_now()
+                    .map(|resolver| resolver.index().clone());
                 async move {
+                    // The peers came through a resolver, so there is one.
+                    let Some(index) = index else {
+                        return Vec::new();
+                    };
                     let resolutions = match index.lookup_uncached(peer).await {
                         Ok(records) if records.is_empty() => vec![Resolution::NotInIndex],
                         Ok(records) => records.into_iter().map(Resolution::Record).collect(),

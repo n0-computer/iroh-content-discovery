@@ -108,6 +108,14 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'\'')
     .add(b'&');
 
+/// The answer while a gateway without a resolver cannot look anything up.
+///
+/// Apps can recognise it by its status and replace it with a page of their own.
+pub(crate) const NOT_CONNECTED: HttpError = HttpError(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "not connected to the network yet",
+);
+
 /// Providers kept for repeated seeks, and collections kept for repeated paths.
 const SOURCE_SLOTS: NonZeroUsize = NonZeroUsize::new(128).expect("nonzero");
 /// Verified sizes kept for listings, which are cheap to hold and slow to fetch.
@@ -127,7 +135,8 @@ pub struct Gateway(Arc<Inner>);
 
 struct Inner {
     endpoint: Endpoint,
-    resolver: Resolver,
+    /// `None` until the caller has one, see [`Gateway::set_resolver`].
+    resolver: tokio::sync::watch::Sender<Option<Resolver>>,
     classifier: MimeClassifier,
     pkarr: Mutex<pkarr_redirect::Cache>,
     /// Recently verified providers and recently failed lookups, per hash.
@@ -171,7 +180,7 @@ impl Gateway {
     ///
     /// The endpoint is used to dial resolved endpoint IDs.
     pub fn new(endpoint: Endpoint, resolver: Resolver) -> Self {
-        Self::build(endpoint, resolver, None)
+        Self::build(endpoint, Some(resolver), None)
     }
 
     /// Constructs a gateway that keeps verified content in `cache`'s store.
@@ -181,18 +190,42 @@ impl Gateway {
     /// store needs no provider. The newest verified Pkarr record of each name
     /// is kept too, and used when a lookup fails. The cache evicts the least
     /// recently used blobs once the store is over its budget.
+    ///
+    /// The resolver may come later, with [`Self::set_resolver`]: until then
+    /// the gateway serves what is in the store, which needs no network, and
+    /// requests for anything else wait for the resolver.
     pub fn with_cache(
         endpoint: Endpoint,
-        resolver: Resolver,
+        resolver: Option<Resolver>,
         cache: iroh_blobs_cache::BlobCache,
     ) -> Self {
         Self::build(endpoint, resolver, Some(local::Local::new(cache)))
     }
 
-    fn build(endpoint: Endpoint, resolver: Resolver, local: Option<local::Local>) -> Self {
+    /// Sets or replaces the resolver, for example after index discovery
+    /// finished, or with a new Mainline node.
+    pub fn set_resolver(&self, resolver: Resolver) {
+        self.0.resolver.send_replace(Some(resolver));
+    }
+
+    /// Returns the resolver, if there is one yet.
+    pub(crate) fn resolver_now(&self) -> Option<Resolver> {
+        self.0.resolver.borrow().clone()
+    }
+
+    /// Returns the resolver, waiting up to [`DISCOVERY_TIMEOUT`] for one.
+    pub(crate) async fn resolver(&self) -> Result<Resolver, HttpError> {
+        let mut resolver = self.0.resolver.subscribe();
+        match tokio::time::timeout(DISCOVERY_TIMEOUT, resolver.wait_for(Option::is_some)).await {
+            Ok(Ok(resolver)) => Ok(resolver.clone().expect("checked by wait_for")),
+            _ => Err(NOT_CONNECTED),
+        }
+    }
+
+    fn build(endpoint: Endpoint, resolver: Option<Resolver>, local: Option<local::Local>) -> Self {
         Self(Arc::new(Inner {
             endpoint,
-            resolver,
+            resolver: tokio::sync::watch::Sender::new(resolver),
             classifier: MimeClassifier::new(),
             pkarr: Mutex::new(pkarr_redirect::Cache::default()),
             providers: Arc::default(),
@@ -341,7 +374,7 @@ impl Gateway {
         } else {
             HINT_HEAD_START
         };
-        let resolver = self.0.resolver.clone();
+        let resolver = self.resolver().await?;
         let discovered = stream::once_future(tokio::time::sleep(head_start)).flat_map(move |()| {
             resolver
                 .resolve_stream(infohash.into())

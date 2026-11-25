@@ -302,6 +302,16 @@ impl BlobCache {
         self.inner.wake.notify_one();
     }
 
+    /// Drops every cached blob. Garbage collection deletes them, except
+    /// pinned and held ones.
+    pub async fn clear(&self) -> Result<()> {
+        self.inner.store.tags().delete_prefix(CACHE_PREFIX).await?;
+        let mut state = self.inner.state.lock().expect("poisoned");
+        state.used.clear();
+        state.dirty = true;
+        Ok(())
+    }
+
     /// Returns the state after the last eviction pass.
     pub fn usage(&self) -> Usage {
         self.inner.state.lock().expect("poisoned").usage
