@@ -204,3 +204,17 @@ async fn a_configuration_that_cannot_work_is_rejected() {
         );
     }
 }
+
+#[tokio::test]
+async fn debug_output_does_not_list_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::load(dir.path(), config(64 * MIB)).await.unwrap();
+    let hash = add(&cache, 1).await;
+    let hold = cache.hold(hash).await.unwrap();
+    let other = add(&cache, 2).await;
+    for output in [format!("{cache:?}"), format!("{hold:?}")] {
+        assert!(!output.contains(&other.to_string()), "{output}");
+    }
+    drop(hold);
+    cache.shutdown().await.unwrap();
+}

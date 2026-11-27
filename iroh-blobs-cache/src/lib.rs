@@ -56,7 +56,7 @@
 use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{HashMap, HashSet},
-    io,
+    fmt, io,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -202,13 +202,23 @@ pub enum CacheError {
 ///
 /// Cheap to clone. The eviction task runs until the last clone is dropped or
 /// [`Self::shutdown`] is called.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BlobCache {
     inner: Arc<Inner>,
     task: Arc<AbortOnDropHandle<()>>,
 }
 
-#[derive(Debug)]
+// Not derived: the state lists every cached blob.
+impl fmt::Debug for BlobCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BlobCache")
+            .field("dir", &self.inner.dir)
+            .field("max_bytes", &self.max_bytes())
+            .field("usage", &self.usage())
+            .finish_non_exhaustive()
+    }
+}
+
 struct Inner {
     store: FsStore,
     dir: PathBuf,
@@ -238,11 +248,18 @@ struct State {
 }
 
 /// Keeps a blob from garbage collection and eviction until dropped.
-#[derive(Debug)]
 pub struct Hold {
     inner: Arc<Inner>,
     hash: Hash,
     _tag: TempTag,
+}
+
+impl fmt::Debug for Hold {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Hold")
+            .field("hash", &self.hash)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for Hold {
