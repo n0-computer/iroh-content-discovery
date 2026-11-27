@@ -215,27 +215,15 @@ impl BlobCache {
     /// Call it when a blob was stored or read. It also wakes the eviction
     /// task, since the store may have grown.
     pub async fn touch(&self, hash: Hash) -> Result<()> {
-        let new = {
-            let mut state = self.inner.state.lock().expect("poisoned");
-            state.dirty = true;
-            state.used.insert(hash, now_ms()).is_none()
-        };
-        if new {
-            let result = self
-                .inner
+        if !self.inner.renew(hash) {
+            // The tag goes first. If this future is dropped on the way, the
+            // blob is not listed, and the next touch sets the tag again.
+            self.inner
                 .store
                 .tags()
                 .set(cache_tag(hash), HashAndFormat::raw(hash))
-                .await;
-            if let Err(error) = result {
-                self.inner
-                    .state
-                    .lock()
-                    .expect("poisoned")
-                    .used
-                    .remove(&hash);
-                return Err(error.into());
-            }
+                .await?;
+            self.inner.insert(hash);
         }
         self.inner.wake.notify_one();
         Ok(())
@@ -331,6 +319,24 @@ impl BlobCache {
 }
 
 impl Inner {
+    /// Records a use of `hash` if it is listed, and returns whether it is.
+    fn renew(&self, hash: Hash) -> bool {
+        let mut state = self.state.lock().expect("poisoned");
+        let Some(used) = state.used.get_mut(&hash) else {
+            return false;
+        };
+        *used = now_ms();
+        state.dirty = true;
+        true
+    }
+
+    /// Lists `hash` as used now.
+    fn insert(&self, hash: Hash) {
+        let mut state = self.state.lock().expect("poisoned");
+        state.used.insert(hash, now_ms());
+        state.dirty = true;
+    }
+
     /// Measures the store, and releases the least recently used blobs if it
     /// is over the high water mark.
     async fn pass(&self) -> Result<Usage> {
