@@ -12,7 +12,7 @@ keywords = ["iroh", "blobs", "cache", "lru"]
 categories = ["caching", "filesystem"]
 
 [dependencies]
-fs4 = "1"
+fs4 = { version = "1", default-features = false }
 iroh-blobs.workspace = true
 n0-error.workspace = true
 n0-future.workspace = true
