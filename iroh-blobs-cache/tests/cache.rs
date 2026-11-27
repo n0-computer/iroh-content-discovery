@@ -238,6 +238,10 @@ async fn a_hash_sequence_pin_keeps_its_children() {
         .pin("site", HashAndFormat::hash_seq(seq.hash()))
         .await
         .unwrap();
+    assert_eq!(
+        cache.pins().await.unwrap(),
+        vec![("site".to_owned(), HashAndFormat::hash_seq(seq.hash()))]
+    );
 
     cache.evict().await.unwrap();
     wait_gone(&cache, plain).await;

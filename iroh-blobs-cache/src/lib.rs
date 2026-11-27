@@ -422,6 +422,28 @@ impl BlobCache {
         Ok(())
     }
 
+    /// Returns the pins, by name, with what each keeps.
+    ///
+    /// The names are those given to [`Self::pin`], without the tag prefix.
+    pub async fn pins(&self) -> Result<Vec<(String, HashAndFormat)>, CacheError> {
+        let mut tags = self
+            .inner
+            .store
+            .tags()
+            .list_prefix(PIN_PREFIX)
+            .await
+            .map_err(store_failed)?;
+        let mut pins = Vec::new();
+        while let Some(tag) = tags.next().await {
+            let tag = tag.map_err(store_failed)?;
+            let name = String::from_utf8_lossy(tag.name.as_ref());
+            if let Some(name) = name.strip_prefix(PIN_PREFIX) {
+                pins.push((name.to_owned(), tag.hash_and_format()));
+            }
+        }
+        Ok(pins)
+    }
+
     /// Returns the upper bound for the store's footprint.
     pub fn max_bytes(&self) -> u64 {
         self.inner.max_bytes.load(Ordering::Relaxed)

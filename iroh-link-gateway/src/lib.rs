@@ -27,7 +27,7 @@ use bao_tree::{ChunkNum, ChunkRanges, io::fsm::BaoContentItem};
 use bytes::Bytes;
 use iroh::{Endpoint, endpoint::Connection};
 use iroh_blobs::{
-    Hash,
+    Hash, HashAndFormat,
     format::collection::{Collection, CollectionMeta},
     get::fsm::{
         self, AtBlobContent, AtBlobHeader, AtEndBlob, BlobContentNext, ConnectedNext, EndBlobNext,
@@ -51,6 +51,7 @@ mod pkarr_redirect;
 mod provider_cache;
 mod providers;
 mod ranges;
+pub use local::{KeepError, KeepProgress, Kept};
 pub use providers::filter_verified_providers;
 use ranges::Selection;
 
@@ -215,6 +216,61 @@ impl Gateway {
         cache: iroh_blobs_cache::BlobCache,
     ) -> Self {
         Self::build(endpoint, resolver, Some(local::Local::new(cache)))
+    }
+
+    /// Keeps `hash` for offline use, pinned as `name`.
+    ///
+    /// Fetches every chunk the store lacks, of the blob or, for a collection,
+    /// of all its files, and then pins it, so eviction never drops it.
+    /// Keeping under a name that is pinned already replaces what it keeps.
+    /// `progress` is called as bytes arrive. A keep that failed can be
+    /// started again and continues where it stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeepError::NoStore`] without a store, [`KeepError::Fetch`]
+    /// if no provider has all of it, and [`KeepError::Store`] if the store
+    /// fails.
+    pub async fn keep(
+        &self,
+        name: &str,
+        hash: Hash,
+        mut progress: impl FnMut(KeepProgress) + Send,
+    ) -> Result<Kept, KeepError> {
+        let local = self.0.local.as_ref().ok_or(e!(KeepError::NoStore))?;
+        let (content, connection) = match self.collection(hash).await {
+            Ok(source) => (HashAndFormat::hash_seq(hash), source.connection),
+            Err(HttpError(StatusCode::UNPROCESSABLE_ENTITY, _)) => (HashAndFormat::raw(hash), None),
+            Err(error) => return Err(local::keep_fetch_failed(error)),
+        };
+        local
+            .keep(self, name, content, connection, &mut progress)
+            .await
+    }
+
+    /// Removes the pin `name`.
+    ///
+    /// Its blobs are deleted with the next garbage collection, unless they
+    /// are cached from browsing or another pin keeps them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeepError::NoStore`] without a store, and
+    /// [`KeepError::Store`] if the store fails.
+    pub async fn unkeep(&self, name: &str) -> Result<(), KeepError> {
+        let local = self.0.local.as_ref().ok_or(e!(KeepError::NoStore))?;
+        local.unkeep(name).await
+    }
+
+    /// Returns all pinned content, with how much of each is in the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeepError::NoStore`] without a store, and
+    /// [`KeepError::Store`] if the store fails.
+    pub async fn kept(&self) -> Result<Vec<Kept>, KeepError> {
+        let local = self.0.local.as_ref().ok_or(e!(KeepError::NoStore))?;
+        local.kept_all().await
     }
 
     /// Sets or replaces the resolver.

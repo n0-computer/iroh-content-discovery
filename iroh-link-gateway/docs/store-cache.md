@@ -74,8 +74,11 @@ we measured, and a proposal.
 
 ## Proposal for the gateway
 
-Implemented in [`iroh-blobs-cache`](../../iroh-blobs-cache), as below, except
-that the gateway does not pin anything yet.
+Implemented in [`iroh-blobs-cache`](../../iroh-blobs-cache), as below. The
+gateway pins with `Gateway::keep`: it fetches the whole blob or collection
+into the store, then sets a pin under the caller's name (`pin/<name>`, a
+`HashSeq` tag for a collection). Apps name a kept site after its host,
+`site/<label>.<blake3|pkarr>`.
 
 **Unit: one blob, with a raw tag `cache/<hash>`.**
 - That covers every blob the gateway stores: files, collection roots and
@@ -86,9 +89,9 @@ that the gateway does not pin anything yet.
 - Per-root eviction would keep sites whole, but one large video would then
   push out everything else of its site.
 
-**Pins: a `HashSeq` tag `pin/<root>`.**
-- Content the user installed (home screen apps on Android, "Install as app"
-  on desktop) keeps all its files through GC.
+**Pins: a `HashSeq` tag `pin/<name>`.**
+- Content the user keeps offline or installed (home screen apps on Android,
+  "Install as app" on desktop) keeps all its files through GC.
 - Eviction skips blobs reachable from a pin, so it does not count bytes that
   GC will never free.
 

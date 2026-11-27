@@ -16,6 +16,9 @@
 //! evicts the least recently used ones once the store is over its limit.
 //! Fetches and responses hold their blob, so garbage collection cannot delete
 //! a partial download.
+//!
+//! Content can also be kept for offline use: [`Gateway::keep`] fetches all of
+//! it and pins it under a name, so eviction never drops it.
 
 use std::ops::Range;
 
@@ -23,7 +26,7 @@ use axum::http::StatusCode;
 use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh_blobs::{
-    Hash,
+    BlobFormat, Hash, HashAndFormat,
     api::{Store, proto::ExportRangesItem, remote::GetProgressItem},
     format::collection::Collection,
     hashseq::HashSeq,
@@ -31,6 +34,7 @@ use iroh_blobs::{
 };
 use iroh_blobs_cache::BlobCache;
 use iroh_mainline_endpoint_discovery::{decode_signed_packet, encode_signed_packet};
+use n0_error::{AnyError, e};
 use n0_future::{Stream, StreamExt};
 use tracing::{debug, warn};
 
@@ -212,6 +216,196 @@ impl Local {
         let bytes = self.store.get_bytes(tag.hash).await.ok()?;
         decode_signed_packet(&bytes).filter(|item| item.key() == key)
     }
+}
+
+impl Local {
+    /// Fetches everything `content` lacks into the store and pins it as `name`.
+    ///
+    /// `connection` is a provider of `content`'s root, if there is one open.
+    pub(crate) async fn keep(
+        &self,
+        gateway: &Gateway,
+        name: &str,
+        content: HashAndFormat,
+        mut connection: Option<Connection>,
+        progress: &mut (dyn FnMut(KeepProgress) + Send),
+    ) -> Result<Kept, KeepError> {
+        // Keeps the root and every child fetched so far through garbage
+        // collection until the pin is set. Their blobs have no cache tags,
+        // so eviction does not see them.
+        let _hold = self
+            .store
+            .tags()
+            .temp_tag(content)
+            .await
+            .map_err(keep_store_failed)?;
+        let local = self
+            .store
+            .remote()
+            .local(content)
+            .await
+            .map_err(keep_store_failed)?;
+        if !local.is_complete() {
+            let connection = match connection.take() {
+                Some(connection) if connection.close_reason().is_none() => connection,
+                _ => gateway
+                    .connection(content.hash)
+                    .await
+                    .map_err(keep_fetch_failed)?,
+            };
+            let start = local.local_bytes();
+            let total = self.total(gateway, content, &connection).await;
+            progress(KeepProgress { have: start, total });
+            debug!(?content, name, start, ?total, "keeping content");
+            let fetch = self.store.remote().fetch(connection, content).stream();
+            let mut fetch = std::pin::pin!(fetch);
+            loop {
+                let item = tokio::time::timeout(READ_TIMEOUT, fetch.next())
+                    .await
+                    .map_err(|elapsed| keep_fetch_failed(HttpError::timeout(elapsed)))?;
+                match item {
+                    Some(GetProgressItem::Progress(fetched)) => progress(KeepProgress {
+                        have: start + fetched,
+                        total,
+                    }),
+                    Some(GetProgressItem::Done(_)) => break,
+                    Some(GetProgressItem::Error(error)) => {
+                        return Err(keep_fetch_failed(HttpError::upstream(error)));
+                    }
+                    None => {
+                        return Err(keep_fetch_failed(HttpError::upstream(
+                            "fetch ended without a result",
+                        )));
+                    }
+                }
+            }
+        }
+        self.cache
+            .pin(name, content)
+            .await
+            .map_err(keep_store_failed)?;
+        let kept = self.kept(name.to_owned(), content).await?;
+        progress(KeepProgress {
+            have: kept.bytes,
+            total: Some(kept.bytes),
+        });
+        Ok(kept)
+    }
+
+    /// Returns the size of `content` in bytes, root and children, if every
+    /// size is known or can be fetched over `connection`.
+    async fn total(
+        &self,
+        gateway: &Gateway,
+        content: HashAndFormat,
+        connection: &Connection,
+    ) -> Option<u64> {
+        let root = gateway.size(content.hash, Some(connection)).await.ok()?;
+        if content.format == BlobFormat::Raw {
+            return Some(root);
+        }
+        let children: Vec<Hash> = HashSeq::new(self.store.get_bytes(content.hash).await.ok()?)?
+            .into_iter()
+            .collect();
+        let sizes = gateway
+            .sizes(children.clone(), Some(connection.clone()))
+            .await;
+        let mut total = root;
+        for hash in &children {
+            total += sizes.get(hash)?;
+        }
+        Some(total)
+    }
+
+    /// Removes the pin `name`. Its blobs go with the next garbage
+    /// collection, unless they are cached or pinned otherwise.
+    pub(crate) async fn unkeep(&self, name: &str) -> Result<(), KeepError> {
+        self.cache.unpin(name).await.map_err(keep_store_failed)
+    }
+
+    /// Returns every pin, with how much of it is in the store.
+    pub(crate) async fn kept_all(&self) -> Result<Vec<Kept>, KeepError> {
+        let pins = self.cache.pins().await.map_err(keep_store_failed)?;
+        let mut kept = Vec::with_capacity(pins.len());
+        for (name, content) in pins {
+            kept.push(self.kept(name, content).await?);
+        }
+        Ok(kept)
+    }
+
+    /// Returns how much of the pin `name` of `content` is in the store.
+    async fn kept(&self, name: String, content: HashAndFormat) -> Result<Kept, KeepError> {
+        let local = self
+            .store
+            .remote()
+            .local(content)
+            .await
+            .map_err(keep_store_failed)?;
+        Ok(Kept {
+            name,
+            hash: content.hash,
+            collection: content.format == BlobFormat::HashSeq,
+            bytes: local.local_bytes(),
+            complete: local.is_complete(),
+        })
+    }
+}
+
+/// Progress of [`Gateway::keep`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct KeepProgress {
+    /// Bytes of the content in the store.
+    pub have: u64,
+    /// Bytes of the whole content, if known.
+    pub total: Option<u64>,
+}
+
+/// Content pinned with [`Gateway::keep`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Kept {
+    /// The name it was pinned under.
+    pub name: String,
+    /// Its root.
+    pub hash: Hash,
+    /// Whether it is a collection, kept with all its files.
+    pub collection: bool,
+    /// Bytes of it in the store.
+    pub bytes: u64,
+    /// Whether all of it is in the store.
+    pub complete: bool,
+}
+
+/// Failure of [`Gateway::keep`], [`Gateway::unkeep`] or [`Gateway::kept`].
+#[n0_error::stack_error(derive, add_meta)]
+#[non_exhaustive]
+pub enum KeepError {
+    /// The gateway was made without a store.
+    #[error("the gateway has no store")]
+    NoStore,
+    /// The content could not be fetched.
+    #[error("{reason}")]
+    Fetch {
+        /// What went wrong, as the gateway would answer a request.
+        reason: &'static str,
+    },
+    /// The store did not carry out a request.
+    #[error("store failed")]
+    Store {
+        /// The store's error.
+        source: AnyError,
+    },
+}
+
+/// Turns the answer to a request into a [`KeepError`].
+pub(crate) fn keep_fetch_failed(error: HttpError) -> KeepError {
+    e!(KeepError::Fetch { reason: error.1 })
+}
+
+/// Turns a failure of the store into a [`KeepError`].
+fn keep_store_failed(error: impl std::error::Error + Send + Sync + 'static) -> KeepError {
+    e!(KeepError::Store, AnyError::from_std(error))
 }
 
 fn packet_tag(key: &[u8; 32]) -> String {
