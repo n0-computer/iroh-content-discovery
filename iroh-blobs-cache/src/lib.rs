@@ -7,8 +7,8 @@
 //!   through garbage collection. [`BlobCache::touch`] creates the tag and
 //!   records the use.
 //! - Over the high water mark, the least recently used blobs lose their tags
-//!   until the footprint gets down to the target, and the next garbage
-//!   collection deletes them.
+//!   until the footprint gets down to the low water mark, and the next
+//!   garbage collection deletes them.
 //! - [`BlobCache::hold`] keeps a blob from garbage collection and eviction
 //!   while it is being fetched or read, also before it has a tag.
 //! - [`BlobCache::pin`] sets a tag `pin/<name>` that eviction never drops. A
@@ -94,7 +94,11 @@ const MIN_PASS_GAP: Duration = Duration::from_secs(1);
 const INLINE_BYTES: u64 = 16 * 1024;
 
 /// Limits and timing of a [`BlobCache`].
+///
+/// Start from [`CacheConfig::new`] and change the fields you need. More
+/// fields may come in later versions.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CacheConfig {
     /// Upper bound for the store's footprint on disk.
     pub max_bytes: u64,
@@ -105,11 +109,11 @@ pub struct CacheConfig {
     /// Share of the limit above which eviction starts.
     pub high_water: f64,
     /// Share of the limit that eviction brings the footprint down to.
-    pub target: f64,
+    pub low_water: f64,
     /// Interval of the store's garbage collection, which deletes evicted blobs.
     pub gc_interval: Duration,
     /// Interval of eviction passes when nothing asks for one sooner.
-    pub tick: Duration,
+    pub eviction_interval: Duration,
     /// How often the use order is written to disk.
     pub save_interval: Duration,
 }
@@ -124,9 +128,9 @@ impl CacheConfig {
             max_bytes,
             min_free_bytes: 1024 * 1024 * 1024,
             high_water: 0.9,
-            target: 0.7,
+            low_water: 0.7,
             gc_interval: Duration::from_secs(30),
-            tick: Duration::from_secs(10),
+            eviction_interval: Duration::from_secs(10),
             save_interval: Duration::from_secs(300),
         }
     }
@@ -134,6 +138,7 @@ impl CacheConfig {
 
 /// The state of a cache after its last eviction pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Usage {
     /// Bytes the store occupies on disk.
     pub footprint: u64,
@@ -383,7 +388,7 @@ impl Inner {
 
     /// Measures the store and releases least recently used blobs if it is too large.
     ///
-    /// Releasing starts above the high water mark and stops at the target.
+    /// Releasing starts above the high water mark and stops at the low water mark.
     async fn pass(&self) -> Result<Usage> {
         let _pass = self.passes.lock().await;
         let footprint = footprint(self.dir.clone()).await?;
@@ -418,7 +423,7 @@ impl Inner {
         let high = (limit as f64 * self.config.high_water) as u64;
         let mut released = 0;
         if effective > high {
-            let need = effective.saturating_sub((limit as f64 * self.config.target) as u64);
+            let need = effective.saturating_sub((limit as f64 * self.config.low_water) as u64);
             let pinned = self.pinned().await?;
             for (_, hash) in candidates {
                 if released >= need {
@@ -579,7 +584,7 @@ async fn run(inner: Arc<Inner>) {
         }
         let woken = tokio::select! {
             _ = inner.wake.notified() => true,
-            _ = tokio::time::sleep(inner.config.tick) => false,
+            _ = tokio::time::sleep(inner.config.eviction_interval) => false,
         };
         if woken {
             tokio::time::sleep(MIN_PASS_GAP).await;

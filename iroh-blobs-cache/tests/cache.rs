@@ -12,7 +12,7 @@ fn config(max_bytes: u64) -> CacheConfig {
     config.min_free_bytes = 0;
     config.gc_interval = Duration::from_millis(200);
     // Passes only when a test asks for one.
-    config.tick = Duration::from_secs(3600);
+    config.eviction_interval = Duration::from_secs(3600);
     config
 }
 
@@ -178,23 +178,23 @@ async fn overlapping_passes_release_the_excess_once() {
     let (first, second) = tokio::join!(cache.evict(), cache.evict());
     first.unwrap();
     second.unwrap();
-    // About 10 MiB on disk and a target of 7 MiB: one pass releases about
-    // 4 MiB, and the other finds nothing left to do.
+    // About 10 MiB on disk and a low water mark of 7 MiB: one pass releases
+    // about 4 MiB, and the other finds nothing left to do.
     let usage = cache.usage();
     assert!(usage.pending <= 5 * MIB, "{usage:?}");
     cache.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_target_above_the_high_water_mark_is_not_an_overflow() {
+async fn a_low_water_mark_above_the_high_one_is_not_an_overflow() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(10 * MIB);
-    config.target = 2.0;
+    config.low_water = 2.0;
     let cache = BlobCache::load(dir.path(), config).await.unwrap();
     for seed in 0..10 {
         add(&cache, seed).await;
     }
-    // Over the high water mark, but under the target: nothing to release.
+    // Over the high water mark, but under the low one: nothing to release.
     assert_eq!(cache.evict().await.unwrap().blobs, 10);
     cache.shutdown().await.unwrap();
 }
