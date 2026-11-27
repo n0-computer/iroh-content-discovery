@@ -205,9 +205,9 @@ pub(crate) async fn redirect(
 /// Looks up the newest record of `key` on Mainline.
 ///
 /// With a store, the newest verified record is kept, and used if the lookup
-/// fails. If one is kept, the lookup only gets [`KEPT_RECORD_WAIT`]: offline,
-/// or with a slow DHT, the page loads from the kept record, and the lookup
-/// finishes in the background for later requests.
+/// fails or finds an older one. If one is kept, the lookup only gets
+/// [`KEPT_RECORD_WAIT`]: offline, or with a slow DHT, the page loads from the
+/// kept record, and the lookup finishes in the background for later requests.
 async fn lookup(
     gateway: &Gateway,
     key: [u8; 32],
@@ -219,14 +219,30 @@ async fn lookup(
     };
     let resolving = {
         let gateway = gateway.clone();
+        let kept = kept.clone();
         async move {
             let resolver = gateway.resolver().await?;
-            let item = tokio::time::timeout(LOOKUP_TIMEOUT, resolve(resolver.dht(), &key))
+            let found = tokio::time::timeout(LOOKUP_TIMEOUT, resolve(resolver.dht(), &key))
                 .await
                 .map_err(|_| HttpError(StatusCode::GATEWAY_TIMEOUT, "Pkarr lookup timed out"))??;
-            if let Some(local) = &gateway.0.local {
-                local.keep_packet(&key, &item).await;
-            }
+            // Sequence numbers only grow, so an answer older than the kept
+            // record came from stale nodes and must not roll the name back.
+            let item = match kept {
+                Some(kept) if kept.seq() > found.seq() => {
+                    debug!(
+                        kept = kept.seq(),
+                        found = found.seq(),
+                        "Pkarr lookup found an older record than the kept one"
+                    );
+                    kept
+                }
+                _ => {
+                    if let Some(local) = &gateway.0.local {
+                        local.keep_packet(&key, &found).await;
+                    }
+                    found
+                }
+            };
             if let Ok(packet) = Packet::parse(item.value()) {
                 gateway.0.pkarr.lock().expect("poisoned").insert(
                     key,

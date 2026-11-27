@@ -9,7 +9,9 @@ use iroh::{Endpoint, address_lookup::memory::MemoryLookup, endpoint::presets, pr
 use iroh_blobs::{BlobsProtocol, format::collection::Collection, store::mem::MemStore};
 use iroh_blobs_cache::{BlobCache, CacheConfig};
 use iroh_link_gateway::Gateway;
-use iroh_mainline_endpoint_discovery::{AddrIndex, BLAKE3_DOMAIN, Resolver, infohash_from_blake3};
+use iroh_mainline_endpoint_discovery::{
+    AddrIndex, BLAKE3_DOMAIN, Resolver, encode_signed_packet, infohash_from_blake3,
+};
 use n0_future::StreamExt;
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use reqwest::{Client, StatusCode};
@@ -117,9 +119,10 @@ async fn run() {
     let index = AddrIndex::udp(gateway_dht.clone(), server_addr)
         .await
         .unwrap();
+    let resolver = Resolver::new(gateway_dht, index);
     let base = serve(Gateway::with_cache(
         endpoint.clone(),
-        Some(Resolver::new(gateway_dht, index)),
+        Some(resolver.clone()),
         cache.clone(),
     ))
     .await;
@@ -167,5 +170,36 @@ async fn run() {
         "{:?}",
         started.elapsed()
     );
+
+    // A kept record newer than the one on the DHT wins over the lookup.
+    let mut packet = Packet::new_reply(0);
+    packet.answers.push(ResourceRecord::new(
+        name.as_str().try_into().unwrap(),
+        CLASS::IN,
+        300,
+        RData::HTTPS(HTTPS(SVCB::new(0, "newer.example".try_into().unwrap()))),
+    ));
+    let bytes = packet.build_bytes_vec_compressed().unwrap();
+    let newer = MutableItem::new(&key, &bytes, timestamp + 1, None);
+    let kept = cache
+        .store()
+        .add_bytes(encode_signed_packet(&newer).unwrap())
+        .with_named_tag(format!("pkarr/{name}"))
+        .await
+        .unwrap();
+    let base = serve(Gateway::with_cache(endpoint, Some(resolver), cache.clone())).await;
+    let res = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(format!("{base}/pkarr/{name}/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(res.headers()["location"], "https://newer.example/");
+    let tag = tags.get(format!("pkarr/{name}")).await.unwrap().unwrap();
+    assert_eq!(tag.hash, kept.hash);
     cache.shutdown().await.unwrap();
 }
