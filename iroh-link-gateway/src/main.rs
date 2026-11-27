@@ -12,6 +12,7 @@ use std::{
 use clap::Parser;
 use data_encoding::HEXLOWER_PERMISSIVE;
 use iroh::endpoint::presets;
+use iroh_blobs_cache::{BlobCache, CacheConfig};
 use iroh_link_gateway::{Gateway, validate_listen_addr};
 use iroh_mainline_endpoint_discovery::{
     AddrIndex, AddrIndexBuilder, Resolver, decode_signed_packet, encode_signed_packet,
@@ -87,14 +88,26 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     let endpoint = iroh::Endpoint::bind(presets::N0).await?;
     let dht = Dht::builder().port(args.dht_port).build()?;
+    let cache = match &args.store {
+        Some(dir) => {
+            let max_bytes = args.store_max_mib.saturating_mul(1024 * 1024);
+            Some(BlobCache::load(dir, CacheConfig::new(max_bytes)).await?)
+        }
+        None => None,
+    };
     if let Some(runtime) = &runtime {
         runtime.ready()?;
     }
     let result = tokio::select! {
-        result = serve(args, listener, endpoint.clone(), dht) => result,
+        result = serve(args, listener, endpoint.clone(), dht, cache.clone()) => result,
         _ = shutdown(runtime.as_ref()) => Ok(()),
     };
     endpoint.close().await;
+    if let Some(cache) = cache
+        && let Err(error) = cache.shutdown().await
+    {
+        warn!(%error, "cannot shut the store down");
+    }
     result
 }
 
@@ -128,16 +141,42 @@ async fn serve(
     listener: tokio::net::TcpListener,
     endpoint: iroh::Endpoint,
     dht: Dht,
+    cache: Option<BlobCache>,
 ) -> Result<()> {
+    let Some(cache) = cache else {
+        let gateway = Gateway::new(endpoint, resolver(&args, dht).await?);
+        info!(listen = %listener.local_addr()?, "gateway ready");
+        return Ok(gateway.serve(listener, std::future::pending()).await?);
+    };
+    // The store needs no network, so it is served while discovery runs.
+    let gateway = Gateway::with_cache(endpoint, None, cache);
+    info!(listen = %listener.local_addr()?, "gateway ready, serving the store");
+    let discovery = async {
+        gateway.set_resolver(resolver(&args, dht).await?);
+        info!("index servers found; looking up content and names now");
+        std::future::pending::<Result<()>>().await
+    };
+    tokio::select! {
+        result = gateway.serve(listener, std::future::pending()) => Ok(result?),
+        result = discovery => result,
+    }
+}
+
+/// Finds index servers and returns a resolver that uses them.
+///
+/// A background gateway, or one that serves a store meanwhile, keeps trying.
+/// Otherwise the first failure is returned.
+async fn resolver(args: &Args, dht: Dht) -> Result<Resolver> {
     let mut builder = args.index(dht.clone());
     if let Some(item) = args.state_dir.as_deref().and_then(load_index_list) {
         builder = builder.fallback_list(item);
     }
+    let retry = args.state_dir.is_some() || args.store.is_some();
     info!("finding index servers");
     let index = loop {
         match builder.clone().build().await {
             Ok(index) => break index,
-            Err(error) if args.state_dir.is_some() => {
+            Err(error) if retry => {
                 warn!(%error, "index discovery failed; retrying in 20 seconds");
                 tokio::time::sleep(Duration::from_secs(20)).await;
             }
@@ -150,17 +189,7 @@ async fn serve(
     {
         warn!(%error, "cannot store the signed index list");
     }
-    let resolver = Resolver::new(dht, index);
-    let gateway = match &args.store {
-        Some(dir) => {
-            let config = iroh_blobs_cache::CacheConfig::new(args.store_max_mib * 1024 * 1024);
-            let cache = iroh_blobs_cache::BlobCache::load(dir, config).await?;
-            Gateway::with_cache(endpoint, Some(resolver), cache)
-        }
-        None => Gateway::new(endpoint, resolver),
-    };
-    info!(listen = %listener.local_addr()?, "gateway ready");
-    Ok(gateway.serve(listener, std::future::pending()).await?)
+    Ok(Resolver::new(dht, index))
 }
 
 /// Signed index list from the last successful discovery, used when the
