@@ -378,7 +378,7 @@ impl Inner {
         let high = (budget as f64 * self.config.high_water) as u64;
         let mut released = 0;
         if effective > high {
-            let need = effective - (budget as f64 * self.config.target) as u64;
+            let need = effective.saturating_sub((budget as f64 * self.config.target) as u64);
             let pinned = self.pinned().await?;
             for (_, hash) in candidates {
                 if released >= need {
@@ -510,11 +510,14 @@ impl Inner {
             std::fs::rename(temp, path)
         })
         .await;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => warn!(%error, "cannot save the use order"),
-            Err(error) => warn!(%error, "cannot save the use order"),
-        }
+        let error = match result {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => error,
+            Err(error) => io::Error::other(error),
+        };
+        warn!(%error, "cannot save the use order");
+        // Tried again at the next save.
+        self.state.lock().expect("poisoned").dirty = true;
     }
 }
 
@@ -581,8 +584,13 @@ struct Recency {
 }
 
 fn load_recency(path: &Path) -> HashMap<Hash, u64> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return HashMap::new();
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return HashMap::new(),
+        Err(error) => {
+            warn!(%error, "cannot read the use order; starting without it");
+            return HashMap::new();
+        }
     };
     match postcard::from_bytes::<Recency>(&bytes) {
         Ok(recency) => recency

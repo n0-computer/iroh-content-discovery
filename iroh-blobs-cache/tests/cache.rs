@@ -184,3 +184,17 @@ async fn overlapping_passes_release_the_excess_once() {
     assert!(usage.pending <= 5 * MIB, "{usage:?}");
     cache.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_target_above_the_high_water_mark_is_not_an_overflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(10 * MIB);
+    config.target = 2.0;
+    let cache = BlobCache::load(dir.path(), config).await.unwrap();
+    for seed in 0..10 {
+        add(&cache, seed).await;
+    }
+    // Over the high water mark, but under the target: nothing to release.
+    assert_eq!(cache.evict().await.unwrap().blobs, 10);
+    cache.shutdown().await.unwrap();
+}
