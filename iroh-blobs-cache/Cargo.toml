@@ -1,0 +1,29 @@
+[package]
+name = "iroh-blobs-cache"
+description = "A size-bounded, least-recently-used cache on an iroh-blobs file store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["iroh", "blobs", "cache", "lru"]
+categories = ["caching", "filesystem"]
+
+[dependencies]
+fs4 = { version = "1", default-features = false }
+iroh-blobs.workspace = true
+n0-error.workspace = true
+n0-future.workspace = true
+postcard.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

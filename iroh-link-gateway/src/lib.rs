@@ -2,7 +2,8 @@
 //!
 //! Adapted from the streaming approach in `iroh-examples/iroh-gateway`.
 //! Each content lookup validates providers before choosing an endpoint. Data is streamed directly
-//! from that provider, without downloading a whole blob into memory or a store.
+//! from that provider, without downloading a whole blob into memory or a store, unless the gateway
+//! has a store (see [`Gateway::with_cache`]).
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -26,7 +27,7 @@ use bao_tree::{ChunkNum, ChunkRanges, io::fsm::BaoContentItem};
 use bytes::Bytes;
 use iroh::{Endpoint, endpoint::Connection};
 use iroh_blobs::{
-    Hash,
+    Hash, HashAndFormat,
     format::collection::{Collection, CollectionMeta},
     get::fsm::{
         self, AtBlobContent, AtBlobHeader, AtEndBlob, BlobContentNext, ConnectedNext, EndBlobNext,
@@ -45,10 +46,12 @@ use tracing::{Instrument, debug, debug_span, warn};
 
 mod debug_page;
 mod hints;
+mod local;
 mod pkarr_redirect;
 mod provider_cache;
 mod providers;
 mod ranges;
+pub use local::{KeepError, KeepProgress, Kept};
 pub use providers::filter_verified_providers;
 use ranges::Selection;
 
@@ -106,6 +109,14 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'\'')
     .add(b'&');
 
+/// The answer while a gateway without a resolver cannot look anything up.
+///
+/// Apps can recognise it by its status and replace it with a page of their own.
+pub(crate) const NOT_CONNECTED: HttpError = HttpError(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "not connected to the network yet",
+);
+
 /// Providers kept for repeated seeks, and collections kept for repeated paths.
 const SOURCE_SLOTS: NonZeroUsize = NonZeroUsize::new(128).expect("nonzero");
 /// Verified sizes kept for listings, which are cheap to hold and slow to fetch.
@@ -125,7 +136,11 @@ pub struct Gateway(Arc<Inner>);
 
 struct Inner {
     endpoint: Endpoint,
-    resolver: Resolver,
+    /// `None` until the caller has one, see [`Gateway::set_resolver`].
+    ///
+    /// A tokio watch channel, since `n0_watcher` needs `Eq`, which a resolver
+    /// does not implement.
+    resolver: tokio::sync::watch::Sender<Option<Resolver>>,
     classifier: MimeClassifier,
     pkarr: Mutex<pkarr_redirect::Cache>,
     /// Recently verified providers and recently failed lookups, per hash.
@@ -136,19 +151,44 @@ struct Inner {
     cache: Mutex<LruCache<Hash, Source>>,
     collections: Mutex<LruCache<Hash, CollectionSource>>,
     sizes: Mutex<LruCache<Hash, u64>>,
+    /// Keeps verified content and Pkarr records, if set.
+    local: Option<local::Local>,
 }
 
 #[derive(Clone)]
 struct Source {
-    connection: Connection,
+    /// The provider, or `None` when the store has what is needed so far.
+    connection: Option<Connection>,
     size: u64,
     mime: String,
 }
 
+impl Source {
+    /// Returns whether this source can still be used for a later request.
+    fn usable(&self) -> bool {
+        usable(self.connection.as_ref())
+    }
+}
+
 #[derive(Clone)]
 struct CollectionSource {
-    connection: Connection,
+    /// The provider, or `None` when the collection came from the store.
+    connection: Option<Connection>,
     collection: Collection,
+}
+
+impl CollectionSource {
+    /// Returns whether this source can still be used for a later request.
+    fn usable(&self) -> bool {
+        usable(self.connection.as_ref())
+    }
+}
+
+/// Returns whether a source with `connection` can still be used.
+///
+/// A source without a provider came from the store and stays usable.
+fn usable(connection: Option<&Connection>) -> bool {
+    connection.is_none_or(|connection| connection.close_reason().is_none())
 }
 
 impl Gateway {
@@ -156,9 +196,128 @@ impl Gateway {
     ///
     /// The endpoint is used to dial resolved endpoint IDs.
     pub fn new(endpoint: Endpoint, resolver: Resolver) -> Self {
+        Self::build(endpoint, Some(resolver), None)
+    }
+
+    /// Constructs a gateway that keeps verified content in `cache`'s store.
+    ///
+    /// Requests are served from the store, and only chunks it lacks are
+    /// fetched from a provider, into the store. Content that is fully in the
+    /// store needs no provider. The newest verified Pkarr record of each name
+    /// is kept too, and used when a lookup fails. The cache evicts the least
+    /// recently used blobs once the store is over its size limit.
+    ///
+    /// The resolver may come later, with [`Self::set_resolver`]: until then
+    /// the gateway serves what is in the store, which needs no network, and
+    /// requests for anything else wait for the resolver.
+    pub fn with_cache(
+        endpoint: Endpoint,
+        resolver: Option<Resolver>,
+        cache: iroh_blobs_cache::BlobCache,
+    ) -> Self {
+        Self::build(endpoint, resolver, Some(local::Local::new(cache)))
+    }
+
+    /// Keeps `hash` for offline use, pinned as `name`.
+    ///
+    /// Fetches every chunk the store lacks, of the blob or, for a collection,
+    /// of all its files, and then pins it, so eviction never drops it.
+    /// Keeping under a name that is pinned already replaces what it keeps.
+    /// `progress` is called as bytes arrive. A keep that failed can be
+    /// started again and continues where it stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeepError::NoStore`] without a store, [`KeepError::Fetch`]
+    /// if no provider has all of it, and [`KeepError::Store`] if the store
+    /// fails.
+    pub async fn keep(
+        &self,
+        name: &str,
+        hash: Hash,
+        mut progress: impl FnMut(KeepProgress) + Send,
+    ) -> Result<Kept, KeepError> {
+        let local = self.0.local.as_ref().ok_or(e!(KeepError::NoStore))?;
+        let (content, connection) = match self.collection(hash).await {
+            Ok(source) => (HashAndFormat::hash_seq(hash), source.connection),
+            // Only a root that was read and is no collection is kept raw. A
+            // root that could not be read fails: kept raw, a collection would
+            // never work offline.
+            Err(HttpError(StatusCode::UNPROCESSABLE_ENTITY, _)) => (HashAndFormat::raw(hash), None),
+            Err(error) => return Err(local::keep_fetch_failed(error)),
+        };
+        local
+            .keep(self, name, content, connection, &mut progress)
+            .await
+    }
+
+    /// Removes the pin `name`.
+    ///
+    /// Its blobs are deleted with the next garbage collection, unless they
+    /// are cached from browsing or another pin keeps them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeepError::NoStore`] without a store, and
+    /// [`KeepError::Store`] if the store fails.
+    pub async fn unkeep(&self, name: &str) -> Result<(), KeepError> {
+        let local = self.0.local.as_ref().ok_or(e!(KeepError::NoStore))?;
+        local.unkeep(name).await
+    }
+
+    /// Returns all pinned content, with how much of each is in the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeepError::NoStore`] without a store, and
+    /// [`KeepError::Store`] if the store fails.
+    pub async fn kept(&self) -> Result<Vec<Kept>, KeepError> {
+        let local = self.0.local.as_ref().ok_or(e!(KeepError::NoStore))?;
+        local.kept_all().await
+    }
+
+    /// Returns the content the Pkarr name `key` points at now.
+    ///
+    /// Waits for the lookup. With a store, the record found is kept, as when
+    /// a page loads the name, so offline the gateway serves the name from
+    /// this content: keep it with [`Gateway::keep`]. If the lookup fails, the
+    /// record kept before answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeepError::Fetch`] if the name cannot be looked up and no
+    /// record is kept, or it does not point at content.
+    pub async fn name_content(&self, key: [u8; 32]) -> Result<Hash, KeepError> {
+        pkarr_redirect::name_content(self, key)
+            .await
+            .map_err(local::keep_fetch_failed)
+    }
+
+    /// Sets or replaces the resolver.
+    ///
+    /// Use it once index discovery has finished, or for a new Mainline node.
+    pub fn set_resolver(&self, resolver: Resolver) {
+        self.0.resolver.send_replace(Some(resolver));
+    }
+
+    /// Returns the resolver, if there is one yet.
+    pub(crate) fn resolver_now(&self) -> Option<Resolver> {
+        self.0.resolver.borrow().clone()
+    }
+
+    /// Returns the resolver, waiting up to [`DISCOVERY_TIMEOUT`] for one.
+    pub(crate) async fn resolver(&self) -> Result<Resolver, HttpError> {
+        let mut resolver = self.0.resolver.subscribe();
+        match tokio::time::timeout(DISCOVERY_TIMEOUT, resolver.wait_for(Option::is_some)).await {
+            Ok(Ok(resolver)) => Ok(resolver.clone().expect("checked by wait_for")),
+            _ => Err(NOT_CONNECTED),
+        }
+    }
+
+    fn build(endpoint: Endpoint, resolver: Option<Resolver>, local: Option<local::Local>) -> Self {
         Self(Arc::new(Inner {
             endpoint,
-            resolver,
+            resolver: tokio::sync::watch::Sender::new(resolver),
             classifier: MimeClassifier::new(),
             pkarr: Mutex::new(pkarr_redirect::Cache::default()),
             providers: Arc::default(),
@@ -166,6 +325,7 @@ impl Gateway {
             cache: Mutex::new(LruCache::new(SOURCE_SLOTS)),
             collections: Mutex::new(LruCache::new(SOURCE_SLOTS)),
             sizes: Mutex::new(LruCache::new(SIZE_SLOTS)),
+            local,
         }))
     }
 
@@ -241,14 +401,13 @@ impl Gateway {
     async fn source(&self, hash: Hash) -> Result<Source, HttpError> {
         let cached = self.0.cache.lock().expect("poisoned").get(&hash).cloned();
         if let Some(source) = cached
-            && source.connection.close_reason().is_none()
+            && source.usable()
         {
             debug!(%hash, size = source.size, "reusing cached blob source");
             return Ok(source);
         }
         debug!(%hash, "blob source cache miss or closed connection");
-        let connection = self.connection(hash).await?;
-        let source = self.source_on_connection(connection, hash, None).await?;
+        let source = self.file_source(None, hash, hash, None).await?;
         self.0
             .cache
             .lock()
@@ -307,7 +466,7 @@ impl Gateway {
         } else {
             HINT_HEAD_START
         };
-        let resolver = self.0.resolver.clone();
+        let resolver = self.resolver().await?;
         let discovered = stream::once_future(tokio::time::sleep(head_start)).flat_map(move |()| {
             resolver
                 .resolve_stream(infohash.into())
@@ -357,20 +516,40 @@ impl Gateway {
         Ok(connection)
     }
 
-    async fn source_on_connection(
+    /// Returns the size and MIME type of `hash`, a file of the content `root`.
+    ///
+    /// Reads from the store if it has the start of the file, and from
+    /// `connection` or a provider of `root` otherwise.
+    async fn file_source(
         &self,
-        connection: Connection,
+        connection: Option<Connection>,
+        root: Hash,
         hash: Hash,
         name: Option<&str>,
     ) -> Result<Source, HttpError> {
         let started = Instant::now();
-        debug!(%hash, provider = %connection.remote_id(), "reading blob size and MIME prefix");
-        let (size, prefix) = sniff(&connection, hash)
-            .await
-            .map_err(|error| {
-                debug!(%hash, ?error, elapsed_ms = started.elapsed().as_millis(), "blob metadata read failed");
-                HttpError::upstream(error)
-            })?;
+        let local = match &self.0.local {
+            Some(local) => local.prefix(hash, SNIFF_BYTES).await,
+            None => None,
+        };
+        let (connection, (size, prefix)) = match local {
+            Some(found) => {
+                debug!(%hash, "blob size and MIME prefix from the store");
+                (connection, found)
+            }
+            None => {
+                let connection = match connection {
+                    Some(connection) => connection,
+                    None => self.connection(root).await?,
+                };
+                debug!(%hash, provider = %connection.remote_id(), "reading blob size and MIME prefix");
+                let found = sniff(&connection, hash).await.map_err(|error| {
+                    debug!(%hash, ?error, elapsed_ms = started.elapsed().as_millis(), "blob metadata read failed");
+                    HttpError::upstream(error)
+                })?;
+                (Some(connection), found)
+            }
+        };
         let supplied_type = name
             .and_then(|name| std::path::Path::new(name).extension())
             .and_then(|extension| extension.to_str())
@@ -399,14 +578,25 @@ impl Gateway {
         Ok(source)
     }
 
-    /// Returns the verified size of `hash`, fetched over `connection` if not cached.
-    async fn size(&self, hash: Hash, connection: &Connection) -> n0_error::Result<u64> {
+    /// Returns the verified size of `hash`.
+    ///
+    /// The size comes from memory or the store if it is there, and is fetched
+    /// over `connection` otherwise.
+    async fn size(&self, hash: Hash, connection: Option<&Connection>) -> n0_error::Result<u64> {
         if let Some(source) = self.0.cache.lock().expect("poisoned").peek(&hash) {
             return Ok(source.size);
         }
         if let Some(size) = self.0.sizes.lock().expect("poisoned").get(&hash) {
             return Ok(*size);
         }
+        if let Some(local) = &self.0.local
+            && let Some(size) = local.size(hash).await
+        {
+            return Ok(size);
+        }
+        let Some(connection) = connection else {
+            bail_any!("size not in the store and no provider");
+        };
         let size = verified_size(connection, hash).await?;
         self.0.sizes.lock().expect("poisoned").put(hash, size);
         Ok(size)
@@ -415,13 +605,13 @@ impl Gateway {
     /// Returns the sizes of `hashes`, fetching up to [`SIZE_REQUESTS`] at a time.
     ///
     /// Hashes whose size could not be fetched are missing from the result.
-    async fn sizes(&self, hashes: Vec<Hash>, connection: Connection) -> HashMap<Hash, u64> {
+    async fn sizes(&self, hashes: Vec<Hash>, connection: Option<Connection>) -> HashMap<Hash, u64> {
         n0_future::stream::iter(hashes)
             .map(|hash| {
                 let gateway = self.clone();
                 let connection = connection.clone();
                 async move {
-                    match gateway.size(hash, &connection).await {
+                    match gateway.size(hash, connection.as_ref()).await {
                         Ok(size) => Some((hash, size)),
                         Err(error) => {
                             debug!(%error, %hash, "fetch size");
@@ -445,13 +635,32 @@ impl Gateway {
             .get(&hash)
             .cloned();
         if let Some(source) = cached
-            && source.connection.close_reason().is_none()
+            && source.usable()
         {
             debug!(%hash, "reusing cached collection");
             return Ok(source);
         }
+        if let Some(source) = self.local_collection(hash).await {
+            return Ok(source);
+        }
         let connection = self.connection(hash).await?;
         self.collection_on_connection(hash, connection).await
+    }
+
+    /// Returns the collection at `hash` from the store, if it is there.
+    async fn local_collection(&self, hash: Hash) -> Option<CollectionSource> {
+        let collection = self.0.local.as_ref()?.collection(hash).await?;
+        debug!(%hash, "collection from the store");
+        let source = CollectionSource {
+            connection: None,
+            collection,
+        };
+        self.0
+            .collections
+            .lock()
+            .expect("poisoned")
+            .put(hash, source.clone());
+        Some(source)
     }
 
     async fn collection_on_connection(
@@ -467,18 +676,25 @@ impl Gateway {
             .get(&hash)
             .cloned();
         if let Some(source) = cached
-            && source.connection.close_reason().is_none()
+            && source.usable()
         {
             return Ok(source);
         }
         debug!(%hash, "reading collection");
         let collection = read_collection(&connection, hash).await.map_err(|error| {
             debug!(%hash, ?error, "read collection failed");
-            HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
+            if error.not_collection {
+                HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
+            } else {
+                HttpError(StatusCode::BAD_GATEWAY, "cannot read the collection")
+            }
         })?;
         debug!(%hash, entries = collection.iter().count(), "collection ready");
+        if let Some(local) = &self.0.local {
+            local.keep_collection(hash, &collection).await;
+        }
         let source = CollectionSource {
-            connection,
+            connection: Some(connection),
             collection,
         };
         self.0
@@ -593,6 +809,12 @@ impl HttpError {
             StatusCode::GATEWAY_TIMEOUT,
             "provider lookup or transfer timed out",
         )
+    }
+}
+
+impl From<HttpError> for std::io::Error {
+    fn from(error: HttpError) -> Self {
+        std::io::Error::other(error.1)
     }
 }
 
@@ -850,8 +1072,10 @@ pub(crate) async fn serve_root(
         let collection = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.collection(hash))
             .await
             .map_err(HttpError::timeout)??;
-        return collection_entry(gateway, &root, collection, url_path, query, method, headers)
-            .await;
+        return collection_entry(
+            gateway, &root, hash, collection, url_path, query, method, headers,
+        )
+        .await;
     }
     let source = tokio::time::timeout(LOOKUP_TIMEOUT, gateway.source(hash))
         .await
@@ -861,19 +1085,19 @@ pub(crate) async fn serve_root(
         && source.size >= 32
         && source.size.is_multiple_of(32)
         && source.size <= MAX_COLLECTION_ROOT_BYTES
-        && let Ok(Ok(collection)) = tokio::time::timeout(
-            COLLECTION_PROBE_TIMEOUT,
-            gateway.collection_on_connection(hash, source.connection.clone()),
-        )
-        .await
+        && let Some(collection) = probe_collection(gateway, hash, source.connection.clone()).await
     {
-        return collection_entry(gateway, &root, collection, url_path, query, method, headers)
-            .await;
+        return collection_entry(
+            gateway, &root, hash, collection, url_path, query, method, headers,
+        )
+        .await;
     }
     let encoded = z32::encode(hash.as_bytes());
     let download = download.then(|| encoded.clone());
     serve_blob(
+        gateway,
         source,
+        hash,
         hash,
         &encoded,
         download,
@@ -935,7 +1159,29 @@ pub(crate) async fn serve_path(
         .await
         .map_err(HttpError::timeout)??;
     let path = format!("/{}", path.strip_prefix('/').unwrap_or(&path));
-    collection_entry(&gateway, &root, collection, &path, query, method, headers).await
+    collection_entry(
+        &gateway, &root, hash, collection, &path, query, method, headers,
+    )
+    .await
+}
+
+/// Returns the collection at `hash` if it is one, from the store or over `connection`.
+async fn probe_collection(
+    gateway: &Gateway,
+    hash: Hash,
+    connection: Option<Connection>,
+) -> Option<CollectionSource> {
+    if let Some(source) = gateway.local_collection(hash).await {
+        return Some(source);
+    }
+    let connection = connection?;
+    tokio::time::timeout(
+        COLLECTION_PROBE_TIMEOUT,
+        gateway.collection_on_connection(hash, connection),
+    )
+    .await
+    .ok()?
+    .ok()
 }
 
 /// Serves the file at `url_path` in a collection, or the directory there.
@@ -943,9 +1189,11 @@ pub(crate) async fn serve_path(
 /// `url_path` is the requested URL path after the root's base: empty for the
 /// bare root, then `/`, `/dir`, `/dir/`, or `/dir/file`. A directory serves
 /// its `index.html` unless `?listing` asks for its listing, or it has none.
+#[allow(clippy::too_many_arguments)]
 async fn collection_entry(
     gateway: &Gateway,
     root: &Root,
+    root_hash: Hash,
     source: CollectionSource,
     url_path: &str,
     query: Option<String>,
@@ -976,7 +1224,7 @@ async fn collection_entry(
     if let Some(hash) = file {
         let source = tokio::time::timeout(
             LOOKUP_TIMEOUT,
-            gateway.source_on_connection(connection, hash, Some(&path)),
+            gateway.file_source(connection, root_hash, hash, Some(&path)),
         )
         .await
         .map_err(HttpError::timeout)??;
@@ -987,7 +1235,9 @@ async fn collection_entry(
                 .to_owned()
         });
         return serve_blob(
+            gateway,
             source,
+            root_hash,
             hash,
             &z32::encode(hash.as_bytes()),
             download,
@@ -1026,13 +1276,15 @@ async fn collection_entry(
         let name = format!("{dir}{INDEX_FILE}");
         let source = tokio::time::timeout(
             LOOKUP_TIMEOUT,
-            gateway.source_on_connection(connection, hash, Some(&name)),
+            gateway.file_source(connection, root_hash, hash, Some(&name)),
         )
         .await
         .map_err(HttpError::timeout)??;
         let download = has_flag(query.as_deref(), "download").then(|| INDEX_FILE.to_owned());
         return serve_blob(
+            gateway,
             source,
+            root_hash,
             hash,
             &z32::encode(hash.as_bytes()),
             download,
@@ -1235,8 +1487,12 @@ fn html_escape(value: &str) -> String {
     out
 }
 
+/// Serves `hash`, a file of the content `root` (or `root` itself).
+#[allow(clippy::too_many_arguments)]
 async fn serve_blob(
+    gateway: &Gateway,
     source: Source,
+    root: Hash,
     hash: Hash,
     encoded: &str,
     download: Option<String>,
@@ -1312,7 +1568,12 @@ async fn serve_blob(
                 )
                 .header(header::CONTENT_LENGTH, length)
                 .body(Body::from_stream(multipart_content(
-                    source, hash, ranges, boundary,
+                    gateway.clone(),
+                    source,
+                    root,
+                    hash,
+                    ranges,
+                    boundary,
                 )))
                 .expect("valid response"));
         }
@@ -1328,21 +1589,28 @@ async fn serve_blob(
     let builder = builder.header(header::CONTENT_LENGTH, range.end - range.start);
     let body = if method == Method::HEAD || range.is_empty() {
         Body::empty()
-    } else {
-        let (content, size) = tokio::time::timeout(
-            READ_TIMEOUT,
-            start(&source.connection, hash, chunks_for(&range)),
+    } else if let Some(local) = gateway.0.local.clone() {
+        Body::from_stream(
+            local
+                .read(gateway.clone(), root, hash, source.connection, range)
+                .await?,
         )
-        .await
-        .map_err(HttpError::timeout)?
-        .map_err(HttpError::upstream)?;
+    } else {
+        let connection = source
+            .connection
+            .expect("without a store, every source has a provider");
+        let (content, size) =
+            tokio::time::timeout(READ_TIMEOUT, start(&connection, hash, chunks_for(&range)))
+                .await
+                .map_err(HttpError::timeout)?
+                .map_err(HttpError::upstream)?;
         if size != source.size {
             return Err(HttpError(
                 StatusCode::BAD_GATEWAY,
                 "provider changed blob size",
             ));
         }
-        Body::from_stream(stream_content(content, source.connection, range, hash))
+        Body::from_stream(stream_content(content, connection, range, hash))
     };
     Ok(builder.body(body).expect("valid response"))
 }
@@ -1370,19 +1638,29 @@ fn multipart_length(source: &Source, ranges: &[Range<u64>], boundary: &str) -> O
 }
 
 fn multipart_content(
+    gateway: Gateway,
     source: Source,
+    root: Hash,
     hash: Hash,
     ranges: Vec<Range<u64>>,
     boundary: String,
 ) -> impl n0_future::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::try_stream! {
         for range in ranges {
-            let (content, size) = tokio::time::timeout(READ_TIMEOUT, start(&source.connection, hash, chunks_for(&range))).await
-                .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
-            if size != source.size { Err(std::io::Error::other("provider changed blob size"))?; }
-            yield Bytes::from(part_header(&source, &range, &boundary));
-            let mut data = Box::pin(stream_content(content, source.connection.clone(), range, hash));
-            while let Some(bytes) = data.next().await { yield bytes?; }
+            if let Some(local) = gateway.0.local.clone() {
+                let data = local.read(gateway.clone(), root, hash, source.connection.clone(), range.clone()).await?;
+                yield Bytes::from(part_header(&source, &range, &boundary));
+                let mut data = Box::pin(data);
+                while let Some(bytes) = data.next().await { yield bytes?; }
+            } else {
+                let connection = source.connection.clone().ok_or_else(|| std::io::Error::other("no provider"))?;
+                let (content, size) = tokio::time::timeout(READ_TIMEOUT, start(&connection, hash, chunks_for(&range))).await
+                    .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
+                if size != source.size { Err(std::io::Error::other("provider changed blob size"))?; }
+                yield Bytes::from(part_header(&source, &range, &boundary));
+                let mut data = Box::pin(stream_content(content, connection, range, hash));
+                while let Some(bytes) = data.next().await { yield bytes?; }
+            }
             yield Bytes::from_static(b"\r\n");
         }
         yield Bytes::from(format!("--{boundary}--\r\n"));
@@ -1416,18 +1694,105 @@ async fn start(
     Ok(result)
 }
 
-async fn read_collection(connection: &Connection, hash: Hash) -> n0_error::Result<Collection> {
+/// Why a collection could not be read.
+#[derive(Debug)]
+struct ReadCollectionError {
+    /// The root was read, or its size seen, and it is no collection. Else
+    /// the root could not be read: the provider is not reachable, failed, or
+    /// does not have it.
+    not_collection: bool,
+    error: n0_error::AnyError,
+}
+
+impl std::fmt::Display for ReadCollectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+
+/// Reads the collection at `hash` over `connection`.
+///
+/// A root that is read but does not parse, or whose metadata the provider
+/// does not send, is no collection. A failure before the root is read is
+/// not, so a transfer error is not taken for a raw blob.
+async fn read_collection(
+    connection: &Connection,
+    hash: Hash,
+) -> Result<Collection, ReadCollectionError> {
     let request = GetRequest::new(
         hash,
         ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::all()]),
     );
-    let connected = fsm::start(connection.clone(), request, Default::default())
-        .next()
-        .await?;
-    let ConnectedNext::StartRoot(root) = connected.next().await? else {
-        bail_any!("expected collection root");
+    let root = async {
+        let connected = fsm::start(connection.clone(), request, Default::default())
+            .next()
+            .await?;
+        let ConnectedNext::StartRoot(root) = connected.next().await? else {
+            bail_any!("expected collection root");
+        };
+        let (content, size) = root.next().next().await?;
+        Ok::<_, n0_error::AnyError>((content, size))
     };
-    let (end, links) = read_collection_blob(root.next(), MAX_COLLECTION_ROOT_BYTES).await?;
+    let read = async {
+        let (content, size) = root.await?;
+        if size > MAX_COLLECTION_ROOT_BYTES || !size.is_multiple_of(32) {
+            return Ok(Err(anyerr!(
+                "collection root is {size} bytes, no hash sequence within its {MAX_COLLECTION_ROOT_BYTES} byte limit"
+            )));
+        }
+        read_blob_content(content, size, MAX_COLLECTION_ROOT_BYTES)
+            .await
+            .map(Ok)
+    };
+    let (end, links) = match read.await {
+        Ok(Ok(root)) => root,
+        Ok(Err(error)) => {
+            return Err(ReadCollectionError {
+                not_collection: true,
+                error,
+            });
+        }
+        // A provider that has the root but not the metadata it names may
+        // reset the stream before the root arrives. Asked for the root
+        // alone, it sends it: then it is no collection.
+        Err(error) => {
+            let not_collection = read_blob_root(connection, hash).await.is_ok();
+            return Err(ReadCollectionError {
+                not_collection,
+                error,
+            });
+        }
+    };
+    parse_collection(end, links)
+        .await
+        .map_err(|error| ReadCollectionError {
+            not_collection: true,
+            error,
+        })
+}
+
+/// Reads the blob `hash`, if it is at most a collection root's size limit.
+async fn read_blob_root(connection: &Connection, hash: Hash) -> n0_error::Result<()> {
+    let connected = fsm::start(
+        connection.clone(),
+        GetRequest::blob(hash),
+        Default::default(),
+    )
+    .next()
+    .await?;
+    let ConnectedNext::StartRoot(root) = connected.next().await? else {
+        bail_any!("expected blob root");
+    };
+    let (end, _) = read_collection_blob(root.next(), MAX_COLLECTION_ROOT_BYTES).await?;
+    let EndBlobNext::Closing(closing) = end.next() else {
+        bail_any!("unexpected child blob");
+    };
+    closing.next().await?;
+    Ok(())
+}
+
+/// Reads the rest of a collection whose root, `links`, has been read.
+async fn parse_collection(end: AtEndBlob, links: Vec<u8>) -> n0_error::Result<Collection> {
     let mut links = HashSeq::new(links.into()).ok_or_else(|| anyerr!("invalid hash sequence"))?;
     let meta_hash = links
         .pop_front()
@@ -1459,13 +1824,22 @@ async fn read_collection_blob(
     header: AtBlobHeader,
     limit: u64,
 ) -> n0_error::Result<(AtEndBlob, Vec<u8>)> {
-    let (mut content, size) = header.next().await?;
+    let (content, size) = header.next().await?;
     // The size header is untrusted: use it only to reject oversized responses,
     // and enforce the limit again while collecting Bao-verified bytes.
     ensure_any!(
         size <= limit,
         "collection component is {size} bytes, above its {limit} byte limit"
     );
+    read_blob_content(content, size, limit).await
+}
+
+/// Collects the Bao-verified bytes of a blob of `size`, at most `limit`.
+async fn read_blob_content(
+    mut content: AtBlobContent,
+    size: u64,
+    limit: u64,
+) -> n0_error::Result<(AtEndBlob, Vec<u8>)> {
     let mut bytes = Vec::new();
     loop {
         match content.next().await {
@@ -1659,6 +2033,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("byte limit"), "{error:#}");
+            assert!(error.not_collection);
 
             // A forged name count is rejected before allocating its strings.
             let meta = store
@@ -1686,6 +2061,17 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("byte limit"), "{error:#}");
+            assert!(error.not_collection);
+
+            // A raw blob that looks like a hash sequence is no collection.
+            let raw = store.blobs().add_bytes(vec![7; 64]).await.unwrap();
+            let error = read_collection(&connection, raw.hash).await.unwrap_err();
+            assert!(error.not_collection, "{error}");
+            // A root the provider cannot send is not taken for a raw blob.
+            let error = read_collection(&connection, Hash::new(b"not provided"))
+                .await
+                .unwrap_err();
+            assert!(!error.not_collection, "{error}");
 
             client.close().await;
             router.shutdown().await.unwrap();
