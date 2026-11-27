@@ -1,6 +1,6 @@
 # A size-bounded cache on the iroh-blobs store
 
-The gateway's store (`Gateway::with_store`) grows without bound. This note
+The first draft of the gateway's store grew without bound. This note
 collects what iroh-blobs 0.105 offers for bounding it, what others do, what
 we measured, and a proposal.
 
@@ -56,13 +56,13 @@ we measured, and a proposal.
 - **Units.** Each raw blob has one named tag, which only exists to protect it
   from GC. Eviction drops the tag, and the periodic GC reclaims the space.
   They use no hash sequences.
-- **Recency.** Kept in memory (`Hash → Instant`). After a restart every blob
+- **Recency.** Kept in memory (`Hash -> Instant`). After a restart every blob
   gets the same old time, so anything used since ranks newer.
 - **Footprint.** The content size of complete blobs plus the bitfield bytes of
   partial ones, the latter cached for 30 s, because `observe()` on an idle
   partial blob syncs its files. Outboards and `blobs.db` are not counted. A
   `statvfs` check keeps a minimum of free disk space instead.
-- **Loop.** Every second: above 90% of the budget, drop the least recently
+- **Loop.** Every second: above 90% of the limit, drop the least recently
   used tags (at most 16 per tick) until 80%. Bytes that were released but not
   yet reclaimed by GC (`pending_reclaim`) are subtracted, so the same
   headroom is not released twice while waiting for the sweep (GC every 300 s
@@ -93,8 +93,8 @@ that the gateway does not pin anything yet.
   GC will never free.
 
 **Recency.**
-- An in-memory `Hash → last use`, updated when a fetch completes and when a
-  response starts.
+- An in-memory `Hash -> last use`, updated when a response from the store
+  starts and when a collection is fetched.
 - Written to a small file in the store directory every few minutes and on
   shutdown, read on start. Blobs not in it count as oldest.
 - That keeps the LRU order across restarts without writing the database on
@@ -110,24 +110,23 @@ that the gateway does not pin anything yet.
   many blobs to release.
 
 **Protection.**
-- Every fetch holds a temp tag on its blob from the start, which the draft
-  does not do yet. Every response from the store holds one until its body is
-  done.
+- Every fetch holds a temp tag on its blob from the start, and every
+  response from the store holds one until its body is done.
 - Those blobs are also left out of eviction, so a blob is not released while
   it is read and fetched again right away.
 
 **Loop.**
-- It runs after each fetch that completes and every 10 s otherwise.
-- Above the budget's high water mark (90%), it drops `cache/` tags oldest
+- It runs at most once a second after a blob is used, and every 10 s
+  otherwise.
+- Above the limit's high water mark (90%), it drops `cache/` tags oldest
   first until the target (70%), after subtracting what is still waiting for
   GC.
 - The wide gap leaves room for the GC interval (30 s), since GC cannot be
   started on demand.
 
-**Budget.**
-- Configurable, defaulting to 512 MiB like the current offline caches.
-- Also bounded by free disk space: keep at least 1 GiB, or 10% of the volume,
-  free.
+**Limit.**
+- Configurable. The command line defaults to 1 GiB (`--store-max-mib`).
+- Also bounded by free disk space: keep at least 1 GiB free.
 
 **What stays out of reach** without changes upstream:
 - reclaiming space right away (#235: a public `gc_run_once`, or a way to wake

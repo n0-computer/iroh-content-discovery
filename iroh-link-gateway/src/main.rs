@@ -43,12 +43,14 @@ struct Args {
     /// Local Mainline UDP port; zero selects an available port.
     #[arg(long, default_value_t = 0)]
     dht_port: u16,
-    /// Keeps verified content and Pkarr records in an iroh-blobs store in
-    /// this directory, and serves them from there, also offline.
+    /// Directory of an iroh-blobs store that keeps verified content and Pkarr records.
+    ///
+    /// The gateway serves them from the store, also offline.
     #[arg(long)]
     store: Option<PathBuf>,
-    /// Upper bound for the store on disk, in MiB. The least recently used
-    /// content goes first.
+    /// Upper bound for the store on disk, in MiB.
+    ///
+    /// The least recently used content goes first.
     #[arg(long, default_value_t = 1024)]
     store_max_mib: u64,
 }

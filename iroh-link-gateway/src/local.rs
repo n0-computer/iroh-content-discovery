@@ -1,19 +1,19 @@
-//! An optional iroh-blobs store behind the gateway, bounded by an
-//! [`iroh_blobs_cache::BlobCache`].
+//! An optional iroh-blobs store behind the gateway.
 //!
-//! With a store, verified content is kept: requests are served from the
-//! store, and only chunks it lacks are fetched from a provider, Bao-verified
-//! into the store on the way. Content that is fully in the store needs no
-//! provider, so it works offline and survives restarts. The newest verified
-//! Pkarr record of each name is kept as well, as a blob under a
-//! `pkarr/<key>` tag, and used when a lookup fails.
+//! An [`iroh_blobs_cache::BlobCache`] bounds its size. With a store, verified
+//! content is kept: requests are served from the store, and only chunks it
+//! lacks are fetched from a provider, Bao-verified into the store on the way.
+//! Content that is fully in the store needs no provider, so it works offline
+//! and survives restarts. The newest verified Pkarr record of each name is
+//! kept as well, as a blob under a `pkarr/<key>` tag, and used when a lookup
+//! fails or finds an older one.
 //!
 //! The store is keyed by hash, not URL, so the same file under different
 //! names or hosts is stored once, and a transfer that broke off continues
 //! where it stopped: the store knows which chunks it has.
 //!
 //! Every blob the gateway stores or serves is recorded as used, so the cache
-//! evicts the least recently used ones once the store is over its budget.
+//! evicts the least recently used ones once the store is over its limit.
 //! Fetches and responses hold their blob, so garbage collection cannot delete
 //! a partial download.
 
@@ -36,8 +36,10 @@ use tracing::{debug, warn};
 
 use crate::{Gateway, HttpError, READ_TIMEOUT, chunks_for};
 
-/// Bytes fetched and served per step, so a large file streams while it
-/// arrives instead of after the whole range is in the store.
+/// Bytes fetched and served per step.
+///
+/// A large file streams while it arrives, instead of after the whole range is
+/// in the store.
 const WINDOW: u64 = 4 * 1024 * 1024;
 
 /// The gateway's store.
@@ -65,8 +67,9 @@ impl Local {
         self.store.observe(hash).await.ok()?.validated_size()
     }
 
-    /// Returns the size and the first `limit` bytes of `hash`, if all of it
-    /// is in the store.
+    /// Returns the size and the first `limit` bytes of `hash`.
+    ///
+    /// Returns `None` unless the store has those bytes and can prove the size.
     pub(crate) async fn prefix(&self, hash: Hash, limit: u64) -> Option<(u64, Vec<u8>)> {
         let bitfield = self.store.observe(hash).await.ok()?;
         let size = bitfield.validated_size()?;

@@ -136,6 +136,9 @@ pub struct Gateway(Arc<Inner>);
 struct Inner {
     endpoint: Endpoint,
     /// `None` until the caller has one, see [`Gateway::set_resolver`].
+    ///
+    /// A tokio watch channel, since `n0_watcher` needs `Eq`, which a resolver
+    /// does not implement.
     resolver: tokio::sync::watch::Sender<Option<Resolver>>,
     classifier: MimeClassifier,
     pkarr: Mutex<pkarr_redirect::Cache>,
@@ -160,11 +163,9 @@ struct Source {
 }
 
 impl Source {
-    /// Whether this source can still be used for a later request.
+    /// Returns whether this source can still be used for a later request.
     fn usable(&self) -> bool {
-        self.connection
-            .as_ref()
-            .is_none_or(|connection| connection.close_reason().is_none())
+        usable(self.connection.as_ref())
     }
 }
 
@@ -173,6 +174,20 @@ struct CollectionSource {
     /// The provider, or `None` when the collection came from the store.
     connection: Option<Connection>,
     collection: Collection,
+}
+
+impl CollectionSource {
+    /// Returns whether this source can still be used for a later request.
+    fn usable(&self) -> bool {
+        usable(self.connection.as_ref())
+    }
+}
+
+/// Returns whether a source with `connection` can still be used.
+///
+/// A source without a provider came from the store and stays usable.
+fn usable(connection: Option<&Connection>) -> bool {
+    connection.is_none_or(|connection| connection.close_reason().is_none())
 }
 
 impl Gateway {
@@ -189,7 +204,7 @@ impl Gateway {
     /// fetched from a provider, into the store. Content that is fully in the
     /// store needs no provider. The newest verified Pkarr record of each name
     /// is kept too, and used when a lookup fails. The cache evicts the least
-    /// recently used blobs once the store is over its budget.
+    /// recently used blobs once the store is over its size limit.
     ///
     /// The resolver may come later, with [`Self::set_resolver`]: until then
     /// the gateway serves what is in the store, which needs no network, and
@@ -202,8 +217,9 @@ impl Gateway {
         Self::build(endpoint, resolver, Some(local::Local::new(cache)))
     }
 
-    /// Sets or replaces the resolver, for example after index discovery
-    /// finished, or with a new Mainline node.
+    /// Sets or replaces the resolver.
+    ///
+    /// Use it once index discovery has finished, or for a new Mainline node.
     pub fn set_resolver(&self, resolver: Resolver) {
         self.0.resolver.send_replace(Some(resolver));
     }
@@ -486,8 +502,10 @@ impl Gateway {
         Ok(source)
     }
 
-    /// Returns the verified size of `hash`, fetched over `connection` if not
-    /// cached or in the store.
+    /// Returns the verified size of `hash`.
+    ///
+    /// The size comes from memory or the store if it is there, and is fetched
+    /// over `connection` otherwise.
     async fn size(&self, hash: Hash, connection: Option<&Connection>) -> n0_error::Result<u64> {
         if let Some(source) = self.0.cache.lock().expect("poisoned").peek(&hash) {
             return Ok(source.size);
@@ -541,10 +559,7 @@ impl Gateway {
             .get(&hash)
             .cloned();
         if let Some(source) = cached
-            && source
-                .connection
-                .as_ref()
-                .is_none_or(|c| c.close_reason().is_none())
+            && source.usable()
         {
             debug!(%hash, "reusing cached collection");
             return Ok(source);
@@ -585,10 +600,7 @@ impl Gateway {
             .get(&hash)
             .cloned();
         if let Some(source) = cached
-            && source
-                .connection
-                .as_ref()
-                .is_none_or(|c| c.close_reason().is_none())
+            && source.usable()
         {
             return Ok(source);
         }

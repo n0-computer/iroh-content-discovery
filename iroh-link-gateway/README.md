@@ -273,9 +273,9 @@ Without a store, the gateway keeps no content: every request asks a provider.
   is stored once, and a transfer that broke off continues where it stopped.
 - Collections are kept as the blobs they are, and the newest verified Pkarr
   record of each name is kept under a `pkarr/<key>` tag, used when a lookup
-  fails.
-- Over its budget, the store drops the least recently used blobs, each file
-  on its own. Fetches and responses hold their blob meanwhile. See
+  fails or finds an older one.
+- Over its size limit, the store drops the least recently used blobs, each
+  file on its own. Fetches and responses hold their blob meanwhile. See
   [docs/store-cache.md](docs/store-cache.md).
 
 Not done yet:
