@@ -74,7 +74,7 @@ use iroh_blobs::{
         fs::{FsStore, options::Options},
     },
 };
-use n0_error::{Result, StdResultExt};
+use n0_error::{AnyError, e, stack_error};
 use n0_future::{StreamExt, task::AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -150,6 +150,28 @@ pub struct Usage {
     pub blobs: usize,
 }
 
+/// Failure of a [`BlobCache`] operation.
+///
+/// Every operation that talks to the store can fail with
+/// [`CacheError::Store`].
+#[stack_error(derive, add_meta)]
+#[non_exhaustive]
+pub enum CacheError {
+    /// The store could not be opened, or did not carry out a request.
+    #[error("blob store failed")]
+    Store {
+        /// The store's error.
+        source: AnyError,
+    },
+    /// The size of the store on disk could not be measured.
+    #[error("cannot measure the store on disk")]
+    Footprint {
+        /// The underlying IO failure.
+        #[error(std_err)]
+        source: io::Error,
+    },
+}
+
 /// A size-bounded cache on an iroh-blobs [`FsStore`].
 ///
 /// Cheap to clone. The eviction task runs until the last clone is dropped or
@@ -211,20 +233,26 @@ impl Drop for Hold {
 
 impl BlobCache {
     /// Opens or creates the store in `dir` and starts the eviction task.
-    pub async fn load(dir: impl AsRef<Path>, config: CacheConfig) -> Result<Self> {
+    pub async fn load(dir: impl AsRef<Path>, config: CacheConfig) -> Result<Self, CacheError> {
         let dir = dir.as_ref().to_owned();
         let mut options = Options::new(&dir);
         options.gc = Some(GcConfig {
             interval: config.gc_interval,
             add_protected: None,
         });
-        let store = FsStore::load_with_opts(dir.join("blobs.db"), options).await?;
+        let store = FsStore::load_with_opts(dir.join("blobs.db"), options)
+            .await
+            .map_err(|source| e!(CacheError::Store, source))?;
         let used = load_recency(&dir.join(RECENCY_FILE));
         let mut state = State::default();
         // The tags decide what is cached. The file only orders it.
-        let mut tags = store.tags().list_prefix(CACHE_PREFIX).await?;
+        let mut tags = store
+            .tags()
+            .list_prefix(CACHE_PREFIX)
+            .await
+            .map_err(store_failed)?;
         while let Some(tag) = tags.next().await {
-            let tag = tag?;
+            let tag = tag.map_err(store_failed)?;
             state
                 .used
                 .insert(tag.hash, used.get(&tag.hash).copied().unwrap_or(0));
@@ -255,7 +283,7 @@ impl BlobCache {
     ///
     /// Call it when a blob was stored or read. It also wakes the eviction
     /// task, since the store may have grown.
-    pub async fn touch(&self, hash: Hash) -> Result<()> {
+    pub async fn touch(&self, hash: Hash) -> Result<(), CacheError> {
         if !self.inner.renew(hash) {
             // The tag goes first. If this future is dropped on the way, the
             // blob is not listed, and the next touch sets the tag again.
@@ -263,7 +291,8 @@ impl BlobCache {
                 .store
                 .tags()
                 .set(cache_tag(hash), HashAndFormat::raw(hash))
-                .await?;
+                .await
+                .map_err(store_failed)?;
             self.inner.insert(hash);
         }
         self.inner.wake.notify_one();
@@ -275,14 +304,14 @@ impl BlobCache {
     /// The protection lasts while the returned [`Hold`] lives. Take it before
     /// fetching a blob into the store, or garbage collection may delete a
     /// partial download, and while reading one.
-    pub async fn hold(&self, hash: Hash) -> Result<Hold> {
+    pub async fn hold(&self, hash: Hash) -> Result<Hold, CacheError> {
         let tag = self
             .inner
             .store
             .tags()
             .temp_tag(HashAndFormat::raw(hash))
             .await
-            .anyerr()?;
+            .map_err(store_failed)?;
         *self
             .inner
             .state
@@ -301,24 +330,26 @@ impl BlobCache {
     /// Pins `content` under `name`, so that eviction never drops it.
     ///
     /// A hash sequence pin keeps the blobs it names too.
-    pub async fn pin(&self, name: &str, content: HashAndFormat) -> Result<()> {
+    pub async fn pin(&self, name: &str, content: HashAndFormat) -> Result<(), CacheError> {
         self.inner
             .store
             .tags()
             .set(format!("{PIN_PREFIX}{name}"), content)
-            .await?;
+            .await
+            .map_err(store_failed)?;
         Ok(())
     }
 
     /// Removes the pin `name`.
     ///
     /// Its blobs stay cached if they have been used.
-    pub async fn unpin(&self, name: &str) -> Result<()> {
+    pub async fn unpin(&self, name: &str) -> Result<(), CacheError> {
         self.inner
             .store
             .tags()
             .delete(format!("{PIN_PREFIX}{name}"))
-            .await?;
+            .await
+            .map_err(store_failed)?;
         Ok(())
     }
 
@@ -339,9 +370,14 @@ impl BlobCache {
     /// Drops every cached blob.
     ///
     /// Garbage collection deletes them, except pinned and held ones.
-    pub async fn clear(&self) -> Result<()> {
+    pub async fn clear(&self) -> Result<(), CacheError> {
         info!("clearing the blob cache");
-        self.inner.store.tags().delete_prefix(CACHE_PREFIX).await?;
+        self.inner
+            .store
+            .tags()
+            .delete_prefix(CACHE_PREFIX)
+            .await
+            .map_err(store_failed)?;
         let mut state = self.inner.state.lock().expect("poisoned");
         state.used.clear();
         state.dirty = true;
@@ -354,15 +390,20 @@ impl BlobCache {
     }
 
     /// Runs an eviction pass now and returns the state after it.
-    pub async fn evict(&self) -> Result<Usage> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CacheError::Footprint`] if the store cannot be measured on
+    /// disk, and [`CacheError::Store`] if its pins cannot be read.
+    pub async fn evict(&self) -> Result<Usage, CacheError> {
         self.inner.pass().await
     }
 
     /// Stops the eviction task, writes the use order, and shuts the store down.
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&self) -> Result<(), CacheError> {
         self.task.abort();
         self.inner.save().await;
-        self.inner.store.shutdown().await?;
+        self.inner.store.shutdown().await.map_err(store_failed)?;
         Ok(())
     }
 }
@@ -389,7 +430,7 @@ impl Inner {
     /// Measures the store and releases least recently used blobs if it is too large.
     ///
     /// Releasing starts above the high water mark and stops at the low water mark.
-    async fn pass(&self) -> Result<Usage> {
+    async fn pass(&self) -> Result<Usage, CacheError> {
         let _pass = self.passes.lock().await;
         let footprint = footprint(self.dir.clone()).await?;
         let free = fs4::available_space(&self.dir).unwrap_or(u64::MAX);
@@ -499,11 +540,16 @@ impl Inner {
     /// Returns the blobs that pins keep.
     ///
     /// These are the pinned roots and the children of hash sequence pins.
-    async fn pinned(&self) -> Result<HashSet<Hash>> {
+    async fn pinned(&self) -> Result<HashSet<Hash>, CacheError> {
         let mut pinned = HashSet::new();
-        let mut tags = self.store.tags().list_prefix(PIN_PREFIX).await?;
+        let mut tags = self
+            .store
+            .tags()
+            .list_prefix(PIN_PREFIX)
+            .await
+            .map_err(store_failed)?;
         while let Some(tag) = tags.next().await {
-            let tag = tag?;
+            let tag = tag.map_err(store_failed)?;
             pinned.insert(tag.hash);
             if tag.format == BlobFormat::HashSeq
                 && let Ok(bytes) = self.store.get_bytes(tag.hash).await
@@ -593,11 +639,18 @@ async fn run(inner: Arc<Inner>) {
 }
 
 /// Returns the bytes allocated by the files below `dir`.
-async fn footprint(dir: PathBuf) -> Result<u64> {
+async fn footprint(dir: PathBuf) -> Result<u64, CacheError> {
     tokio::task::spawn_blocking(move || allocated(&dir))
         .await
-        .anyerr()?
-        .anyerr()
+        .map_err(io::Error::other)
+        .flatten()
+        .map_err(|source| e!(CacheError::Footprint, source))
+}
+
+/// Wraps a failure of the store into [`CacheError::Store`].
+#[track_caller]
+fn store_failed(error: impl std::error::Error + Send + Sync + 'static) -> CacheError {
+    e!(CacheError::Store, AnyError::from_std(error))
 }
 
 fn allocated(dir: &Path) -> io::Result<u64> {
