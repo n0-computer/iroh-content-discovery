@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use iroh_blobs::{Hash, HashAndFormat};
+use iroh_blobs::{Hash, HashAndFormat, hashseq::HashSeq};
 use iroh_blobs_cache::{BlobCache, CacheConfig, CacheError};
 
 const MIB: u64 = 1024 * 1024;
@@ -216,5 +216,39 @@ async fn debug_output_does_not_list_the_cache() {
         assert!(!output.contains(&other.to_string()), "{output}");
     }
     drop(hold);
+    cache.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_hash_sequence_pin_keeps_its_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::load(dir.path(), config(4 * MIB)).await.unwrap();
+    // The oldest blob, so the first to go if the pin did not cover it.
+    let child = add(&cache, 1).await;
+    let plain = add(&cache, 2).await;
+    add(&cache, 3).await;
+    add(&cache, 4).await;
+    let seq = cache
+        .store()
+        .add_bytes(HashSeq::from_iter([child]))
+        .temp_tag()
+        .await
+        .unwrap();
+    cache
+        .pin("site", HashAndFormat::hash_seq(seq.hash()))
+        .await
+        .unwrap();
+
+    cache.evict().await.unwrap();
+    wait_gone(&cache, plain).await;
+    settle().await;
+    assert!(cache.store().has(child).await.unwrap());
+    let tag = cache
+        .store()
+        .tags()
+        .get(format!("cache/{child}"))
+        .await
+        .unwrap();
+    assert!(tag.is_some(), "{child} lost its cache tag");
     cache.shutdown().await.unwrap();
 }
