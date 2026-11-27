@@ -388,6 +388,17 @@ impl Inner {
                     continue;
                 }
                 let bytes = self.reclaimable(hash).await;
+                // Garbage collection reads temp tags before named ones, so it
+                // can miss a blob whose cache tag goes while a hold comes.
+                if self
+                    .state
+                    .lock()
+                    .expect("poisoned")
+                    .held
+                    .contains_key(&hash)
+                {
+                    continue;
+                }
                 // Tag first, then the use: if dropping the tag fails, the
                 // blob stays a candidate.
                 if let Err(error) = self.store.tags().delete(cache_tag(hash)).await {
@@ -404,12 +415,19 @@ impl Inner {
                     held
                 };
                 if held_again {
-                    // Held while we were busy: keep it.
-                    let _ = self
+                    // Held while the tag went: keep it.
+                    let restored = self
                         .store
                         .tags()
                         .set(cache_tag(hash), HashAndFormat::raw(hash))
                         .await;
+                    if let Err(error) = restored {
+                        // Unlisted, so that the next touch tags it again.
+                        warn!(%error, %hash, "cannot restore cache tag");
+                        let mut state = self.state.lock().expect("poisoned");
+                        state.used.remove(&hash);
+                        state.dirty = true;
+                    }
                     continue;
                 }
                 released += bytes;
