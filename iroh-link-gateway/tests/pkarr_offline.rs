@@ -10,6 +10,7 @@ use iroh_blobs::{BlobsProtocol, format::collection::Collection, store::mem::MemS
 use iroh_blobs_cache::{BlobCache, CacheConfig};
 use iroh_link_gateway::Gateway;
 use iroh_mainline_endpoint_discovery::{AddrIndex, BLAKE3_DOMAIN, Resolver, infohash_from_blake3};
+use n0_future::StreamExt;
 use n0_mainline::{Dht, MutableItem, SigningKey};
 use reqwest::{Client, StatusCode};
 use simple_dns::{
@@ -129,6 +130,11 @@ async fn run() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.bytes().await.unwrap().as_ref(), b"<p>named</p>");
+    // The record is kept under its own tag, with no generated tag beside it.
+    let tags = cache.store().tags();
+    assert!(tags.get(format!("pkarr/{name}")).await.unwrap().is_some());
+    let generated: Vec<_> = tags.list_prefix("auto-").await.unwrap().collect().await;
+    assert!(generated.is_empty(), "{generated:?}");
 
     // Offline: no provider, and a gateway that has no resolver at all.
     provider_router.shutdown().await.unwrap();

@@ -182,12 +182,14 @@ impl Local {
         let Some(bytes) = encode_signed_packet(item) else {
             return;
         };
-        let result = async {
-            let tag = self.store.add_bytes(bytes).await?;
-            self.store.tags().set(packet_tag(key), tag.hash).await?;
-            n0_error::Ok(())
-        };
-        if let Err(error) = result.await {
+        // Awaiting `add_bytes` on its own would also create an `auto-` tag,
+        // one per lookup, that nothing ever deletes.
+        let result = self
+            .store
+            .add_bytes(bytes)
+            .with_named_tag(packet_tag(key))
+            .await;
+        if let Err(error) = result {
             warn!(%error, "cannot keep Pkarr record");
         }
     }
