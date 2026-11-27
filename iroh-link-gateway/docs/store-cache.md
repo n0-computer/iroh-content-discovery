@@ -117,7 +117,8 @@ that the gateway does not pin anything yet.
 
 **Loop.**
 - It runs at most once a second after a blob is used, and every 10 s
-  otherwise.
+  otherwise. When walking the store takes long, passes come further apart,
+  so that the walk takes at most a tenth of the time.
 - Above the limit's high water mark (90%), it drops `cache/` tags oldest
   first until the target (70%), after subtracting what is still waiting for
   GC.

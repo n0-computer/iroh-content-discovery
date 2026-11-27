@@ -90,6 +90,9 @@ const PIN_PREFIX: &str = "pin/";
 const RECENCY_FILE: &str = "recency";
 /// Shortest pause between two eviction passes.
 const MIN_PASS_GAP: Duration = Duration::from_secs(1);
+/// Passes are spaced so that measuring the store takes at most one part in
+/// this many of the time.
+const WALK_SHARE: u32 = 10;
 /// Size up to which iroh-blobs keeps a blob inline, in its database.
 ///
 /// The database never shrinks, so dropping these blobs frees no disk space.
@@ -115,6 +118,9 @@ pub struct CacheConfig {
     /// Interval of the store's garbage collection, which deletes evicted blobs.
     pub gc_interval: Duration,
     /// Interval of eviction passes when nothing asks for one sooner.
+    ///
+    /// Passes come further apart when measuring the store takes long, so that
+    /// measuring takes at most a tenth of the time.
     pub eviction_interval: Duration,
     /// How often the use order is written to disk.
     pub save_interval: Duration,
@@ -248,6 +254,8 @@ struct State {
     usage: Usage,
     /// When eviction last released something.
     released_at: Option<Instant>,
+    /// How long the last pass took to measure the store on disk.
+    walk: Duration,
 }
 
 /// Keeps a blob from garbage collection and eviction until dropped.
@@ -498,7 +506,9 @@ impl Inner {
     /// Releasing starts above the high water mark and stops at the low water mark.
     async fn pass(&self) -> Result<Usage, CacheError> {
         let _pass = self.passes.lock().await;
+        let walk_started = Instant::now();
         let footprint = footprint(self.dir.clone()).await?;
+        let walk = walk_started.elapsed();
         let free = fs4::available_space(&self.dir).unwrap_or(u64::MAX);
         let limit = self
             .max_bytes
@@ -519,6 +529,13 @@ impl Inner {
             }
             state.usage.pending
         };
+        debug!(
+            footprint,
+            pending,
+            limit,
+            walk_ms = walk.as_millis(),
+            "measured the store"
+        );
         let effective = footprint.saturating_sub(pending);
         let high = (limit as f64 * self.config.high_water) as u64;
         let mut released = 0;
@@ -587,6 +604,7 @@ impl Inner {
         if released > 0 {
             state.released_at = Some(Instant::now());
         }
+        state.walk = walk;
         state.usage = Usage {
             footprint,
             pending: state.usage.pending + released,
@@ -704,12 +722,16 @@ async fn run(inner: Arc<Inner>) {
             inner.save().await;
             last_save = Instant::now();
         }
+        // Walking a large store takes long, up to seconds at 100k blobs, so
+        // passes come further apart then.
+        let walk = inner.state.lock().expect("poisoned").walk;
+        let pause = MIN_PASS_GAP.max(walk * WALK_SHARE);
         let woken = tokio::select! {
             _ = inner.wake.notified() => true,
-            _ = tokio::time::sleep(inner.config.eviction_interval) => false,
+            _ = tokio::time::sleep(inner.config.eviction_interval.max(pause)) => false,
         };
         if woken {
-            tokio::time::sleep(MIN_PASS_GAP).await;
+            tokio::time::sleep(pause).await;
         }
     }
 }
