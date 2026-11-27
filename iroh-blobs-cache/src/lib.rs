@@ -504,7 +504,7 @@ impl Inner {
             .max_bytes
             .load(Ordering::Relaxed)
             .min(footprint.saturating_add(free.saturating_sub(self.config.min_free_bytes)));
-        let (pending, candidates) = {
+        let pending = {
             let mut state = self.state.lock().expect("poisoned");
             // A smaller footprint means garbage collection freed bytes.
             let freed = state.usage.footprint.saturating_sub(footprint);
@@ -517,14 +517,7 @@ impl Inner {
                 state.usage.pending = 0;
                 state.released_at = None;
             }
-            let mut candidates: Vec<(u64, Hash)> = state
-                .used
-                .iter()
-                .filter(|(hash, _)| !state.held.contains_key(*hash))
-                .map(|(hash, used)| (*used, *hash))
-                .collect();
-            candidates.sort_unstable();
-            (state.usage.pending, candidates)
+            state.usage.pending
         };
         let effective = footprint.saturating_sub(pending);
         let high = (limit as f64 * self.config.high_water) as u64;
@@ -532,7 +525,7 @@ impl Inner {
         if effective > high {
             let need = effective.saturating_sub((limit as f64 * self.config.low_water) as u64);
             let pinned = self.pinned().await?;
-            for (_, hash) in candidates {
+            for hash in self.candidates() {
                 if released >= need {
                     break;
                 }
@@ -601,6 +594,23 @@ impl Inner {
             blobs: state.used.len(),
         };
         Ok(state.usage)
+    }
+
+    /// Returns the listed blobs that are not held, least recently used first.
+    fn candidates(&self) -> Vec<Hash> {
+        let mut candidates: Vec<(u64, Hash)> = {
+            let state = self.state.lock().expect("poisoned");
+            state
+                .used
+                .iter()
+                .filter(|(hash, _)| !state.held.contains_key(*hash))
+                .map(|(hash, used)| (*used, *hash))
+                .collect()
+        };
+        // Sorted outside the lock, which every touch takes: at 100k blobs
+        // the sort takes about 16 ms.
+        candidates.sort_unstable();
+        candidates.into_iter().map(|(_, hash)| hash).collect()
     }
 
     /// Returns the blobs that pins keep.
