@@ -36,11 +36,16 @@ use tracing::{debug, warn};
 
 use crate::{Gateway, HttpError, READ_TIMEOUT, chunks_for};
 
-/// Bytes fetched and served per step.
+/// Bytes fetched and served in the first step of a read.
 ///
-/// A large file streams while it arrives, instead of after the whole range is
-/// in the store.
-const WINDOW: u64 = 4 * 1024 * 1024;
+/// Small, so that a request for missing data gets its first bytes after a
+/// short fetch rather than after a whole [`MAX_WINDOW`].
+const FIRST_WINDOW: u64 = 256 * 1024;
+/// Largest number of bytes fetched and served in one step.
+///
+/// Windows double from [`FIRST_WINDOW`] up to this size. A large file thus
+/// streams while it arrives, with few round trips to the provider.
+const MAX_WINDOW: u64 = 4 * 1024 * 1024;
 
 /// The gateway's store.
 #[derive(Clone)]
@@ -150,34 +155,36 @@ impl Local {
             hash,
             connection,
         };
-        fetcher.fill(&window_at(range.start, range.end)).await?;
+        let mut windows = windows(range);
+        let mut window = windows.next();
+        if let Some(first) = &window {
+            fetcher.fill(first).await?;
+        }
         Ok(async_stream::try_stream! {
             let _hold = hold;
-            let mut start = range.start;
-            while start < range.end {
-                let window = window_at(start, range.end);
-                if start > range.start {
-                    fetcher.fill(&window).await?;
-                }
-                let mut data = self.store.export_ranges(hash, window.clone()).stream();
-                let mut next = window.start;
+            while let Some(current) = window {
+                let mut data = self.store.export_ranges(hash, current.clone()).stream();
+                let mut offset = current.start;
                 while let Some(item) = data.next().await {
                     match item {
                         ExportRangesItem::Size(_) => {}
                         ExportRangesItem::Data(leaf) => {
-                            if leaf.offset != next {
+                            if leaf.offset != offset {
                                 Err(std::io::Error::other("noncontiguous data in the store"))?;
                             }
-                            next += leaf.data.len() as u64;
+                            offset += leaf.data.len() as u64;
                             yield leaf.data;
                         }
                         ExportRangesItem::Error(error) => Err(std::io::Error::other(error))?,
                     }
                 }
-                if next != window.end {
+                if offset != current.end {
                     Err(std::io::Error::other("incomplete data in the store"))?;
                 }
-                start = window.end;
+                window = windows.next();
+                if let Some(next) = &window {
+                    fetcher.fill(next).await?;
+                }
             }
         })
     }
@@ -269,13 +276,56 @@ impl Fetcher {
     }
 }
 
-/// Returns the window of a read from `start`, which ends at `end` at most.
-fn window_at(start: u64, end: u64) -> Range<u64> {
-    start..(start + WINDOW).min(end)
+/// Returns the windows of a read of `range`, in order.
+///
+/// The first is [`FIRST_WINDOW`] long, and each next one twice as long as the
+/// one before, up to [`MAX_WINDOW`].
+fn windows(range: Range<u64>) -> impl Iterator<Item = Range<u64>> {
+    let mut start = range.start;
+    let mut size = FIRST_WINDOW;
+    std::iter::from_fn(move || {
+        if start >= range.end {
+            return None;
+        }
+        let window = start..start.saturating_add(size).min(range.end);
+        start = window.end;
+        size = (size * 2).min(MAX_WINDOW);
+        Some(window)
+    })
 }
 
 /// Logs a failure of the store and returns the answer to the request.
 fn store_failed(error: impl std::fmt::Display) -> HttpError {
     warn!(%error, "store failed");
     HttpError(StatusCode::INTERNAL_SERVER_ERROR, "store failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_double_up_to_the_largest_and_cover_the_range() {
+        let range = 100..20 * 1024 * 1024;
+        let windows: Vec<_> = windows(range.clone()).collect();
+        assert_eq!(windows[0], 100..100 + FIRST_WINDOW);
+        assert_eq!(windows[1].end - windows[1].start, 2 * FIRST_WINDOW);
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.end - window.start <= MAX_WINDOW)
+        );
+        assert_eq!(windows.last().unwrap().end, range.end);
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start);
+        }
+    }
+
+    #[test]
+    fn a_short_range_is_one_window_and_an_empty_one_none() {
+        let mut short = windows(5..10);
+        assert_eq!(short.next(), Some(5..10));
+        assert_eq!(short.next(), None);
+        assert_eq!(windows(7..7).count(), 0);
+    }
 }

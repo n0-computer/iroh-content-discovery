@@ -265,8 +265,8 @@ Without a store, the gateway keeps no content: every request asks a provider.
 [`iroh-blobs-cache`](../iroh-blobs-cache):
 
 - Requests are served from the store. Chunks it lacks are fetched from a
-  provider, Bao-verified into the store, then served, 4 MiB at a time, so
-  large files stream while they arrive.
+  provider, Bao-verified into the store, then served, in steps that grow
+  from 256 KiB to 4 MiB, so large files stream while they arrive.
 - A provider is dialled only when something is missing. Content that is fully
   in the store works offline and after a restart.
 - It is keyed by hash, so the same file under different names or Pkarr keys
@@ -280,9 +280,9 @@ Without a store, the gateway keeps no content: every request asks a provider.
 
 Not done yet:
 
-- Each 4 MiB window that is missing is a separate request to the provider.
+- Each missing step of a read is a separate request to the provider.
   One request for the whole missing range, with the response streamed as the
-  store's bitfield grows, would save a round trip per window.
+  store's bitfield grows, would save a round trip per step.
 - With this in place, the offline caches in front of the gateway (the
   desktop's `iroh-link-embedded` cache and Android's `GatewayClient`) could
   go: they exist because the gateway kept nothing.
