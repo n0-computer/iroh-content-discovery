@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use iroh_blobs::{Hash, HashAndFormat};
-use iroh_blobs_cache::{BlobCache, CacheConfig};
+use iroh_blobs_cache::{BlobCache, CacheConfig, CacheError};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -186,15 +186,21 @@ async fn overlapping_passes_release_the_excess_once() {
 }
 
 #[tokio::test]
-async fn a_low_water_mark_above_the_high_one_is_not_an_overflow() {
+async fn a_configuration_that_cannot_work_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = config(10 * MIB);
-    config.low_water = 2.0;
-    let cache = BlobCache::load(dir.path(), config).await.unwrap();
-    for seed in 0..10 {
-        add(&cache, seed).await;
+    let mut above = config(10 * MIB);
+    above.low_water = 2.0;
+    let mut nan = config(10 * MIB);
+    nan.high_water = f64::NAN;
+    let mut spinning = config(10 * MIB);
+    spinning.eviction_interval = Duration::ZERO;
+    for config in [above, nan, spinning] {
+        let error = BlobCache::load(dir.path(), config.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CacheError::Config { .. }),
+            "{config:?}: {error}"
+        );
     }
-    // Over the high water mark, but under the low one: nothing to release.
-    assert_eq!(cache.evict().await.unwrap().blobs, 10);
-    cache.shutdown().await.unwrap();
 }

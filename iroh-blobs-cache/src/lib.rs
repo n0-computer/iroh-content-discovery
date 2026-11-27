@@ -74,7 +74,7 @@ use iroh_blobs::{
         fs::{FsStore, options::Options},
     },
 };
-use n0_error::{AnyError, e, stack_error};
+use n0_error::{AnyError, e, ensure, stack_error};
 use n0_future::{StreamExt, task::AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -134,6 +134,26 @@ impl CacheConfig {
             save_interval: Duration::from_secs(300),
         }
     }
+
+    /// Rejects values that would make eviction do the wrong thing or spin.
+    fn validate(&self) -> Result<(), CacheError> {
+        // Written so that NaN fails too.
+        ensure!(
+            self.low_water > 0.0 && self.low_water <= self.high_water && self.high_water <= 1.0,
+            CacheError::Config {
+                reason: "watermarks must satisfy 0 < low_water <= high_water <= 1"
+            }
+        );
+        ensure!(
+            !self.gc_interval.is_zero()
+                && !self.eviction_interval.is_zero()
+                && !self.save_interval.is_zero(),
+            CacheError::Config {
+                reason: "intervals must not be zero"
+            }
+        );
+        Ok(())
+    }
 }
 
 /// The state of a cache after its last eviction pass.
@@ -157,6 +177,12 @@ pub struct Usage {
 #[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum CacheError {
+    /// The configuration cannot work.
+    #[error("invalid cache configuration: {reason}")]
+    Config {
+        /// What is wrong with it.
+        reason: &'static str,
+    },
     /// The store could not be opened, or did not carry out a request.
     #[error("blob store failed")]
     Store {
@@ -233,7 +259,18 @@ impl Drop for Hold {
 
 impl BlobCache {
     /// Opens or creates the store in `dir` and starts the eviction task.
+    ///
+    /// The store keeps its database in `blobs.db` and its larger blobs in
+    /// `data/`. The cache adds a file `recency` with the use order. Call it
+    /// within a Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CacheError::Config`] if `config` cannot work, and
+    /// [`CacheError::Store`] if the store cannot be opened or its tags cannot
+    /// be read.
     pub async fn load(dir: impl AsRef<Path>, config: CacheConfig) -> Result<Self, CacheError> {
+        config.validate()?;
         let dir = dir.as_ref().to_owned();
         let mut options = Options::new(&dir);
         options.gc = Some(GcConfig {
