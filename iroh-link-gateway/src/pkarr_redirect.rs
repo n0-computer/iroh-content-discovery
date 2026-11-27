@@ -133,7 +133,7 @@ pub(crate) async fn redirect(
         debug!(key = encoded, "Pkarr cache hit");
         item
     } else {
-        lookup(&gateway, key, encoded).await?
+        lookup(&gateway, key, encoded, false).await?
     };
     debug!(
         key = encoded,
@@ -208,10 +208,13 @@ pub(crate) async fn redirect(
 /// fails or finds an older one. If one is kept, the lookup only gets
 /// [`KEPT_RECORD_WAIT`]: offline, or with a slow DHT, the page loads from the
 /// kept record, and the lookup finishes in the background for later requests.
+/// `patient` waits for the whole lookup instead, and uses the kept record
+/// only if it fails.
 async fn lookup(
     gateway: &Gateway,
     key: [u8; 32],
     encoded: &str,
+    patient: bool,
 ) -> Result<n0_mainline::MutableItem, HttpError> {
     let kept = match &gateway.0.local {
         Some(local) => local.packet(&key).await,
@@ -258,7 +261,13 @@ async fn lookup(
         return resolving.await;
     };
     let mut task = tokio::spawn(resolving);
-    match tokio::time::timeout(KEPT_RECORD_WAIT, &mut task).await {
+    let wait = if patient {
+        // The lookup has its own timeout.
+        LOOKUP_TIMEOUT + KEPT_RECORD_WAIT
+    } else {
+        KEPT_RECORD_WAIT
+    };
+    match tokio::time::timeout(wait, &mut task).await {
         Ok(Ok(Ok(item))) => Ok(item),
         Ok(Ok(Err(error))) => {
             warn!(
@@ -278,6 +287,28 @@ async fn lookup(
             Ok(kept)
         }
     }
+}
+
+/// Returns the content the Pkarr name `key` points at now.
+///
+/// Looks the name up and waits for it, and keeps the record with a store,
+/// so the gateway resolves the name to this content offline too. If the
+/// lookup fails, the kept record answers.
+pub(crate) async fn name_content(
+    gateway: &Gateway,
+    key: [u8; 32],
+) -> Result<iroh_blobs::Hash, HttpError> {
+    let encoded = z32::encode(&key);
+    let item = lookup(gateway, key, &encoded, true).await?;
+    let packet = Packet::parse(item.value())
+        .map_err(|_| HttpError(StatusCode::BAD_GATEWAY, "invalid Pkarr DNS packet"))?;
+    target(&packet, &encoded)
+        .as_deref()
+        .and_then(content_hash)
+        .ok_or(HttpError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the name does not point at content",
+        ))
 }
 
 /// Returns the hash when a target names content, as `<z32>.blake3.net`.

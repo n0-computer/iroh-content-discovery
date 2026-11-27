@@ -276,6 +276,23 @@ impl Gateway {
         local.kept_all().await
     }
 
+    /// Returns the content the Pkarr name `key` points at now.
+    ///
+    /// Waits for the lookup. With a store, the record found is kept, as when
+    /// a page loads the name, so offline the gateway serves the name from
+    /// this content: keep it with [`Gateway::keep`]. If the lookup fails, the
+    /// record kept before answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeepError::Fetch`] if the name cannot be looked up and no
+    /// record is kept, or it does not point at content.
+    pub async fn name_content(&self, key: [u8; 32]) -> Result<Hash, KeepError> {
+        pkarr_redirect::name_content(self, key)
+            .await
+            .map_err(local::keep_fetch_failed)
+    }
+
     /// Sets or replaces the resolver.
     ///
     /// Use it once index discovery has finished, or for a new Mainline node.
