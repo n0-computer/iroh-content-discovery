@@ -88,7 +88,7 @@ impl Local {
             return None;
         }
         let collection = Collection::load(hash, &self.store).await.ok()?;
-        self.touch(hash).await;
+        self.touch_collection(hash).await;
         Some(collection)
     }
 
@@ -100,18 +100,24 @@ impl Local {
     /// are cached as they are served, and evicted on their own.
     pub(crate) async fn keep_collection(&self, hash: Hash, collection: &Collection) {
         match collection.clone().store(&self.store).await {
-            Ok(tag) if tag.hash() == hash => {
-                self.touch(hash).await;
-                if let Ok(bytes) = self.store.get_bytes(hash).await
-                    && let Some(meta) = HashSeq::new(bytes).and_then(|seq| seq.into_iter().next())
-                {
-                    self.touch(meta).await;
-                }
-            }
+            Ok(tag) if tag.hash() == hash => self.touch_collection(hash).await,
             Ok(tag) => {
                 debug!(%hash, stored = %tag.hash(), "collection encodes differently; not kept")
             }
             Err(error) => warn!(%error, %hash, "cannot store collection"),
+        }
+    }
+
+    /// Records a use of the collection at `hash`: its root and its name list.
+    ///
+    /// Both are needed to load it from the store, so they age together.
+    /// Otherwise the name list, used once, is evicted long before the root.
+    async fn touch_collection(&self, hash: Hash) {
+        self.touch(hash).await;
+        if let Ok(bytes) = self.store.get_bytes(hash).await
+            && let Some(names) = HashSeq::new(bytes).and_then(|seq| seq.into_iter().next())
+        {
+            self.touch(names).await;
         }
     }
 
