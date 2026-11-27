@@ -1,7 +1,7 @@
 //! A size-bounded, least-recently-used cache on an iroh-blobs file store.
 //!
 //! [`BlobCache`] opens an [`FsStore`] with garbage collection on and keeps it
-//! within a byte budget:
+//! within a size limit:
 //!
 //! - Every blob the cache knows has a raw tag `cache/<hash>`, which keeps it
 //!   through garbage collection. [`BlobCache::touch`] creates the tag and
@@ -15,8 +15,8 @@
 //!   hash sequence pin keeps the blobs it names too.
 //!
 //! The footprint is what the store occupies on disk: allocated blocks of its
-//! files (partial blobs are sparse) and its database. The budget shrinks to
-//! keep [`CacheConfig::min_free_bytes`] of the disk free.
+//! files (partial blobs are sparse) and its database. The limit drops to keep
+//! [`CacheConfig::min_free_bytes`] of the disk free.
 //!
 //! iroh-blobs offers no way to run garbage collection on demand, so released
 //! bytes come back within [`CacheConfig::gc_interval`]. Until then they count
@@ -25,7 +25,35 @@
 //! The use order is written to a file in the store directory now and then and
 //! on [`BlobCache::shutdown`], so it survives restarts. Tagged blobs it does
 //! not list count as the oldest.
+//!
+//! # Examples
+//!
+//! ```
+//! # #[tokio::main]
+//! # async fn main() -> n0_error::Result<()> {
+//! use iroh_blobs::{Hash, HashAndFormat};
+//! use iroh_blobs_cache::{BlobCache, CacheConfig};
+//!
+//! # let dir = tempfile::tempdir()?;
+//! let cache = BlobCache::load(dir.path(), CacheConfig::new(512 * 1024 * 1024)).await?;
+//! let data = b"some content";
+//! let hash = Hash::new(data);
+//! // Taken before the blob is stored, so that garbage collection cannot
+//! // delete a partial download.
+//! let hold = cache.hold(hash).await?;
+//! cache.store().add_slice(data).temp_tag().await?;
+//! // Records the use, and keeps the blob cached from now on.
+//! cache.touch(hash).await?;
+//! drop(hold);
+//! // Never evicted.
+//! cache.pin("my-site", HashAndFormat::raw(hash)).await?;
+//! cache.shutdown().await?;
+//! # Ok(())
+//! # }
+//! ```
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -34,7 +62,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use iroh_blobs::{
@@ -60,8 +88,9 @@ const PIN_PREFIX: &str = "pin/";
 const RECENCY_FILE: &str = "recency";
 /// Shortest pause between two eviction passes.
 const MIN_PASS_GAP: Duration = Duration::from_secs(1);
-/// Blobs up to this size live in the store's database, which never shrinks,
-/// so dropping them frees no disk space (iroh-blobs' inline limit).
+/// Size up to which iroh-blobs keeps a blob inline, in its database.
+///
+/// The database never shrinks, so dropping these blobs frees no disk space.
 const INLINE_BYTES: u64 = 16 * 1024;
 
 /// Limits and timing of a [`BlobCache`].
@@ -69,12 +98,13 @@ const INLINE_BYTES: u64 = 16 * 1024;
 pub struct CacheConfig {
     /// Upper bound for the store's footprint on disk.
     pub max_bytes: u64,
-    /// Disk space to leave free. The budget shrinks below
-    /// [`Self::max_bytes`] when the disk fills up.
+    /// Disk space to leave free.
+    ///
+    /// The limit drops below [`Self::max_bytes`] when the disk fills up.
     pub min_free_bytes: u64,
-    /// Share of the budget above which eviction starts.
+    /// Share of the limit above which eviction starts.
     pub high_water: f64,
-    /// Share of the budget that eviction brings the footprint down to.
+    /// Share of the limit that eviction brings the footprint down to.
     pub target: f64,
     /// Interval of the store's garbage collection, which deletes evicted blobs.
     pub gc_interval: Duration,
@@ -85,9 +115,10 @@ pub struct CacheConfig {
 }
 
 impl CacheConfig {
-    /// Returns a configuration with a budget of `max_bytes` and defaults
-    /// otherwise: 1 GiB kept free, eviction from 90% down to 70%, garbage
-    /// collection every 30 seconds.
+    /// Returns a configuration with a limit of `max_bytes`.
+    ///
+    /// The other fields have defaults: 1 GiB kept free, eviction from 90%
+    /// down to 70%, and garbage collection every 30 seconds.
     pub fn new(max_bytes: u64) -> Self {
         Self {
             max_bytes,
@@ -108,9 +139,9 @@ pub struct Usage {
     pub footprint: u64,
     /// Bytes released by eviction that garbage collection has not freed yet.
     pub pending: u64,
-    /// The budget, after keeping free disk space.
-    pub budget: u64,
-    /// Blobs with a cache tag.
+    /// The limit in effect, less than the maximum when free disk space is low.
+    pub limit: u64,
+    /// Number of blobs with a cache tag.
     pub blobs: usize,
 }
 
@@ -134,8 +165,9 @@ struct Inner {
     state: Mutex<State>,
     /// Wakes the eviction task early.
     wake: Notify,
-    /// Lets one eviction pass run at a time, so that two passes do not both
-    /// release the same excess.
+    /// Lets one eviction pass run at a time.
+    ///
+    /// Two passes that overlap would both release the same excess.
     passes: tokio::sync::Mutex<()>,
 }
 
@@ -143,13 +175,13 @@ struct Inner {
 struct State {
     /// Last use of every cached blob, in milliseconds since the Unix epoch.
     used: HashMap<Hash, u64>,
-    /// Holds per blob.
+    /// Number of holds per blob.
     held: HashMap<Hash, usize>,
     /// Whether `used` changed since it was written.
     dirty: bool,
     usage: Usage,
     /// When eviction last released something.
-    released_at: Option<std::time::Instant>,
+    released_at: Option<Instant>,
 }
 
 /// Keeps a blob from garbage collection and eviction until dropped.
@@ -233,11 +265,11 @@ impl BlobCache {
         Ok(())
     }
 
-    /// Keeps `hash` from garbage collection and eviction while the returned
-    /// [`Hold`] lives.
+    /// Keeps `hash` from garbage collection and eviction.
     ///
-    /// Take it before fetching a blob into the store, or garbage collection
-    /// may delete a partial download, and while reading one.
+    /// The protection lasts while the returned [`Hold`] lives. Take it before
+    /// fetching a blob into the store, or garbage collection may delete a
+    /// partial download, and while reading one.
     pub async fn hold(&self, hash: Hash) -> Result<Hold> {
         let tag = self
             .inner
@@ -261,8 +293,9 @@ impl BlobCache {
         })
     }
 
-    /// Pins `content` under `name`. Eviction never drops it. A hash sequence
-    /// pin keeps the blobs it names too.
+    /// Pins `content` under `name`, so that eviction never drops it.
+    ///
+    /// A hash sequence pin keeps the blobs it names too.
     pub async fn pin(&self, name: &str, content: HashAndFormat) -> Result<()> {
         self.inner
             .store
@@ -272,7 +305,9 @@ impl BlobCache {
         Ok(())
     }
 
-    /// Removes the pin `name`. Its blobs stay cached if they have been used.
+    /// Removes the pin `name`.
+    ///
+    /// Its blobs stay cached if they have been used.
     pub async fn unpin(&self, name: &str) -> Result<()> {
         self.inner
             .store
@@ -287,16 +322,20 @@ impl BlobCache {
         self.inner.max_bytes.load(Ordering::Relaxed)
     }
 
-    /// Changes the upper bound for the store's footprint. A smaller bound
-    /// starts an eviction pass.
+    /// Changes the upper bound for the store's footprint.
+    ///
+    /// A smaller bound starts an eviction pass.
     pub fn set_max_bytes(&self, max_bytes: u64) {
+        info!(max_bytes, "blob cache limit changed");
         self.inner.max_bytes.store(max_bytes, Ordering::Relaxed);
         self.inner.wake.notify_one();
     }
 
-    /// Drops every cached blob. Garbage collection deletes them, except
-    /// pinned and held ones.
+    /// Drops every cached blob.
+    ///
+    /// Garbage collection deletes them, except pinned and held ones.
     pub async fn clear(&self) -> Result<()> {
+        info!("clearing the blob cache");
         self.inner.store.tags().delete_prefix(CACHE_PREFIX).await?;
         let mut state = self.inner.state.lock().expect("poisoned");
         state.used.clear();
@@ -342,13 +381,14 @@ impl Inner {
         state.dirty = true;
     }
 
-    /// Measures the store, and releases the least recently used blobs if it
-    /// is over the high water mark.
+    /// Measures the store and releases least recently used blobs if it is too large.
+    ///
+    /// Releasing starts above the high water mark and stops at the target.
     async fn pass(&self) -> Result<Usage> {
         let _pass = self.passes.lock().await;
         let footprint = footprint(self.dir.clone()).await?;
         let free = fs4::available_space(&self.dir).unwrap_or(u64::MAX);
-        let budget = self
+        let limit = self
             .max_bytes
             .load(Ordering::Relaxed)
             .min(footprint.saturating_add(free.saturating_sub(self.config.min_free_bytes)));
@@ -375,10 +415,10 @@ impl Inner {
             (state.usage.pending, candidates)
         };
         let effective = footprint.saturating_sub(pending);
-        let high = (budget as f64 * self.config.high_water) as u64;
+        let high = (limit as f64 * self.config.high_water) as u64;
         let mut released = 0;
         if effective > high {
-            let need = effective.saturating_sub((budget as f64 * self.config.target) as u64);
+            let need = effective.saturating_sub((limit as f64 * self.config.target) as u64);
             let pinned = self.pinned().await?;
             for (_, hash) in candidates {
                 if released >= need {
@@ -435,24 +475,25 @@ impl Inner {
             }
             info!(
                 footprint,
-                budget, released, "evicted least recently used blobs"
+                limit, released, "evicted least recently used blobs"
             );
         }
         let mut state = self.state.lock().expect("poisoned");
         if released > 0 {
-            state.released_at = Some(std::time::Instant::now());
+            state.released_at = Some(Instant::now());
         }
         state.usage = Usage {
             footprint,
             pending: state.usage.pending + released,
-            budget,
+            limit,
             blobs: state.used.len(),
         };
         Ok(state.usage)
     }
 
-    /// Returns the blobs that pins keep: the pinned roots and the children of
-    /// hash sequence pins.
+    /// Returns the blobs that pins keep.
+    ///
+    /// These are the pinned roots and the children of hash sequence pins.
     async fn pinned(&self) -> Result<HashSet<Hash>> {
         let mut pinned = HashSet::new();
         let mut tags = self.store.tags().list_prefix(PIN_PREFIX).await?;
@@ -469,8 +510,10 @@ impl Inner {
         Ok(pinned)
     }
 
-    /// Estimates the disk space that deleting `hash` frees: its data and
-    /// outboard, or nothing for blobs inlined into the database.
+    /// Estimates the disk space that deleting `hash` frees.
+    ///
+    /// That is its data and outboard, or nothing for a blob inlined into the
+    /// database.
     async fn reclaimable(&self, hash: Hash) -> u64 {
         let bytes = match self.store.blobs().status(hash).await {
             Ok(BlobStatus::Complete { size }) => size,
@@ -525,14 +568,14 @@ impl Inner {
 ///
 /// [`BlobCache`] aborts it when its last clone is dropped.
 async fn run(inner: Arc<Inner>) {
-    let mut last_save = std::time::Instant::now();
+    let mut last_save = Instant::now();
     loop {
         if let Err(error) = inner.pass().await {
             warn!(%error, "eviction pass failed");
         }
         if last_save.elapsed() >= inner.config.save_interval {
             inner.save().await;
-            last_save = std::time::Instant::now();
+            last_save = Instant::now();
         }
         let woken = tokio::select! {
             _ = inner.wake.notified() => true,
@@ -544,7 +587,7 @@ async fn run(inner: Arc<Inner>) {
     }
 }
 
-/// Bytes allocated by the files below `dir`.
+/// Returns the bytes allocated by the files below `dir`.
 async fn footprint(dir: PathBuf) -> Result<u64> {
     tokio::task::spawn_blocking(move || allocated(&dir))
         .await
@@ -566,10 +609,11 @@ fn allocated(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-/// Disk space a file occupies, which is less than its length if it is sparse.
+/// Returns the disk space a file occupies.
+///
+/// That is less than its length if it is sparse.
 #[cfg(unix)]
 fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
     metadata.blocks() * 512
 }
 
@@ -578,6 +622,7 @@ fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
     metadata.len()
 }
 
+/// The use order, as written to [`RECENCY_FILE`].
 #[derive(Serialize, Deserialize)]
 struct Recency {
     entries: Vec<([u8; 32], u64)>,

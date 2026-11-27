@@ -18,11 +18,11 @@ drop(hold);
 cache.pin("my-site", HashAndFormat::hash_seq(root)).await?;
 ```
 
-- Every cached blob has a raw tag `cache/<hash>`. Above 90% of the budget,
+- Every cached blob has a raw tag `cache/<hash>`. Above 90% of the limit,
   the least recently used lose their tags until the footprint is down to
   70%, and the store's garbage collection deletes them.
 - The footprint is what the store occupies on disk: allocated blocks of its
-  files (partial blobs are sparse files) and its database. The budget shrinks
+  files (partial blobs are sparse files) and its database. The limit drops
   to keep `min_free_bytes` of the disk free.
 - iroh-blobs cannot run garbage collection on demand
   ([#235](https://github.com/n0-computer/iroh-blobs/issues/235)), so released
