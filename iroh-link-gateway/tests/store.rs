@@ -16,6 +16,8 @@ use udp_addr_index::{Limits, Server};
 
 /// Larger than the store's streaming window, so it streams in several steps.
 const BIG: usize = 6 * 1024 * 1024 + 123;
+/// A file that is only partly fetched.
+const PART: usize = 100 * 1024;
 
 #[tokio::test]
 async fn stored_content_is_served_without_a_provider() {
@@ -46,10 +48,19 @@ async fn run() {
         .await
         .unwrap();
     let wasm = provider_store.blobs().add_bytes(big.clone()).await.unwrap();
-    let website = Collection::from_iter([("index.html", page.hash), ("app.wasm", wasm.hash)])
-        .store(&provider_store)
+    let part = provider_store
+        .blobs()
+        .add_bytes(big[..PART].to_vec())
         .await
         .unwrap();
+    let website = Collection::from_iter([
+        ("index.html", page.hash),
+        ("app.wasm", wasm.hash),
+        ("part.bin", part.hash),
+    ])
+    .store(&provider_store)
+    .await
+    .unwrap();
     let provider = Endpoint::builder(presets::Minimal)
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .unwrap()
@@ -120,10 +131,21 @@ async fn run() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.bytes().await.unwrap().as_ref(), big.as_slice());
+    // Only the start and the end of this one: its type, and its size.
+    for (range, bytes) in [("0-8191", &big[..8192]), ("-100", &big[PART - 100..PART])] {
+        let res = client
+            .get(format!("{base}/blake3/{hash}/part.bin"))
+            .header(header::RANGE, format!("bytes={range}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(res.bytes().await.unwrap().as_ref(), bytes);
+    }
 
-    // Served blobs are cached: the collection root, its names, both files.
+    // Served blobs are cached: the collection root, its names, the files.
     let usage = cache.evict().await.unwrap();
-    assert_eq!(usage.blobs, 4, "{usage:?}");
+    assert_eq!(usage.blobs, 5, "{usage:?}");
 
     // Offline: the provider is gone, and a new gateway has no memory of it.
     provider_router.shutdown().await.unwrap();
@@ -155,6 +177,13 @@ async fn run() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+    // What the store lacks fails with a status, not with a body cut short.
+    let res = client
+        .get(format!("{base}/blake3/{hash}/part.bin"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
     // Before any network: no resolver yet, and the stored site still loads.
     let base = serve(Gateway::with_cache(

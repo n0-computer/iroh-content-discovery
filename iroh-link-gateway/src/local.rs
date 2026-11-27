@@ -19,11 +19,12 @@
 
 use std::ops::Range;
 
+use axum::http::StatusCode;
 use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh_blobs::{
     Hash,
-    api::{Store, proto::ExportRangesItem},
+    api::{Store, proto::ExportRangesItem, remote::GetProgressItem},
     format::collection::Collection,
     hashseq::HashSeq,
     protocol::GetRequest,
@@ -33,7 +34,7 @@ use iroh_mainline_endpoint_discovery::{decode_signed_packet, encode_signed_packe
 use n0_future::{Stream, StreamExt};
 use tracing::{debug, warn};
 
-use crate::{Gateway, HttpError, chunks_for};
+use crate::{Gateway, HttpError, READ_TIMEOUT, chunks_for};
 
 /// Bytes fetched and served per step, so a large file streams while it
 /// arrives instead of after the whole range is in the store.
@@ -121,44 +122,39 @@ impl Local {
         }
     }
 
-    /// Streams `range` of `hash`, fetching missing chunks into the store first.
+    /// Opens `range` of `hash` for reading, fetching missing chunks into the store.
     ///
-    /// A provider is dialled only when chunks are missing: `connection` if
-    /// given, otherwise one for `root`, the hash the request named.
-    pub(crate) fn stream(
+    /// The first window is in the store before this returns, so a request
+    /// that cannot get it fails with a status instead of a body that stops
+    /// short. Later windows are fetched while the body streams. See
+    /// [`Fetcher::fill`] for which provider is asked.
+    pub(crate) async fn read(
         self,
         gateway: Gateway,
         root: Hash,
         hash: Hash,
-        mut connection: Option<Connection>,
+        connection: Option<Connection>,
         range: Range<u64>,
-    ) -> impl Stream<Item = std::io::Result<Bytes>> + Send {
-        async_stream::try_stream! {
-            // Keeps a partial download through garbage collection, and the
-            // blob out of eviction while it is read.
-            let _hold = self.cache.hold(hash).await.map_err(std::io::Error::other)?;
-            self.touch(hash).await;
+    ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + Send, HttpError> {
+        // Keeps a partial download through garbage collection, and the blob
+        // out of eviction while it is read.
+        let hold = self.cache.hold(hash).await.map_err(store_failed)?;
+        self.touch(hash).await;
+        let mut fetcher = Fetcher {
+            store: self.store.clone(),
+            gateway,
+            root,
+            hash,
+            connection,
+        };
+        fetcher.fill(&window_at(range.start, range.end)).await?;
+        Ok(async_stream::try_stream! {
+            let _hold = hold;
             let mut start = range.start;
             while start < range.end {
-                let window = start..(start + WINDOW).min(range.end);
-                let have = self.store.observe(hash).await.map_err(std::io::Error::other)?.ranges;
-                let missing = chunks_for(&window) - have;
-                if !missing.is_empty() {
-                    let conn = match &connection {
-                        Some(conn) if conn.close_reason().is_none() => conn.clone(),
-                        _ => {
-                            let conn = gateway.connection(root).await.map_err(io_error)?;
-                            connection = Some(conn.clone());
-                            conn
-                        }
-                    };
-                    debug!(%hash, ?missing, "fetching into the store");
-                    self.store
-                        .remote()
-                        .execute_get(conn, GetRequest::blob_ranges(hash, missing))
-                        .complete()
-                        .await
-                        .map_err(std::io::Error::other)?;
+                let window = window_at(start, range.end);
+                if start > range.start {
+                    fetcher.fill(&window).await?;
                 }
                 let mut data = self.store.export_ranges(hash, window.clone()).stream();
                 let mut next = window.start;
@@ -180,7 +176,7 @@ impl Local {
                 }
                 start = window.end;
             }
-        }
+        })
     }
 
     /// Keeps the newest verified Pkarr record of `key`.
@@ -212,6 +208,71 @@ fn packet_tag(key: &[u8; 32]) -> String {
     format!("pkarr/{}", z32::encode(key))
 }
 
-fn io_error(error: HttpError) -> std::io::Error {
-    std::io::Error::other(error.1)
+/// Fetches the chunks of one blob that the store lacks.
+struct Fetcher {
+    store: Store,
+    gateway: Gateway,
+    /// The hash the request named, whose providers also have `hash`.
+    root: Hash,
+    hash: Hash,
+    /// The provider of the last fetch, used again while it stays open.
+    connection: Option<Connection>,
+}
+
+impl Fetcher {
+    /// Fetches the chunks of `window` that the store lacks.
+    ///
+    /// A provider is dialled only when chunks are missing: the last one if it
+    /// is still open, otherwise one for `root`.
+    async fn fill(&mut self, window: &Range<u64>) -> Result<(), HttpError> {
+        let have = self
+            .store
+            .observe(self.hash)
+            .await
+            .map_err(store_failed)?
+            .ranges;
+        let missing = chunks_for(window) - have;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let connection = match &self.connection {
+            Some(connection) if connection.close_reason().is_none() => connection.clone(),
+            _ => {
+                let connection = self.gateway.connection(self.root).await?;
+                self.connection = Some(connection.clone());
+                connection
+            }
+        };
+        debug!(hash = %self.hash, ?missing, "fetching into the store");
+        let progress = self
+            .store
+            .remote()
+            .execute_get(connection, GetRequest::blob_ranges(self.hash, missing))
+            .stream();
+        let mut progress = std::pin::pin!(progress);
+        // A provider that stops sending fails the request, as it does
+        // without a store.
+        loop {
+            let item = tokio::time::timeout(READ_TIMEOUT, progress.next())
+                .await
+                .map_err(HttpError::timeout)?;
+            match item {
+                Some(GetProgressItem::Progress(_)) => {}
+                Some(GetProgressItem::Done(_)) => return Ok(()),
+                Some(GetProgressItem::Error(error)) => return Err(HttpError::upstream(error)),
+                None => return Err(HttpError::upstream("fetch ended without a result")),
+            }
+        }
+    }
+}
+
+/// Returns the window of a read from `start`, which ends at `end` at most.
+fn window_at(start: u64, end: u64) -> Range<u64> {
+    start..(start + WINDOW).min(end)
+}
+
+/// Logs a failure of the store and returns the answer to the request.
+fn store_failed(error: impl std::fmt::Display) -> HttpError {
+    warn!(%error, "store failed");
+    HttpError(StatusCode::INTERNAL_SERVER_ERROR, "store failed")
 }

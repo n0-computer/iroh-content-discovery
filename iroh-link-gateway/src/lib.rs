@@ -720,6 +720,12 @@ impl HttpError {
     }
 }
 
+impl From<HttpError> for std::io::Error {
+    fn from(error: HttpError) -> Self {
+        std::io::Error::other(error.1)
+    }
+}
+
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         debug!(status = %self.0, reason = self.1, "returning gateway error");
@@ -1492,7 +1498,11 @@ async fn serve_blob(
     let body = if method == Method::HEAD || range.is_empty() {
         Body::empty()
     } else if let Some(local) = gateway.0.local.clone() {
-        Body::from_stream(local.stream(gateway.clone(), root, hash, source.connection, range))
+        Body::from_stream(
+            local
+                .read(gateway.clone(), root, hash, source.connection, range)
+                .await?,
+        )
     } else {
         let connection = source
             .connection
@@ -1545,15 +1555,17 @@ fn multipart_content(
 ) -> impl n0_future::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::try_stream! {
         for range in ranges {
-            yield Bytes::from(part_header(&source, &range, &boundary));
             if let Some(local) = gateway.0.local.clone() {
-                let mut data = Box::pin(local.stream(gateway.clone(), root, hash, source.connection.clone(), range));
+                let data = local.read(gateway.clone(), root, hash, source.connection.clone(), range.clone()).await?;
+                yield Bytes::from(part_header(&source, &range, &boundary));
+                let mut data = Box::pin(data);
                 while let Some(bytes) = data.next().await { yield bytes?; }
             } else {
                 let connection = source.connection.clone().ok_or_else(|| std::io::Error::other("no provider"))?;
                 let (content, size) = tokio::time::timeout(READ_TIMEOUT, start(&connection, hash, chunks_for(&range))).await
                     .map_err(std::io::Error::other)?.map_err(std::io::Error::other)?;
                 if size != source.size { Err(std::io::Error::other("provider changed blob size"))?; }
+                yield Bytes::from(part_header(&source, &range, &boundary));
                 let mut data = Box::pin(stream_content(content, connection, range, hash));
                 while let Some(bytes) = data.next().await { yield bytes?; }
             }
