@@ -121,7 +121,7 @@ pub struct Usage {
 #[derive(Debug, Clone)]
 pub struct BlobCache {
     inner: Arc<Inner>,
-    _task: Arc<AbortOnDropHandle<()>>,
+    task: Arc<AbortOnDropHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -201,7 +201,7 @@ impl BlobCache {
         let task = n0_future::task::spawn(run(inner.clone()));
         Ok(Self {
             inner,
-            _task: Arc::new(AbortOnDropHandle::new(task)),
+            task: Arc::new(AbortOnDropHandle::new(task)),
         })
     }
 
@@ -310,8 +310,9 @@ impl BlobCache {
         self.inner.pass().await
     }
 
-    /// Writes the use order and shuts the store down.
+    /// Stops the eviction task, writes the use order, and shuts the store down.
     pub async fn shutdown(&self) -> Result<()> {
+        self.task.abort();
         self.inner.save().await;
         self.inner.store.shutdown().await?;
         Ok(())
