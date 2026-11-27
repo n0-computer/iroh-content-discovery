@@ -240,6 +240,9 @@ impl Gateway {
         let local = self.0.local.as_ref().ok_or(e!(KeepError::NoStore))?;
         let (content, connection) = match self.collection(hash).await {
             Ok(source) => (HashAndFormat::hash_seq(hash), source.connection),
+            // Only a root that was read and is no collection is kept raw. A
+            // root that could not be read fails: kept raw, a collection would
+            // never work offline.
             Err(HttpError(StatusCode::UNPROCESSABLE_ENTITY, _)) => (HashAndFormat::raw(hash), None),
             Err(error) => return Err(local::keep_fetch_failed(error)),
         };
@@ -663,7 +666,11 @@ impl Gateway {
         debug!(%hash, "reading collection");
         let collection = read_collection(&connection, hash).await.map_err(|error| {
             debug!(%hash, ?error, "read collection failed");
-            HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
+            if error.not_collection {
+                HttpError(StatusCode::UNPROCESSABLE_ENTITY, "not a collection")
+            } else {
+                HttpError(StatusCode::BAD_GATEWAY, "cannot read the collection")
+            }
         })?;
         debug!(%hash, entries = collection.iter().count(), "collection ready");
         if let Some(local) = &self.0.local {
@@ -1670,18 +1677,105 @@ async fn start(
     Ok(result)
 }
 
-async fn read_collection(connection: &Connection, hash: Hash) -> n0_error::Result<Collection> {
+/// Why a collection could not be read.
+#[derive(Debug)]
+struct ReadCollectionError {
+    /// The root was read, or its size seen, and it is no collection. Else
+    /// the root could not be read: the provider is not reachable, failed, or
+    /// does not have it.
+    not_collection: bool,
+    error: n0_error::AnyError,
+}
+
+impl std::fmt::Display for ReadCollectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+
+/// Reads the collection at `hash` over `connection`.
+///
+/// A root that is read but does not parse, or whose metadata the provider
+/// does not send, is no collection. A failure before the root is read is
+/// not, so a transfer error is not taken for a raw blob.
+async fn read_collection(
+    connection: &Connection,
+    hash: Hash,
+) -> Result<Collection, ReadCollectionError> {
     let request = GetRequest::new(
         hash,
         ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::all()]),
     );
-    let connected = fsm::start(connection.clone(), request, Default::default())
-        .next()
-        .await?;
-    let ConnectedNext::StartRoot(root) = connected.next().await? else {
-        bail_any!("expected collection root");
+    let root = async {
+        let connected = fsm::start(connection.clone(), request, Default::default())
+            .next()
+            .await?;
+        let ConnectedNext::StartRoot(root) = connected.next().await? else {
+            bail_any!("expected collection root");
+        };
+        let (content, size) = root.next().next().await?;
+        Ok::<_, n0_error::AnyError>((content, size))
     };
-    let (end, links) = read_collection_blob(root.next(), MAX_COLLECTION_ROOT_BYTES).await?;
+    let read = async {
+        let (content, size) = root.await?;
+        if size > MAX_COLLECTION_ROOT_BYTES || !size.is_multiple_of(32) {
+            return Ok(Err(anyerr!(
+                "collection root is {size} bytes, no hash sequence within its {MAX_COLLECTION_ROOT_BYTES} byte limit"
+            )));
+        }
+        read_blob_content(content, size, MAX_COLLECTION_ROOT_BYTES)
+            .await
+            .map(Ok)
+    };
+    let (end, links) = match read.await {
+        Ok(Ok(root)) => root,
+        Ok(Err(error)) => {
+            return Err(ReadCollectionError {
+                not_collection: true,
+                error,
+            });
+        }
+        // A provider that has the root but not the metadata it names may
+        // reset the stream before the root arrives. Asked for the root
+        // alone, it sends it: then it is no collection.
+        Err(error) => {
+            let not_collection = read_blob_root(connection, hash).await.is_ok();
+            return Err(ReadCollectionError {
+                not_collection,
+                error,
+            });
+        }
+    };
+    parse_collection(end, links)
+        .await
+        .map_err(|error| ReadCollectionError {
+            not_collection: true,
+            error,
+        })
+}
+
+/// Reads the blob `hash`, if it is at most a collection root's size limit.
+async fn read_blob_root(connection: &Connection, hash: Hash) -> n0_error::Result<()> {
+    let connected = fsm::start(
+        connection.clone(),
+        GetRequest::blob(hash),
+        Default::default(),
+    )
+    .next()
+    .await?;
+    let ConnectedNext::StartRoot(root) = connected.next().await? else {
+        bail_any!("expected blob root");
+    };
+    let (end, _) = read_collection_blob(root.next(), MAX_COLLECTION_ROOT_BYTES).await?;
+    let EndBlobNext::Closing(closing) = end.next() else {
+        bail_any!("unexpected child blob");
+    };
+    closing.next().await?;
+    Ok(())
+}
+
+/// Reads the rest of a collection whose root, `links`, has been read.
+async fn parse_collection(end: AtEndBlob, links: Vec<u8>) -> n0_error::Result<Collection> {
     let mut links = HashSeq::new(links.into()).ok_or_else(|| anyerr!("invalid hash sequence"))?;
     let meta_hash = links
         .pop_front()
@@ -1713,13 +1807,22 @@ async fn read_collection_blob(
     header: AtBlobHeader,
     limit: u64,
 ) -> n0_error::Result<(AtEndBlob, Vec<u8>)> {
-    let (mut content, size) = header.next().await?;
+    let (content, size) = header.next().await?;
     // The size header is untrusted: use it only to reject oversized responses,
     // and enforce the limit again while collecting Bao-verified bytes.
     ensure_any!(
         size <= limit,
         "collection component is {size} bytes, above its {limit} byte limit"
     );
+    read_blob_content(content, size, limit).await
+}
+
+/// Collects the Bao-verified bytes of a blob of `size`, at most `limit`.
+async fn read_blob_content(
+    mut content: AtBlobContent,
+    size: u64,
+    limit: u64,
+) -> n0_error::Result<(AtEndBlob, Vec<u8>)> {
     let mut bytes = Vec::new();
     loop {
         match content.next().await {
@@ -1913,6 +2016,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("byte limit"), "{error:#}");
+            assert!(error.not_collection);
 
             // A forged name count is rejected before allocating its strings.
             let meta = store
@@ -1940,6 +2044,17 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("byte limit"), "{error:#}");
+            assert!(error.not_collection);
+
+            // A raw blob that looks like a hash sequence is no collection.
+            let raw = store.blobs().add_bytes(vec![7; 64]).await.unwrap();
+            let error = read_collection(&connection, raw.hash).await.unwrap_err();
+            assert!(error.not_collection, "{error}");
+            // A root the provider cannot send is not taken for a raw blob.
+            let error = read_collection(&connection, Hash::new(b"not provided"))
+                .await
+                .unwrap_err();
+            assert!(!error.not_collection, "{error}");
 
             client.close().await;
             router.shutdown().await.unwrap();
