@@ -167,3 +167,20 @@ async fn clear_drops_everything_but_pins() {
     assert_eq!(cache.evict().await.unwrap().blobs, 0);
     cache.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn overlapping_passes_release_the_excess_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::load(dir.path(), config(10 * MIB)).await.unwrap();
+    for seed in 0..10 {
+        add(&cache, seed).await;
+    }
+    let (first, second) = tokio::join!(cache.evict(), cache.evict());
+    first.unwrap();
+    second.unwrap();
+    // About 10 MiB on disk and a target of 7 MiB: one pass releases about
+    // 4 MiB, and the other finds nothing left to do.
+    let usage = cache.usage();
+    assert!(usage.pending <= 5 * MIB, "{usage:?}");
+    cache.shutdown().await.unwrap();
+}

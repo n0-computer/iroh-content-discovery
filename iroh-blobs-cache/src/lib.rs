@@ -134,6 +134,9 @@ struct Inner {
     state: Mutex<State>,
     /// Wakes the eviction task early.
     wake: Notify,
+    /// Lets one eviction pass run at a time, so that two passes do not both
+    /// release the same excess.
+    passes: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -197,6 +200,7 @@ impl BlobCache {
             config,
             state: Mutex::new(state),
             wake: Notify::new(),
+            passes: tokio::sync::Mutex::new(()),
         });
         let task = n0_future::task::spawn(run(inner.clone()));
         Ok(Self {
@@ -341,6 +345,7 @@ impl Inner {
     /// Measures the store, and releases the least recently used blobs if it
     /// is over the high water mark.
     async fn pass(&self) -> Result<Usage> {
+        let _pass = self.passes.lock().await;
         let footprint = footprint(self.dir.clone()).await?;
         let free = fs4::available_space(&self.dir).unwrap_or(u64::MAX);
         let budget = self
