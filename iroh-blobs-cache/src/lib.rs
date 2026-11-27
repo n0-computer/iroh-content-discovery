@@ -65,6 +65,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// The iroh-blobs crate, whose types appear in this crate's API.
+pub use iroh_blobs;
 use iroh_blobs::{
     BlobFormat, Hash, HashAndFormat,
     api::{Store, TempTag, proto::BlobStatus},
@@ -201,7 +203,8 @@ pub enum CacheError {
 /// A size-bounded cache on an iroh-blobs [`FsStore`].
 ///
 /// Cheap to clone. The eviction task runs until the last clone is dropped or
-/// [`Self::shutdown`] is called.
+/// [`Self::shutdown`] is called. Dropping the last clone without a shutdown
+/// loses the uses recorded since the use order was last written.
 #[derive(Clone)]
 pub struct BlobCache {
     inner: Arc<Inner>,
@@ -248,6 +251,7 @@ struct State {
 }
 
 /// Keeps a blob from garbage collection and eviction until dropped.
+#[must_use = "the blob is only kept while the Hold lives"]
 pub struct Hold {
     inner: Arc<Inner>,
     hash: Hash,
@@ -329,6 +333,9 @@ impl BlobCache {
     }
 
     /// Returns the store.
+    ///
+    /// Add and read blobs through it as usual. The cache owns the tags that
+    /// start with `cache/` and `pin/`, so leave those to it.
     pub fn store(&self) -> &Store {
         &self.inner.store
     }
@@ -439,6 +446,8 @@ impl BlobCache {
     }
 
     /// Returns the state after the last eviction pass.
+    ///
+    /// Before the first pass, every field is zero.
     pub fn usage(&self) -> Usage {
         self.inner.state.lock().expect("poisoned").usage
     }
@@ -454,6 +463,9 @@ impl BlobCache {
     }
 
     /// Stops the eviction task, writes the use order, and shuts the store down.
+    ///
+    /// The store is shut down for every clone, so their operations fail
+    /// afterwards.
     pub async fn shutdown(&self) -> Result<(), CacheError> {
         self.task.abort();
         self.inner.save().await;
